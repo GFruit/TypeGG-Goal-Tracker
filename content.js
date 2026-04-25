@@ -2504,20 +2504,11 @@ async function getExpRankByUsername(username) {
       if (selectedMode === "rank") {
         if (rankFetchedRank == null) return;
 
-        if (nextRankMode) {
-          // Save with 0 for now; updateRankGoals() will fetch the real target in the background
-          gainTarget = 0; 
-        } else if (selectedType === "exp") {
-          // For exp rank goals, save with 0 initially to close modal fast
-          // updateExpRankGoals() will fetch the real target in the background
-          gainTarget = 0;
-        } else {
-          // PP rank goal - still compute synchronously for now (could be optimized later)
-          const currentRank = data.globalRank ?? null;
-          const { pp: targetPp } = await computeRankTarget(rankFetchedRank, currentRank);
-          gainTarget = targetPp - currentVal;
-          if (gainTarget <= 0) gainTarget = 0; // already past, goal starts done
-        }
+        // All rank goals (next-rank or regular, PP or EXP) save with target=0
+        // initially so the modal closes instantly. updateRankGoals() /
+        // updateExpRankGoals() compute the real target in the background; the
+        // goal display shows "Loading PP..." / "Loading EXP..." in the meantime.
+        gainTarget = 0;
 
       } else if (selectedMode === "player") {
           if (playerFetchedValue == null) return;
@@ -2552,7 +2543,7 @@ async function getExpRankByUsername(username) {
         targetUsername: selectedMode === "player" ? playerFetchedName : undefined,
         maxQuotes: isMaxQuotes || undefined,
         filter: selectedType === "races" ? selectedFilter : undefined,
-        targetLoaded: selectedMode === "rank" && nextRankMode ? false : true, // false for next rank goals that need async loading
+        targetLoaded: selectedMode === "rank" ? false : true, // false for rank goals — target is loaded async by updateRankGoals/updateExpRankGoals
         [cfg.baselineKey]: currentVal,
         recurrence: selectedRec,
         periodStart: isRecurring ? getCurrentPeriodStart(selectedRec) : null,
@@ -2605,12 +2596,12 @@ async function getExpRankByUsername(username) {
 
     // Progress text — always gain / target
     const gainTextEl = document.getElementById(`${goalId}-gain-text`);
-    if (gd.nextRank && !gd.targetLoaded) {
-      gainTextEl.textContent = "Loading target...";
+    if (gd.targetRank && !gd.targetLoaded) {
+      // Any rank goal whose target hasn't been resolved by updateRankGoals /
+      // updateExpRankGoals yet — show a type-specific loading message.
+      gainTextEl.textContent = type === "exp" ? "Loading EXP..." : "Loading PP...";
     } else if (gd.maxQuotes && gd.target === 0) {
       gainTextEl.textContent = "Loading target...";
-    } else if (gd.targetRank && gd.target === 0 && type === "exp" && !gd.targetLoaded) {
-      gainTextEl.textContent = "Loading EXP...";
     } else if (gd.maxQuotes) {
       // For max quotes, show total completed / total max instead of gain / remaining
       const currentQuotes = gd.baselineQuotes + gain;
@@ -3165,10 +3156,11 @@ async function getExpRankByUsername(username) {
           ? gd.targetRank
           : gd.targetRank + 1;
         const newPp = await ppByRank(trackedRank);
-        const newTarget = newPp - gd.baselinePp;
+        const newTarget = Math.max(0, newPp - gd.baselinePp);
 
-        if (Math.abs(newTarget - gd.target) > 0.01) {
+        if (Math.abs(newTarget - gd.target) > 0.01 || !gd.targetLoaded) {
           gd.target = newTarget;
+          gd.targetLoaded = true;
           goals[i] = gd;
           saveGoals("pp");
         }
@@ -3242,10 +3234,11 @@ async function getExpRankByUsername(username) {
           ? gd.targetRank
           : gd.targetRank + 1;
         const newExp = await expByRank(trackedRank);
-        const newTarget = newExp - gd.baselineExp;
+        const newTarget = Math.max(0, newExp - gd.baselineExp);
 
-        if (Math.abs(newTarget - gd.target) > 0.01) {
+        if (Math.abs(newTarget - gd.target) > 0.01 || !gd.targetLoaded) {
           gd.target = newTarget;
+          gd.targetLoaded = true;
           goals[i] = gd;
           saveGoals("exp");
         }
