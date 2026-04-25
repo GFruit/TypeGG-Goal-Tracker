@@ -2001,7 +2001,7 @@ async function getExpRankByUsername(username) {
     chars: {
     presets: [1000, 5000, 10000, 25000, 50000, 100000],
     baselineKey: "baselineChars",
-    statKey: "charactersTyped",
+    statKey: "completionCharactersTyped",
     storageKey: "gt-goals-chars",
     label: "Chars",
     supportsTarget: true,
@@ -2753,7 +2753,7 @@ async function getExpRankByUsername(username) {
       quotes:         data.stats?.quotesTyped,
       playtime:       data.stats?.playTime,
       rank:           data.globalRank ?? null,
-      chars:          data.stats?.charactersTyped,
+      chars:          data.stats?.completionCharactersTyped,
       quickplayRaces: data.stats?.quickplayRaces,
       soloRaces:      data.stats?.soloRaces,
     };
