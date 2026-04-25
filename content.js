@@ -2114,39 +2114,27 @@ async function getExpRankByUsername(username) {
 
       if (nextRankMode) {
         // ── Next-rank sub-mode ─────────────────────────────────
-        customInput.style.display = "none";
+        // Keep the manual rank input visible so the user can switch to a
+        // specific rank without first un-toggling Next Rank. Typing into
+        // the input will deactivate Next Rank in the input handler below.
+        customInput.style.display = "";
+        customInput.type          = "number";
+        customInput.placeholder   = "Rank #";
         nextRankToggleBtn.classList.add("active");
-        
+
         const isExpType = selectedType === "exp";
         const currentRankValue = isExpType ? currentStats.expRank : currentStats.rank;
         const nr = currentRankValue != null ? currentRankValue - 1 : null;
-        
+
         if (nr != null && nr >= 1) {
-          modeHint.textContent   = isExpType 
-            ? `Loading EXP for rank #${nr}…` 
-            : `Loading PP for rank #${nr}…`;
+          // Just show the user's current rank — the resolved EXP/PP for the
+          // next rank is loaded asynchronously by updateRankGoals() /
+          // updateExpRankGoals() and surfaces in the goal display itself.
+          modeHint.textContent   = `Your current rank: #${currentRankValue}`;
           modeHint.className     = "gt-mode-hint";
           modeHint.style.display = "block";
           rankFetchedRank = nr;
           validateConfirm();
-          
-          const fetchPromise = isExpType ? getExpByRank(nr) : getPpByRank(nr);
-          
-          fetchPromise.then(value => {
-            if (isExpType) {
-              rankFetchedExp = value;
-              modeHint.textContent = `Next rank: #${nr} — ${Math.round(value).toLocaleString()} EXP required`;
-            } else {
-              rankFetchedPp = value;
-              modeHint.textContent = `Next rank: #${nr} — ${Math.round(value).toLocaleString()} PP required`;
-            }
-            modeHint.className = "gt-mode-hint";
-            
-          }).catch(() => {
-            modeHint.textContent   = "⚠ Failed to load rank data";
-            modeHint.className     = "gt-mode-hint gt-mode-hint-error";
-            confirmBtn.disabled    = true;
-          });
         } else if (currentRankValue === 1) {
           modeHint.textContent   = "⚠ Already at rank #1!";
           modeHint.className     = "gt-mode-hint gt-mode-hint-error";
@@ -2262,6 +2250,14 @@ async function getExpRankByUsername(username) {
     presetsEl.querySelectorAll(".gt-preset-chip").forEach(c => c.classList.remove("selected"));
 
     if (selectedMode === "rank") {
+      // If Next Rank was toggled and the user is now typing a specific rank,
+      // treat that as opting out of Next Rank — un-toggle the button so the
+      // UI matches the user's intent.
+      if (nextRankMode && customInput.value !== "") {
+        nextRankMode = false;
+        nextRankToggleBtn.classList.remove("active");
+      }
+
       const enteredRank = parseInt(customInput.value);
       const curRank     = selectedType === "pp" ? currentStats.rank : currentStats.expRank;
 
