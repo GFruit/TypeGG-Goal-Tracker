@@ -2928,7 +2928,22 @@ async function getExpRankByUsername(username) {
 
   // ── Wrap loadStats so concurrent ticks can't stack up ─────────
   const loadStatsGuarded = inFlight(loadStats);
-  // Note: actual interval + initial call set up in leader election block below
+
+  // ── Self-resetting stats poll (replaces setInterval) ──────────
+  // The poll exists as a fallback in case the quote-finish detector
+  // misses an event. When the detector DOES catch a quote and freshly
+  // updates the goal display, we call scheduleNextStatsPoll() to push
+  // the next fallback fetch out to a full POLL_STATS_MS — no point
+  // re-fetching seconds later when we just got fresh data.
+  let statsPollTimer = null;
+  function scheduleNextStatsPoll() {
+    clearTimeout(statsPollTimer);
+    statsPollTimer = setTimeout(() => {
+      if (anyTabVisibleRecently()) loadStatsGuarded();
+      scheduleNextStatsPoll(); // chain
+    }, POLL_STATS_MS);
+  }
+  // Note: initial loadStats() + scheduleNextStatsPoll() kicked off in leader election block below
 
   // ── Quote-finish trigger ─────────────────────────────────────
   // When the user finishes a quote (#typegame-input becomes disabled),
@@ -2981,7 +2996,12 @@ async function getExpRankByUsername(username) {
         data.quotes   !== snap.quotes   ||
         data.chars    !== snap.chars   ||
         data.playtime !== snap.playtime;
-      if (changed) return;
+      if (changed) {
+        // We just freshly updated the goal display — push the fallback
+        // poll out to a full interval so we don't re-fetch immediately.
+        scheduleNextStatsPoll();
+        return;
+      }
     }
     // Fell through all retries with no change — give up.
     // The regular 20s poll will catch any eventual update.
@@ -3357,9 +3377,9 @@ async function getExpRankByUsername(username) {
   // ── Start all fetch intervals. Only called once per browser,
   //    by whichever tab wins the leader lock. ─────────────────
   function startLeaderIntervals() {
-    // Primary user-stats polling (fast)
+    // Primary user-stats polling (fast, self-resetting — see scheduleNextStatsPoll)
     loadStats();
-    setInterval(runIfAnyTabVisible(loadStatsGuarded), POLL_STATS_MS);
+    scheduleNextStatsPoll();
 
     // Slow background updates — staggered initial kickoffs so we don't
     // burst the API in the first second after becoming leader
