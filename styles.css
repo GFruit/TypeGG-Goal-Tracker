@@ -1,0 +1,786 @@
+/* ── Widget ──────────────────────────────────────────────── */
+#goal-tracker {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  background: #1f2937;
+  color: white;
+  border-radius: 10px;
+  padding: 10px 12px;
+  width: 220px;
+  box-shadow: 0 8px 16px -4px rgba(0,0,0,0.4);
+  z-index: 9998;
+  box-sizing: border-box;
+  resize: horizontal;
+  overflow: hidden;
+  min-width: 180px;
+  max-width: 480px;
+}
+
+.gt-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 600;
+  font-size: 12px;
+  margin-bottom: 8px;
+  cursor: move;
+  user-select: none;
+  color: #9ca3af;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.gt-set-btn {
+  background: #3b82f6;
+  color: white;
+  border: none;
+  padding: 3px 8px;
+  border-radius: 5px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.15s;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+}
+.gt-set-btn:hover { background: #2563eb; }
+
+/* ── Widget header actions (icon buttons + + Set) ────────── */
+.gt-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.gt-icon-btn {
+  background: transparent;
+  border: none;
+  padding: 3px;
+  color: #9ca3af;
+  cursor: pointer;
+  border-radius: 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s;
+  /* Reset inherited uppercase/letter-spacing from .gt-header */
+  text-transform: none;
+  letter-spacing: 0;
+  line-height: 0;
+}
+.gt-icon-btn:hover {
+  background: #374151;
+  color: #e5e7eb;
+}
+.gt-icon-btn svg { display: block; }
+
+.gt-content { display: flex; flex-direction: column; gap: 0; }
+
+/* ── Goal sections ───────────────────────────────────────── */
+.gt-goal-section {
+  border-top: 1px solid #374151;
+  padding: 7px 0 4px;
+}
+.gt-goal-section:first-child { border-top: none; }
+
+.gt-gain-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 3px;
+}
+
+.gt-goal-label-group {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #d1d5db;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.gt-goal-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.gt-rec-badge {
+  font-size: 9px;
+  font-weight: 700;
+  color: #a78bfa;
+  background: #2e1065;
+  border: 1px solid #6d28d9;
+  border-radius: 3px;
+  padding: 1px 4px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.gt-streak {
+  font-size: 11px;
+  font-weight: 600;
+  color: #fb923c;
+}
+
+.gt-gain-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  font-weight: 500;
+  margin-bottom: 4px;
+  color: #e5e7eb;
+}
+
+.gt-done-badge {
+  font-size: 10px;
+  font-weight: 700;
+  color: #4ade80;
+  background: #052e16;
+  border: 1px solid #166534;
+  border-radius: 3px;
+  padding: 1px 5px;
+}
+
+.gt-progress-bar {
+  height: 5px;
+  background: #374151;
+  border-radius: 9999px;
+  overflow: hidden;
+  margin-bottom: 3px;
+}
+
+.gt-progress-fill {
+  height: 100%;
+  background: #60a5fa;
+  transition: width 0.4s ease;
+  border-radius: 9999px;
+}
+
+.gt-countdown {
+  font-size: 10px;
+  color: #6b7280;
+  text-align: right;
+}
+
+.gt-remove-btn {
+  background: none;
+  border: none;
+  color: #4b5563;
+  font-size: 10px;
+  cursor: pointer;
+  padding: 1px 4px;
+  border-radius: 3px;
+  line-height: 1;
+  transition: color 0.15s, background 0.15s;
+}
+.gt-remove-btn:hover { background: #450a0a; color: #fca5a5; }
+
+/* ── Gain delta indicator (+X pop-up) ────────────────────────── */
+/* .gt-gain-text-wrap is an inline-block wrapping just the "5 / 306"
+   span. The indicator is positioned absolute relative to it, so it
+   always appears snug right after the progress text. */
+.gt-gain-text-wrap {
+  display: inline-block;
+}
+
+.gt-gain-indicator {
+  display: inline-block;
+  vertical-align: baseline;
+  margin-left: 5px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #4ade80;
+  pointer-events: none;
+  white-space: nowrap;
+  animation: gt-gain-pop 5s ease forwards;
+}
+
+@keyframes gt-gain-pop {
+  0%   { opacity: 0;    transform: translateY(0); }
+  6%   { opacity: 0.75; transform: translateY(0); }
+  72%  { opacity: 0.75; transform: translateY(0); }
+  100% { opacity: 0;    transform: translateY(-4px); }
+}
+
+/* ── Modal overlay ───────────────────────────────────────── */
+#gt-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+  backdrop-filter: blur(2px);
+  z-index: 9999;
+  align-items: flex-start;
+  padding-top: 15vh;
+  justify-content: center;
+}
+#gt-overlay.open { display: flex; }
+
+#gt-modal {
+  background: #1f2937;
+  border: 1px solid #374151;
+  border-radius: 12px;
+  padding: 18px 20px;
+  width: 520px;
+  box-shadow: 0 20px 40px -8px rgba(0,0,0,0.6);
+  animation: gt-modal-in 0.16s ease;
+}
+@keyframes gt-modal-in {
+  from { opacity:0; transform: scale(0.96) translateY(6px); }
+  to   { opacity:1; transform: scale(1) translateY(0); }
+}
+
+.gt-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 14px;
+}
+.gt-modal-title { font-size: 14px; font-weight: 700; color: #f3f4f6; }
+
+.gt-close-btn {
+  background: none; border: none; color: #6b7280;
+  font-size: 13px; cursor: pointer; padding: 3px 6px;
+  border-radius: 5px; transition: color 0.15s, background 0.15s;
+}
+.gt-close-btn:hover { color: #e5e7eb; background: #374151; }
+
+/* ── Section labels ──────────────────────────────────────── */
+.gt-section-label {
+  font-size: 10px; color: #6b7280;
+  text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 5px;
+}
+
+/* ── Selectors: shared ───────────────────────────────────── */
+.gt-type-selector,
+.gt-mode-selector,
+.gt-rec-selector,
+.gt-filter-selector {
+  display: flex;
+  gap: 5px;
+  margin-bottom: 12px;
+}
+
+.gt-type-btn, .gt-mode-btn, .gt-rec-btn, .gt-filter-btn {
+  flex: 1; border-radius: 7px;
+  border: 1.5px solid #374151;
+  background: transparent; color: #9ca3af;
+  font-size: 11px; font-weight: 500;
+  cursor: pointer; transition: all 0.15s;
+  padding: 5px 0;
+}
+.gt-type-btn:hover, .gt-mode-btn:hover, .gt-rec-btn:hover, .gt-filter-btn:hover { border-color: #4b5563; color: #e5e7eb; }
+
+.gt-type-btn.active { border-color: #3b82f6; background: #1e3a5f; color: #93c5fd; }
+.gt-mode-btn.active { border-color: #10b981; background: #022c22; color: #6ee7b7; }
+.gt-rec-btn.active  { border-color: #8b5cf6; background: #2e1065; color: #c4b5fd; }
+.gt-filter-btn.active { border-color: #f59e0b; background: #451a03; color: #fcd34d; }
+
+/* ── Target row ──────────────────────────────────────────── */
+.gt-target-row {
+  display: flex; align-items: flex-start;
+  gap: 8px; margin-bottom: 14px;
+  min-height: 32px;
+}
+
+/* Ensure the Next Rank button doesn't stretch and stays left-aligned */
+#gt-next-rank-row {
+  display: flex;
+  flex-shrink: 0; /* Prevents the button from squishing */
+  margin-bottom: 0 !important;
+}
+
+#gt-next-rank-btn {
+  width: auto; /* Overrides the previous 100% width */
+  padding: 5px 12px;
+  white-space: nowrap; /* Keeps the text on one line */
+}
+
+.gt-presets { display: flex; flex-wrap: wrap; gap: 5px; flex: 1; }
+
+.gt-preset-chip {
+  padding: 5px 10px; border-radius: 6px;
+  border: 1.5px solid #374151; background: transparent;
+  color: #d1d5db; font-size: 12px; font-weight: 500;
+  cursor: pointer; transition: all 0.15s;
+}
+.gt-preset-chip:hover   { border-color: #4b5563; background: #374151; }
+.gt-preset-chip.selected{ border-color: #3b82f6; background: #1e3a5f; color: #93c5fd; }
+
+.gt-custom-input {
+  width: 85px; flex-shrink: 0;
+  padding: 5px 8px; border-radius: 6px;
+  border: 1.5px solid #374151; background: #111827;
+  color: #d1d5db; font-size: 12px; outline: none;
+  transition: border-color 0.15s; -moz-appearance: textfield;
+}
+.gt-custom-input::-webkit-outer-spin-button,
+.gt-custom-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.gt-custom-input::placeholder { color: #9ca3af; }
+.gt-custom-input:focus { border-color: #3b82f6; }
+
+/* ── Mode hint ───────────────────────────────────────────── */
+.gt-mode-hint { font-size: 11px; color: #6b7280; margin-top: -8px; margin-bottom: 12px; }
+.gt-mode-hint-error { color: #f87171; }
+.gt-mode-hint-ok    { color: #34d399; }
+
+/* ── Confirm ─────────────────────────────────────────────── */
+.gt-confirm-btn {
+  width: 100%; padding: 8px 0; border-radius: 7px;
+  border: none; background: #3b82f6;
+  color: white; font-size: 13px; font-weight: 600;
+  cursor: pointer; transition: background 0.15s, opacity 0.15s;
+}
+.gt-confirm-btn:hover:not(:disabled) { background: #2563eb; }
+.gt-confirm-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+/* ── Settings modal ──────────────────────────────────────── */
+#gt-settings-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(2px);
+  z-index: 10000;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 15vh;
+}
+#gt-settings-overlay.open { display: flex; }
+
+#gt-settings-modal {
+  background: #1f2937;
+  border: 1px solid #374151;
+  border-radius: 12px;
+  padding: 18px 20px;
+  width: 580px;
+  box-shadow: 0 20px 40px -8px rgba(0, 0, 0, 0.7);
+  animation: gt-modal-in 0.16s ease;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Settings modal layout: sidebar + content ────────────── */
+.gt-settings-body {
+  display: flex;
+  gap: 16px;
+  min-height: 300px; /* enough vertical room for the weekly/monthly wheel */
+}
+
+.gt-settings-sidebar {
+  width: 130px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-right: 12px;
+  border-right: 1px solid #374151;
+}
+
+.gt-settings-tab-btn {
+  text-align: left;
+  padding: 8px 10px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: #9ca3af;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.gt-settings-tab-btn:hover {
+  background: #374151;
+  color: #e5e7eb;
+}
+.gt-settings-tab-btn.active {
+  background: #1e3a5f;
+  color: #93c5fd;
+}
+
+.gt-settings-content {
+  flex: 1;
+  min-width: 0; /* allow wheel layout to shrink inside flex */
+}
+
+.gt-rec-reset-text {
+  font-size: 12px;
+  color: #9ca3af;
+  margin: 0 0 10px 0;
+  text-align: center;
+  line-height: 1.5;
+}
+.gt-rec-reset-text b {
+  color: #e5e7eb;
+  font-weight: 600;
+}
+
+/* ── Time picker (shared across daily/weekly/monthly) ────── */
+.gt-time-picker {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.gt-time-input {
+  width: 58px;
+  padding: 8px 0;
+  text-align: center;
+  background: #111827;
+  border: 1.5px solid #374151;
+  border-radius: 7px;
+  color: #e5e7eb;
+  font-size: 20px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  outline: none;
+  transition: border-color 0.15s;
+  -moz-appearance: textfield;
+}
+.gt-time-input::-webkit-outer-spin-button,
+.gt-time-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.gt-time-input:focus { border-color: #3b82f6; }
+
+.gt-time-colon {
+  font-size: 20px;
+  font-weight: 700;
+  color: #6b7280;
+  user-select: none;
+  padding-bottom: 3px;
+}
+
+/* ── Wheel picker ────────────────────────────────────────── */
+.gt-wheel-layout {
+  display: flex;
+  gap: 20px;
+  align-items: flex-start;
+  margin-bottom: 4px;
+}
+
+.gt-wheel-col {
+  flex-shrink: 0;
+  width: 140px;
+}
+
+.gt-wheel-label {
+  font-size: 10px;
+  color: #6b7280;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  margin-bottom: 6px;
+  text-align: center;
+}
+
+.gt-wheel-right {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Matches .gt-wheel-wrap's outer height (160px wheel + 2px border).
+   An invisible .gt-wheel-label spacer above this element mirrors the
+   left column's header, so the time picker ends up perfectly aligned
+   with the wheel's selected item without hard-coding label heights. */
+.gt-wheel-right-aligned {
+  height: 162px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+/* .gt-time-picker's margin-top exists for the daily body (where it sits
+   under the summary text). Inside the centered wheel-aligned area, that
+   asymmetric margin would shift the content ~3px below true center, so
+   we zero it here. */
+.gt-wheel-right-aligned .gt-time-picker { margin-top: 0; }
+
+.gt-wheel-wrap {
+  position: relative;
+  width: 100%;
+  border: 1px solid #374151;
+  border-radius: 8px;
+  background: #111827;
+  overflow: hidden;
+}
+.gt-wheel-wrap::before,
+.gt-wheel-wrap::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 52px;
+  pointer-events: none;
+  z-index: 2;
+}
+.gt-wheel-wrap::before {
+  top: 0;
+  background: linear-gradient(to bottom, #111827 10%, rgba(17, 24, 39, 0) 100%);
+}
+.gt-wheel-wrap::after {
+  bottom: 0;
+  background: linear-gradient(to top, #111827 10%, rgba(17, 24, 39, 0) 100%);
+}
+
+.gt-wheel-indicator {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  top: 50%;
+  height: 32px;
+  transform: translateY(-50%);
+  border-top: 1px solid #374151;
+  border-bottom: 1px solid #374151;
+  background: rgba(59, 130, 246, 0.06);
+  pointer-events: none;
+  z-index: 1;
+  border-radius: 2px;
+}
+
+.gt-wheel {
+  width: 100%;
+  height: 160px;
+  overflow-y: auto;
+  scroll-snap-type: y mandatory;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  position: relative;
+  z-index: 3;
+}
+.gt-wheel::-webkit-scrollbar { display: none; }
+
+.gt-wheel-list {
+  padding: 64px 0; /* (160 - 32) / 2 so first/last items can center */
+}
+
+.gt-wheel-item {
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  scroll-snap-align: center;
+  scroll-snap-stop: always;
+  color: #6b7280;
+  font-size: 13px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.18s;
+  box-sizing: border-box;
+}
+.gt-wheel-item.selected {
+  color: #f3f4f6;
+  font-weight: 700;
+}
+.gt-wheel-item:not(.selected):hover { color: #d1d5db; }
+
+/* ── Monthly overflow note (shown when day > 28) ─────────── */
+.gt-monthly-note {
+  font-size: 11px;
+  color: #fb923c;
+  text-align: center;
+  margin-top: 12px;
+  padding: 7px 10px;
+  background: rgba(251, 146, 60, 0.08);
+  border: 1px solid rgba(251, 146, 60, 0.25);
+  border-radius: 6px;
+  line-height: 1.4;
+}
+
+/* ── Settings modal action buttons ───────────────────────── */
+.gt-settings-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.gt-settings-action-btn {
+  flex: 1;
+  padding: 8px 0;
+  border-radius: 7px;
+  border: none;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.gt-settings-action-btn.primary {
+  background: #3b82f6;
+  color: white;
+}
+.gt-settings-action-btn.primary:hover { background: #2563eb; }
+.gt-settings-action-btn.secondary {
+  background: transparent;
+  border: 1.5px solid #374151;
+  color: #9ca3af;
+}
+.gt-settings-action-btn.secondary:hover {
+  border-color: #4b5563;
+  color: #e5e7eb;
+}
+/* ══════════════════════════════════════════════════════════════
+   Detached widgets + drag visuals
+   ══════════════════════════════════════════════════════════════
+   When goals are dragged out of the main #goal-tracker widget, a
+   new "detached" widget is created containing just those goals.
+   Detached widgets have no header — they're drag-movable by any
+   padding/edge area, and auto-destroy when emptied. */
+
+/* Detached widget: mirrors the main widget's visual treatment but
+   without the header bar, and positioned freely via inline styles. */
+.gt-widget-detached {
+  position: fixed;
+  background: #1f2937;
+  color: white;
+  border-radius: 10px;
+  padding: 10px 12px;
+  width: 220px;
+  box-shadow: 0 8px 16px -4px rgba(0, 0, 0, 0.4);
+  z-index: 9998;
+  box-sizing: border-box;
+  /* "Drag the widget" affordance — any non-goal edge grabs the whole group. */
+  cursor: move;
+}
+
+/* Individual goal sections are grab-handles for goal-level drag */
+.gt-goal-section {
+  cursor: grab;
+}
+.gt-goal-section:active { cursor: grabbing; }
+.gt-goal-section button { cursor: pointer; }
+
+/* ── Dragging visuals ──────────────────────────────────────────
+   While a goal is floating, we:
+    - lift it above all widgets with z-index
+    - give it its own card background so it looks self-contained
+      out of the parent widget's surface (otherwise the
+      border-top-only styling looks broken when detached)
+    - disable pointer events so elementFromPoint sees widgets below
+    - 80% opacity so the drop target below is visible
+*/
+.gt-goal-section.gt-goal-dragging {
+  z-index: 10000;
+  pointer-events: none;
+  background: #1f2937;
+  border: 1px solid #374151;
+  border-radius: 8px;
+  padding: 8px 12px;
+  box-shadow: 0 14px 28px -6px rgba(0, 0, 0, 0.55);
+  opacity: 0.8;
+  cursor: grabbing;
+}
+/* Undo the border-top-none for first-child when floating — the goal
+   needs a full border to look like a self-contained card. */
+.gt-goal-section.gt-goal-dragging { border-top-color: #374151; }
+
+/* Solo-widget drag: the whole widget floats as a unit when you grab
+   the only goal inside a detached widget. Same transparency treatment
+   as the floating goal so the drop target below stays visible. */
+.gt-widget-detached.gt-widget-dragging {
+  opacity: 0.8;
+  box-shadow: 0 14px 28px -6px rgba(0, 0, 0, 0.55);
+  cursor: grabbing;
+  /* pointer-events: none is set inline during drag — we toggle it
+     rather than class-locking it because on drop we re-enable it
+     before the widget is either destroyed (merge) or settled in place. */
+}
+
+/* Placeholder — the "gap" that opens up at the drop-target slot.
+   Dashed outline + soft fill so it reads clearly as "this is where
+   the card will land" without looking like a control the user can
+   interact with. Surrounding goals slide via FLIP to reveal it. */
+.gt-goal-placeholder {
+  border: 2px dashed #4b5563;
+  border-radius: 8px;
+  background: rgba(75, 85, 99, 0.12);
+  margin: 4px 0;
+  box-sizing: border-box;
+  pointer-events: none;
+}
+
+/* Subtle outline on the widget under the cursor during drag.
+   Using box-shadow (not outline) so the highlight respects the
+   widget's border-radius corners. */
+.gt-widget.gt-drop-target,
+.gt-widget-detached.gt-drop-target {
+  box-shadow: 0 8px 16px -4px rgba(0, 0, 0, 0.4),
+              0 0 0 2px #3b82f6;
+}
+
+/* ── Backup tab (import / export) ─────────────────────────
+   Shares the segmented-button visual vocabulary from .gt-settings-action-btn
+   but stacked vertically (one button per row) since each action is
+   independent. */
+.gt-backup-text {
+  font-size: 12px;
+  color: #9ca3af;
+  margin: 0 0 10px 0;
+  line-height: 1.5;
+}
+
+.gt-backup-row {
+  display: flex;
+  margin-bottom: 4px;
+}
+
+/* Textarea used in two roles:
+   - Import: empty, user pastes their backup here
+   - Export fallback: read-only, shown only when clipboard API fails,
+     filled with the JSON for manual selection.
+   Monospace font makes long JSON payloads readable and signals "code,
+   don't edit this casually". Vertical resize handle lets users expand
+   when reviewing content. */
+.gt-backup-textarea {
+  width: 100%;
+  min-height: 80px;
+  max-height: 200px;
+  padding: 8px 10px;
+  margin-top: 6px;
+  margin-bottom: 4px;
+  background: #111827;
+  border: 1.5px solid #374151;
+  border-radius: 7px;
+  color: #d1d5db;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.4;
+  resize: vertical;
+  outline: none;
+  box-sizing: border-box;
+  transition: border-color 0.15s;
+}
+.gt-backup-textarea:focus { border-color: #3b82f6; }
+.gt-backup-textarea::placeholder { color: #6b7280; }
+
+/* Status message after import/export attempt. Uses color + background
+   to differentiate info / success / error at a glance. */
+.gt-backup-status {
+  margin-top: 14px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+}
+.gt-backup-status-info {
+  color: #9ca3af;
+  background: rgba(156, 163, 175, 0.08);
+  border: 1px solid rgba(156, 163, 175, 0.2);
+}
+.gt-backup-status-ok {
+  color: #6ee7b7;
+  background: rgba(110, 231, 183, 0.08);
+  border: 1px solid rgba(110, 231, 183, 0.25);
+}
+.gt-backup-status-err {
+  color: #fca5a5;
+  background: rgba(252, 165, 165, 0.08);
+  border: 1px solid rgba(252, 165, 165, 0.3);
+}

@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "TypeGG Goal Tracker",
+  "version": "7.1",
+  "description": "Track your goals directly on TypeGG",
+  "host_permissions": [
+    "*://*.typegg.io/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["*://*.typegg.io/*"],
+      "js": ["content.js"],
+      "css": ["styles.css"]
+    }
+  ],
+  "icons": {
+          "16": "extension_icon.png",
+          "32": "extension_icon@32px.png",
+          "48": "extension_icon@48px.png",
+          "128": "extension_icon@128px.png"
+        }
+}
