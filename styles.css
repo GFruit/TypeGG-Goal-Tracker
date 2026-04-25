@@ -594,13 +594,24 @@
   line-height: 1.4;
 }
 
-/* ── Settings modal action buttons ───────────────────────── */
-.gt-settings-actions {
+/* ── Settings modal: title row + saved indicator ─────────── */
+.gt-modal-title-row {
   display: flex;
-  gap: 8px;
-  margin-top: 16px;
+  align-items: baseline;
+  gap: 10px;
 }
 
+.gt-settings-saved-indicator {
+  font-size: 11px;
+  color: #10b981;
+  font-weight: 500;
+  opacity: 0;
+  transition: opacity 0.18s ease;
+  pointer-events: none;
+}
+.gt-settings-saved-indicator.visible { opacity: 1; }
+
+/* ── Settings modal action buttons (used by Backup tab) ──── */
 .gt-settings-action-btn {
   flex: 1;
   padding: 8px 0;

@@ -954,16 +954,15 @@ window.addEventListener("load", () => {
   settingsOverlay.innerHTML = `
     <div id="gt-settings-modal">
       <div class="gt-modal-header">
-        <span class="gt-modal-title">Settings</span>
+        <div class="gt-modal-title-row">
+          <span class="gt-modal-title">Settings</span>
+          <span id="gt-settings-saved-indicator" class="gt-settings-saved-indicator">Settings saved</span>
+        </div>
         <button id="gt-settings-close" class="gt-close-btn">✕</button>
       </div>
       <div class="gt-settings-body">
         <nav class="gt-settings-sidebar" id="gt-settings-sidebar"></nav>
         <div class="gt-settings-content" id="gt-settings-content"></div>
-      </div>
-      <div class="gt-settings-actions">
-        <button id="gt-settings-cancel" class="gt-settings-action-btn secondary">Cancel</button>
-        <button id="gt-settings-save"   class="gt-settings-action-btn primary">Save</button>
       </div>
     </div>
   `;
@@ -1150,7 +1149,7 @@ window.addEventListener("load", () => {
   let activeSettingsTabId = null;    // which sidebar tab is currently shown
   let activeRecSubTab     = "daily"; // sub-selection within the Recurrence tab
   let activeWheel         = null;    // current wheel picker (if the visible sub-tab has one)
-  let settingsDraft       = null;    // pending edits while the modal is open; committed on Save
+  let settingsDraft       = null;    // working copy of settings while the modal is open; auto-committed on each change
 
   // ── Recurrence tab ────────────────────────────────────────────
   function renderRecurrenceTab(contentEl, draft) {
@@ -1193,6 +1192,14 @@ window.addEventListener("load", () => {
     wireTimeInput("gt-rs-hour", 23);
     wireTimeInput("gt-rs-min", 59);
 
+    // Auto-save when a time input loses focus. Registered AFTER wireTimeInput
+    // so the clamp handler runs first; persistActiveFormToDraft then reads
+    // the post-clamp value via clampInt.
+    ["gt-rs-hour", "gt-rs-min"].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener("blur", applySettingsDraft);
+    });
+
     // Wheel init deferred one frame so offsetHeight is correct.
     requestAnimationFrame(() => {
       if (activeRecSubTab === "weekly") {
@@ -1201,6 +1208,7 @@ window.addEventListener("load", () => {
         activeWheel = createWheel(wheelEl, WEEKDAY_ITEMS, draft.recSettings.weekly.weekday, (v) => {
           draft.recSettings.weekly.weekday = v; // live-update draft so sub-tab swaps preserve it
           if (summary) summary.innerHTML = `Your weekly goals reset every <b>${WEEKDAY_NAMES[v]}</b> at…`;
+          applySettingsDraft();
         });
       } else if (activeRecSubTab === "monthly") {
         const wheelEl = document.getElementById("gt-rs-wheel");
@@ -1210,6 +1218,7 @@ window.addEventListener("load", () => {
           draft.recSettings.monthly.day = v; // live-update draft
           if (summary) summary.innerHTML = `Your monthly goals reset on the <b>${ordinal(v)}</b> at…`;
           updateMonthlyNote(v);
+          applySettingsDraft();
         });
         updateMonthlyNote(draft.recSettings.monthly.day);
       }
@@ -1255,6 +1264,7 @@ window.addEventListener("load", () => {
         draft.displaySettings.streakMode = mode;
         contentEl.querySelectorAll("[data-streak-mode]").forEach(b => b.classList.toggle("active", b === btn));
         if (hintEl) hintEl.textContent = STREAK_MODE_OPTIONS.find(o => o.value === mode)?.hint ?? "";
+        applySettingsDraft();
       });
     });
   }
@@ -1272,7 +1282,7 @@ window.addEventListener("load", () => {
   // browser or PC. Export/import act outside the modal's draft flow:
   // clicking Export downloads immediately, clicking Import and
   // confirming replaces state immediately. Both actions bypass the
-  // modal's Save/Cancel (commitBackupTab is a no-op).
+  // settings auto-save flow (commitBackupTab is a no-op).
   //
   // Schema is versioned so future shape changes can be migrated.
   const BACKUP_SCHEMA_VERSION = 1;
@@ -1514,7 +1524,7 @@ window.addEventListener("load", () => {
   // ── Capture currently-visible form values into the draft ─────
   // Number inputs only update `draft` on blur (via the wheel/callback
   // path or manual persist). Called before any action that would
-  // replace the DOM (tab/sub-tab switch) or commit (Save), so
+  // replace the DOM (tab/sub-tab switch) or auto-commit, so
   // unblurred input values aren't lost.
   function persistActiveFormToDraft() {
     if (!settingsDraft) return;
@@ -1555,15 +1565,44 @@ window.addEventListener("load", () => {
   }
 
   function closeSettingsModal() {
+    // Safety net: commit any unblurred input edits before discarding the draft.
+    // Normally each control auto-commits on change; this catches the edge case
+    // where the modal is closed (X / overlay click) while an input is still focused.
+    commitAllTabs();
     settingsOverlay.classList.remove("open");
     settingsDraft = null;
     activeWheel = null;
   }
 
-  function saveSettings() {
+  // ── Auto-save infrastructure ──────────────────────────────────
+  // Runs every tab's commit() against the current draft. Returns true
+  // if the underlying state actually changed. Each tab's commit is
+  // already a no-op when its slice is unchanged, but we snapshot
+  // before/after as well so we know whether to flash the indicator —
+  // this avoids spurious "Settings saved" flashes from things like
+  // the wheel firing onChange with its initial value on sub-tab open.
+  function commitAllTabs() {
+    if (!settingsDraft) return false;
     persistActiveFormToDraft(); // capture any unblurred input edits
+    const before = JSON.stringify({ recSettings, displaySettings });
     for (const tab of SETTINGS_TABS) tab.commit(settingsDraft);
-    closeSettingsModal();
+    const after = JSON.stringify({ recSettings, displaySettings });
+    return before !== after;
+  }
+
+  // Called by every auto-save trigger (mode click, wheel onChange, input blur).
+  // Commits the draft and surfaces the indicator iff something actually changed.
+  function applySettingsDraft() {
+    if (commitAllTabs()) showSettingsSavedIndicator();
+  }
+
+  let savedIndicatorTimer = null;
+  function showSettingsSavedIndicator() {
+    const el = document.getElementById("gt-settings-saved-indicator");
+    if (!el) return;
+    el.classList.add("visible");
+    clearTimeout(savedIndicatorTimer);
+    savedIndicatorTimer = setTimeout(() => el.classList.remove("visible"), 1500);
   }
 
   function buildSettingsSidebar() {
@@ -1593,8 +1632,6 @@ window.addEventListener("load", () => {
   // ── Wire settings modal controls ──────────────────────────────
   document.getElementById("gt-settings-btn")   .addEventListener("click", openSettingsModal);
   document.getElementById("gt-settings-close") .addEventListener("click", closeSettingsModal);
-  document.getElementById("gt-settings-cancel").addEventListener("click", closeSettingsModal);
-  document.getElementById("gt-settings-save")  .addEventListener("click", saveSettings);
   settingsOverlay.addEventListener("click", e => { if (e.target === settingsOverlay) closeSettingsModal(); });
 
   // ── Recurrence reset-time settings ─────────────────────────────
