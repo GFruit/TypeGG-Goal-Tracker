@@ -3,7 +3,9 @@
   position: fixed;
   top: 16px;
   right: 16px;
-  background: #1f2937;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.03) 0%, rgba(255, 255, 255, 0.03) 100%), rgba(0, 3, 27, 0.45);
+  backdrop-filter: blur(4px);
+  border: 1px solid rgba(255, 255, 255, 0.06);
   color: white;
   border-radius: 10px;
   padding: 10px 12px;
@@ -222,7 +224,7 @@
 #gt-overlay.open { display: flex; }
 
 #gt-modal {
-  background: #1f2937;
+  background: #13172C;
   border: 1px solid #374151;
   border-radius: 12px;
   padding: 18px 20px;
@@ -354,7 +356,7 @@
 #gt-settings-overlay.open { display: flex; }
 
 #gt-settings-modal {
-  background: #1f2937;
+  background: #13172C;
   border: 1px solid #374151;
   border-radius: 12px;
   padding: 18px 20px;
@@ -648,7 +650,9 @@
    without the header bar, and positioned freely via inline styles. */
 .gt-widget-detached {
   position: fixed;
-  background: #1f2937;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.03) 0%, rgba(255, 255, 255, 0.03) 100%), rgba(0, 3, 27, 0.45);
+  backdrop-filter: blur(4px);
+  border: 1px solid rgba(255, 255, 255, 0.06);
   color: white;
   border-radius: 10px;
   padding: 10px 12px;
@@ -679,8 +683,9 @@
 .gt-goal-section.gt-goal-dragging {
   z-index: 10000;
   pointer-events: none;
-  background: #1f2937;
-  border: 1px solid #374151;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.03) 0%, rgba(255, 255, 255, 0.03) 100%), rgba(0, 3, 27, 0.45);
+  backdrop-filter: blur(4px);
+  border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: 8px;
   padding: 8px 12px;
   box-shadow: 0 14px 28px -6px rgba(0, 0, 0, 0.55);
@@ -689,7 +694,7 @@
 }
 /* Undo the border-top-none for first-child when floating — the goal
    needs a full border to look like a self-contained card. */
-.gt-goal-section.gt-goal-dragging { border-top-color: #374151; }
+.gt-goal-section.gt-goal-dragging { border-top-color: rgba(255, 255, 255, 0.06); }
 
 /* Solo-widget drag: the whole widget floats as a unit when you grab
    the only goal inside a detached widget. Same transparency treatment

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TypeGG Goal Tracker",
-  "version": "7.6",
+  "version": "7.8",
   "description": "Track your goals directly on TypeGG",
   "host_permissions": [
     "*://*.typegg.io/*"
