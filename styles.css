@@ -767,6 +767,13 @@
   box-sizing: border-box;
   /* "Drag the widget" affordance — any non-goal edge grabs the whole group. */
   cursor: move;
+  /* Resize handle (bottom-right corner) — matches main widget behavior.
+     The widget-drag handler in JS guards this corner so grabbing the
+     handle resizes without also initiating a drag. */
+  resize: horizontal;
+  overflow: hidden;
+  min-width: 180px;
+  max-width: 480px;
 }
 
 /* Individual goal sections are grab-handles for goal-level drag */

@@ -282,6 +282,10 @@ window.addEventListener("load", () => {
     document.body.appendChild(w);
     wireWidgetDrag(w, groupId);
     bringWidgetToFront(w);
+    // Restore persisted size (no-op if width was never customized) and
+    // start tracking future resizes so the new width survives reload.
+    applyWidgetTransform(w, groupId);
+    observeWidgetResize(w, groupId);
     return w;
   }
 
@@ -338,6 +342,18 @@ window.addEventListener("load", () => {
       // guard, every mousedown on a goal would also initiate widget drag.
       if (!isMain && e.target.closest(".gt-goal-section")) return;
 
+      // Skip if user clicked the native CSS resize handle in the bottom-right
+      // corner. The handle is roughly the bottom-right ~14×14 px area; without
+      // this guard, grabbing it would resize AND start a drag at the same time.
+      // Main widget doesn't need this — its drag handle is .gt-header, which
+      // is far from the resize corner.
+      if (!isMain) {
+        const rect = widgetEl.getBoundingClientRect();
+        const RESIZE_CORNER = 16;
+        if (e.clientX >= rect.right  - RESIZE_CORNER &&
+            e.clientY >= rect.bottom - RESIZE_CORNER) return;
+      }
+
       e.preventDefault();
       startWidgetDrag(widgetEl, groupId, e);
     });
@@ -368,18 +384,24 @@ window.addEventListener("load", () => {
 
   wireWidgetDrag(container, MAIN_GROUP_ID);
 
-  // ── Resize persistence (main widget only — detached are auto-sized) ──
-  {
+  // ── Resize persistence ────────────────────────────────────────
+  // Watches a widget for size changes and persists the new width to
+  // its group's storage. Debounced so dragging the resize handle
+  // doesn't spam saveGroups(). One observer per widget; when the
+  // widget is removed from the DOM the observer becomes inert.
+  function observeWidgetResize(widgetEl, groupId) {
     let t;
     new ResizeObserver(() => {
       clearTimeout(t);
       t = setTimeout(() => {
-        if (!groupData[MAIN_GROUP_ID]) return;
-        groupData[MAIN_GROUP_ID].size = { width: container.offsetWidth + "px" };
+        if (!groupData[groupId]) return;
+        groupData[groupId].size = { width: widgetEl.offsetWidth + "px" };
         saveGroups();
       }, 300);
-    }).observe(container);
+    }).observe(widgetEl);
   }
+
+  observeWidgetResize(container, MAIN_GROUP_ID);
 
   // ══════════════════════════════════════════════════════════════
   // Goal-level drag (individual goals)
