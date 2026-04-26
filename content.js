@@ -248,6 +248,7 @@ window.addEventListener("load", () => {
 
     // Attach remove handler
     document.getElementById(`${goalId}-remove-btn`).addEventListener("click", () => {
+      if (!confirm(`Delete this ${cfg.label} goal?`)) return;
       removeGoal(type, goalId);
     });
 
