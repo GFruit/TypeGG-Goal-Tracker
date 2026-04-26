@@ -1808,6 +1808,7 @@ window.addEventListener("load", () => {
   // ── Playtime formatter (ms → human) ───────────────────────────
   function formatPlaytime(ms) {
     if (ms <= 0) return "0m";
+    if (ms < 60000) return `${Math.floor(ms / 1000)}s`;
     const totalMin = Math.floor(ms / 60000);
     const totalHr  = Math.floor(totalMin / 60);
     const totalDay = Math.floor(totalHr  / 24);
