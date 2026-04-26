@@ -247,8 +247,12 @@ window.addEventListener("load", () => {
     (parentContent || container.querySelector(".gt-content")).appendChild(section);
 
     // Attach remove handler
-    document.getElementById(`${goalId}-remove-btn`).addEventListener("click", () => {
-      removeGoal(type, goalId);
+    document.getElementById(`${goalId}-remove-btn`).addEventListener("click", async () => {
+      const labelEl = document.getElementById(`${goalId}-label`);
+      const labelText = labelEl ? labelEl.textContent : cfg.label;
+      if (await confirmDeleteGoal(labelText)) {
+        removeGoal(type, goalId);
+      }
     });
 
     // Wire goal-level drag
@@ -1409,10 +1413,14 @@ window.addEventListener("load", () => {
       validateImportPayload(parsed);
 
       const summary = summarizeImport(parsed);
-      const ok = confirm(
-        `Import will REPLACE your current setup with:\n\n${summary}\n\n` +
-        `Your current goals and layout will be lost (unless you copied them first).\n\nContinue?`
-      );
+      const ok = await showConfirmModal({
+        title: "Import backup?",
+        message: "This will replace your current setup with:",
+        detail: summary,
+        warning: "Your current goals and layout will be lost unless you copied them first.",
+        confirmLabel: "Import",
+        danger: true,
+      });
       if (!ok) { setBackupStatus("Import cancelled."); return; }
 
       applyImportedState(parsed);
@@ -1427,8 +1435,8 @@ window.addEventListener("load", () => {
   }
 
   // Human-readable summary of what an import payload contains, for the
-  // confirm() dialog. Counting goals per type rather than listing them
-  // individually keeps the message short.
+  // confirmation dialog. Counting goals per type rather than listing
+  // them individually keeps the message short.
   function summarizeImport(payload) {
     const lines = [];
     let totalGoals = 0;
@@ -2499,6 +2507,98 @@ async function getExpRankByUsername(username) {
   }
 
   // ── Remove goal ────────────────────────────────────────────────
+  // ── Confirm modal ──────────────────────────────────────────────
+  // Builds an ad-hoc modal asking the user to confirm an action.
+  // Resolves to true iff the user clicks the confirm button; false on
+  // cancel, backdrop click, or ESC. Cancel is focused by default —
+  // pressing Enter or ESC dismisses without confirming (safer for
+  // destructive actions). Uses textContent for dynamic strings to
+  // avoid HTML injection.
+  //
+  // Options:
+  //   title         — bold heading, e.g. "Delete goal?"
+  //   message       — body text directly under the title
+  //   detail        — optional highlighted box (multi-line ok via \n)
+  //   warning       — optional warning line under the detail box
+  //   confirmLabel  — confirm button text (default: "Confirm")
+  //   cancelLabel   — cancel button text  (default: "Cancel")
+  //   danger        — if true, confirm button uses the destructive
+  //                   red style; otherwise the primary blue style
+  function showConfirmModal({
+    title,
+    message,
+    detail = "",
+    warning = "",
+    confirmLabel = "Confirm",
+    cancelLabel = "Cancel",
+    danger = false,
+  }) {
+    return new Promise(resolve => {
+      const overlay = document.createElement("div");
+      overlay.className = "gt-confirm-overlay";
+      overlay.innerHTML = `
+        <div class="gt-confirm-modal">
+          <div class="gt-confirm-title"></div>
+          <div class="gt-confirm-message"></div>
+          <div class="gt-confirm-detail" style="display:none;"></div>
+          <div class="gt-confirm-warning" style="display:none;"></div>
+          <div class="gt-confirm-actions">
+            <button class="gt-confirm-cancel-btn"></button>
+            <button class="gt-confirm-confirm-btn"></button>
+          </div>
+        </div>
+      `;
+
+      overlay.querySelector(".gt-confirm-title").textContent = title;
+      overlay.querySelector(".gt-confirm-message").textContent = message;
+      if (detail) {
+        const el = overlay.querySelector(".gt-confirm-detail");
+        el.textContent = detail;
+        el.style.display = "";
+      }
+      if (warning) {
+        const el = overlay.querySelector(".gt-confirm-warning");
+        el.textContent = warning;
+        el.style.display = "";
+      }
+      const cancelBtn = overlay.querySelector(".gt-confirm-cancel-btn");
+      const confirmBtn = overlay.querySelector(".gt-confirm-confirm-btn");
+      cancelBtn.textContent = cancelLabel;
+      confirmBtn.textContent = confirmLabel;
+      if (danger) confirmBtn.classList.add("danger");
+
+      document.body.appendChild(overlay);
+
+      const cleanup = (result) => {
+        document.removeEventListener("keydown", onKey);
+        overlay.remove();
+        resolve(result);
+      };
+      const onKey = (e) => {
+        if (e.key === "Escape") { e.preventDefault(); cleanup(false); }
+      };
+      document.addEventListener("keydown", onKey);
+
+      cancelBtn.addEventListener("click", () => cleanup(false));
+      confirmBtn.addEventListener("click", () => cleanup(true));
+      overlay.addEventListener("click", e => { if (e.target === overlay) cleanup(false); });
+
+      // Focus Cancel by default — safer for destructive actions.
+      setTimeout(() => cancelBtn.focus(), 0);
+    });
+  }
+
+  // Thin wrapper for the goal-row ✕ button.
+  function confirmDeleteGoal(goalLabel) {
+    return showConfirmModal({
+      title: "Delete goal?",
+      message: "Are you sure you want to delete this goal?",
+      detail: goalLabel,
+      confirmLabel: "Delete",
+      danger: true,
+    });
+  }
+
   function removeGoal(type, goalId) {
     goalData[type] = goalData[type].filter(g => g.id !== goalId);
     saveGoals(type);

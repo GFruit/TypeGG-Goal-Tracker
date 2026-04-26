@@ -341,6 +341,111 @@
 .gt-confirm-btn:hover:not(:disabled) { background: #2563eb; }
 .gt-confirm-btn:disabled { opacity: 0.35; cursor: not-allowed; }
 
+/* ── Confirm modal ───────────────────────────────────────── */
+.gt-confirm-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(2px);
+  z-index: 10001; /* Above settings modal (10000) and main overlay (9999) */
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 25vh;
+}
+
+.gt-confirm-modal {
+  background: #13172C;
+  border: 1px solid #374151;
+  border-radius: 12px;
+  padding: 18px 20px;
+  width: 360px;
+  box-shadow: 0 20px 40px -8px rgba(0, 0, 0, 0.7);
+  animation: gt-modal-in 0.16s ease;
+  box-sizing: border-box;
+}
+
+.gt-confirm-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #f3f4f6;
+  margin-bottom: 8px;
+}
+
+.gt-confirm-message {
+  font-size: 12px;
+  color: #9ca3af;
+  margin-bottom: 10px;
+}
+
+.gt-confirm-detail {
+  font-size: 12px;
+  color: #e5e7eb;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 12px;
+  word-break: break-word;
+  /* Honor literal newlines in the detail string (e.g. import summary). */
+  white-space: pre-line;
+}
+
+.gt-confirm-warning {
+  font-size: 11px;
+  color: #f87171;
+  margin-bottom: 14px;
+  line-height: 1.4;
+}
+
+.gt-confirm-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.gt-confirm-cancel-btn,
+.gt-confirm-confirm-btn {
+  padding: 7px 14px;
+  border-radius: 6px;
+  border: none;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.gt-confirm-cancel-btn {
+  background: #374151;
+  color: #e5e7eb;
+}
+.gt-confirm-cancel-btn:hover { background: #4b5563; }
+.gt-confirm-cancel-btn:focus-visible {
+  outline: 2px solid #60a5fa;
+  outline-offset: 1px;
+}
+
+/* Default confirm = primary blue (matches .gt-confirm-btn). */
+.gt-confirm-confirm-btn {
+  background: #3b82f6;
+  color: white;
+}
+.gt-confirm-confirm-btn:hover { background: #2563eb; }
+.gt-confirm-confirm-btn:focus-visible {
+  outline: 2px solid #93c5fd;
+  outline-offset: 1px;
+}
+
+/* Destructive confirm = red. Applied via showConfirmModal({ danger: true }). */
+.gt-confirm-confirm-btn.danger {
+  background: #b91c1c;
+}
+.gt-confirm-confirm-btn.danger:hover { background: #991b1b; }
+.gt-confirm-confirm-btn.danger:focus-visible {
+  outline: 2px solid #fca5a5;
+  outline-offset: 1px;
+}
+
 /* ── Settings modal ──────────────────────────────────────── */
 #gt-settings-overlay {
   display: none;
