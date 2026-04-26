@@ -696,6 +696,16 @@
    needs a full border to look like a self-contained card. */
 .gt-goal-section.gt-goal-dragging { border-top-color: rgba(255, 255, 255, 0.06); }
 
+/* Force grabbing cursor everywhere while a goal is being dragged.
+   Needed because the floating goal has pointer-events:none (so
+   elementFromPoint can find drop targets beneath it) — and with
+   pointer-events:none the browser ignores that element's `cursor`
+   and shows the cursor of whatever is underneath instead. !important
+   is required to override per-element cursors (buttons, inputs, etc.)
+   the user might pass over mid-drag. */
+body.gt-dragging,
+body.gt-dragging * { cursor: grabbing !important; }
+
 /* Solo-widget drag: the whole widget floats as a unit when you grab
    the only goal inside a detached widget. Same transparency treatment
    as the floating goal so the drop target below stays visible. */

@@ -954,15 +954,16 @@ window.addEventListener("load", () => {
   settingsOverlay.innerHTML = `
     <div id="gt-settings-modal">
       <div class="gt-modal-header">
-        <div class="gt-modal-title-row">
-          <span class="gt-modal-title">Settings</span>
-          <span id="gt-settings-saved-indicator" class="gt-settings-saved-indicator">Settings saved</span>
-        </div>
+        <span class="gt-modal-title">Settings</span>
         <button id="gt-settings-close" class="gt-close-btn">✕</button>
       </div>
       <div class="gt-settings-body">
         <nav class="gt-settings-sidebar" id="gt-settings-sidebar"></nav>
         <div class="gt-settings-content" id="gt-settings-content"></div>
+      </div>
+      <div class="gt-settings-actions">
+        <button id="gt-settings-cancel" class="gt-settings-action-btn secondary">Cancel</button>
+        <button id="gt-settings-save"   class="gt-settings-action-btn primary">Save</button>
       </div>
     </div>
   `;
@@ -1149,7 +1150,7 @@ window.addEventListener("load", () => {
   let activeSettingsTabId = null;    // which sidebar tab is currently shown
   let activeRecSubTab     = "daily"; // sub-selection within the Recurrence tab
   let activeWheel         = null;    // current wheel picker (if the visible sub-tab has one)
-  let settingsDraft       = null;    // working copy of settings while the modal is open; auto-committed on each change
+  let settingsDraft       = null;    // pending edits while the modal is open; committed on Save
 
   // ── Recurrence tab ────────────────────────────────────────────
   function renderRecurrenceTab(contentEl, draft) {
@@ -1192,14 +1193,6 @@ window.addEventListener("load", () => {
     wireTimeInput("gt-rs-hour", 23);
     wireTimeInput("gt-rs-min", 59);
 
-    // Auto-save when a time input loses focus. Registered AFTER wireTimeInput
-    // so the clamp handler runs first; persistActiveFormToDraft then reads
-    // the post-clamp value via clampInt.
-    ["gt-rs-hour", "gt-rs-min"].forEach(id => {
-      const el = document.getElementById(id);
-      if (el) el.addEventListener("blur", applySettingsDraft);
-    });
-
     // Wheel init deferred one frame so offsetHeight is correct.
     requestAnimationFrame(() => {
       if (activeRecSubTab === "weekly") {
@@ -1208,7 +1201,6 @@ window.addEventListener("load", () => {
         activeWheel = createWheel(wheelEl, WEEKDAY_ITEMS, draft.recSettings.weekly.weekday, (v) => {
           draft.recSettings.weekly.weekday = v; // live-update draft so sub-tab swaps preserve it
           if (summary) summary.innerHTML = `Your weekly goals reset every <b>${WEEKDAY_NAMES[v]}</b> at…`;
-          applySettingsDraft();
         });
       } else if (activeRecSubTab === "monthly") {
         const wheelEl = document.getElementById("gt-rs-wheel");
@@ -1218,7 +1210,6 @@ window.addEventListener("load", () => {
           draft.recSettings.monthly.day = v; // live-update draft
           if (summary) summary.innerHTML = `Your monthly goals reset on the <b>${ordinal(v)}</b> at…`;
           updateMonthlyNote(v);
-          applySettingsDraft();
         });
         updateMonthlyNote(draft.recSettings.monthly.day);
       }
@@ -1264,7 +1255,6 @@ window.addEventListener("load", () => {
         draft.displaySettings.streakMode = mode;
         contentEl.querySelectorAll("[data-streak-mode]").forEach(b => b.classList.toggle("active", b === btn));
         if (hintEl) hintEl.textContent = STREAK_MODE_OPTIONS.find(o => o.value === mode)?.hint ?? "";
-        applySettingsDraft();
       });
     });
   }
@@ -1282,7 +1272,7 @@ window.addEventListener("load", () => {
   // browser or PC. Export/import act outside the modal's draft flow:
   // clicking Export downloads immediately, clicking Import and
   // confirming replaces state immediately. Both actions bypass the
-  // settings auto-save flow (commitBackupTab is a no-op).
+  // modal's Save/Cancel (commitBackupTab is a no-op).
   //
   // Schema is versioned so future shape changes can be migrated.
   const BACKUP_SCHEMA_VERSION = 1;
@@ -1524,7 +1514,7 @@ window.addEventListener("load", () => {
   // ── Capture currently-visible form values into the draft ─────
   // Number inputs only update `draft` on blur (via the wheel/callback
   // path or manual persist). Called before any action that would
-  // replace the DOM (tab/sub-tab switch) or auto-commit, so
+  // replace the DOM (tab/sub-tab switch) or commit (Save), so
   // unblurred input values aren't lost.
   function persistActiveFormToDraft() {
     if (!settingsDraft) return;
@@ -1565,44 +1555,15 @@ window.addEventListener("load", () => {
   }
 
   function closeSettingsModal() {
-    // Safety net: commit any unblurred input edits before discarding the draft.
-    // Normally each control auto-commits on change; this catches the edge case
-    // where the modal is closed (X / overlay click) while an input is still focused.
-    commitAllTabs();
     settingsOverlay.classList.remove("open");
     settingsDraft = null;
     activeWheel = null;
   }
 
-  // ── Auto-save infrastructure ──────────────────────────────────
-  // Runs every tab's commit() against the current draft. Returns true
-  // if the underlying state actually changed. Each tab's commit is
-  // already a no-op when its slice is unchanged, but we snapshot
-  // before/after as well so we know whether to flash the indicator —
-  // this avoids spurious "Settings saved" flashes from things like
-  // the wheel firing onChange with its initial value on sub-tab open.
-  function commitAllTabs() {
-    if (!settingsDraft) return false;
+  function saveSettings() {
     persistActiveFormToDraft(); // capture any unblurred input edits
-    const before = JSON.stringify({ recSettings, displaySettings });
     for (const tab of SETTINGS_TABS) tab.commit(settingsDraft);
-    const after = JSON.stringify({ recSettings, displaySettings });
-    return before !== after;
-  }
-
-  // Called by every auto-save trigger (mode click, wheel onChange, input blur).
-  // Commits the draft and surfaces the indicator iff something actually changed.
-  function applySettingsDraft() {
-    if (commitAllTabs()) showSettingsSavedIndicator();
-  }
-
-  let savedIndicatorTimer = null;
-  function showSettingsSavedIndicator() {
-    const el = document.getElementById("gt-settings-saved-indicator");
-    if (!el) return;
-    el.classList.add("visible");
-    clearTimeout(savedIndicatorTimer);
-    savedIndicatorTimer = setTimeout(() => el.classList.remove("visible"), 1500);
+    closeSettingsModal();
   }
 
   function buildSettingsSidebar() {
@@ -1632,6 +1593,8 @@ window.addEventListener("load", () => {
   // ── Wire settings modal controls ──────────────────────────────
   document.getElementById("gt-settings-btn")   .addEventListener("click", openSettingsModal);
   document.getElementById("gt-settings-close") .addEventListener("click", closeSettingsModal);
+  document.getElementById("gt-settings-cancel").addEventListener("click", closeSettingsModal);
+  document.getElementById("gt-settings-save")  .addEventListener("click", saveSettings);
   settingsOverlay.addEventListener("click", e => { if (e.target === settingsOverlay) closeSettingsModal(); });
 
   // ── Recurrence reset-time settings ─────────────────────────────
@@ -1805,6 +1768,7 @@ window.addEventListener("load", () => {
   // ── Playtime formatter (ms → human) ───────────────────────────
   function formatPlaytime(ms) {
     if (ms <= 0) return "0m";
+    if (ms < 60000) return `${Math.floor(ms / 1000)}s`;
     const totalMin = Math.floor(ms / 60000);
     const totalHr  = Math.floor(totalMin / 60);
     const totalDay = Math.floor(totalHr  / 24);
@@ -2038,7 +2002,7 @@ async function getExpRankByUsername(username) {
     chars: {
     presets: [1000, 5000, 10000, 25000, 50000, 100000],
     baselineKey: "baselineChars",
-    statKey: "completionCharactersTyped",
+    statKey: "charactersTyped",
     storageKey: "gt-goals-chars",
     label: "Chars",
     supportsTarget: true,
@@ -2151,27 +2115,39 @@ async function getExpRankByUsername(username) {
 
       if (nextRankMode) {
         // ── Next-rank sub-mode ─────────────────────────────────
-        // Keep the manual rank input visible so the user can switch to a
-        // specific rank without first un-toggling Next Rank. Typing into
-        // the input will deactivate Next Rank in the input handler below.
-        customInput.style.display = "";
-        customInput.type          = "number";
-        customInput.placeholder   = "Rank #";
+        customInput.style.display = "none";
         nextRankToggleBtn.classList.add("active");
-
+        
         const isExpType = selectedType === "exp";
         const currentRankValue = isExpType ? currentStats.expRank : currentStats.rank;
         const nr = currentRankValue != null ? currentRankValue - 1 : null;
-
+        
         if (nr != null && nr >= 1) {
-          // Just show the user's current rank — the resolved EXP/PP for the
-          // next rank is loaded asynchronously by updateRankGoals() /
-          // updateExpRankGoals() and surfaces in the goal display itself.
-          modeHint.textContent   = `Your current rank: #${currentRankValue}`;
+          modeHint.textContent   = isExpType 
+            ? `Loading EXP for rank #${nr}…` 
+            : `Loading PP for rank #${nr}…`;
           modeHint.className     = "gt-mode-hint";
           modeHint.style.display = "block";
           rankFetchedRank = nr;
           validateConfirm();
+          
+          const fetchPromise = isExpType ? getExpByRank(nr) : getPpByRank(nr);
+          
+          fetchPromise.then(value => {
+            if (isExpType) {
+              rankFetchedExp = value;
+              modeHint.textContent = `Next rank: #${nr} — ${Math.round(value).toLocaleString()} EXP required`;
+            } else {
+              rankFetchedPp = value;
+              modeHint.textContent = `Next rank: #${nr} — ${Math.round(value).toLocaleString()} PP required`;
+            }
+            modeHint.className = "gt-mode-hint";
+            
+          }).catch(() => {
+            modeHint.textContent   = "⚠ Failed to load rank data";
+            modeHint.className     = "gt-mode-hint gt-mode-hint-error";
+            confirmBtn.disabled    = true;
+          });
         } else if (currentRankValue === 1) {
           modeHint.textContent   = "⚠ Already at rank #1!";
           modeHint.className     = "gt-mode-hint gt-mode-hint-error";
@@ -2287,14 +2263,6 @@ async function getExpRankByUsername(username) {
     presetsEl.querySelectorAll(".gt-preset-chip").forEach(c => c.classList.remove("selected"));
 
     if (selectedMode === "rank") {
-      // If Next Rank was toggled and the user is now typing a specific rank,
-      // treat that as opting out of Next Rank — un-toggle the button so the
-      // UI matches the user's intent.
-      if (nextRankMode && customInput.value !== "") {
-        nextRankMode = false;
-        nextRankToggleBtn.classList.remove("active");
-      }
-
       const enteredRank = parseInt(customInput.value);
       const curRank     = selectedType === "pp" ? currentStats.rank : currentStats.expRank;
 
@@ -2541,11 +2509,20 @@ async function getExpRankByUsername(username) {
       if (selectedMode === "rank") {
         if (rankFetchedRank == null) return;
 
-        // All rank goals (next-rank or regular, PP or EXP) save with target=0
-        // initially so the modal closes instantly. updateRankGoals() /
-        // updateExpRankGoals() compute the real target in the background; the
-        // goal display shows "Loading PP..." / "Loading EXP..." in the meantime.
-        gainTarget = 0;
+        if (nextRankMode) {
+          // Save with 0 for now; updateRankGoals() will fetch the real target in the background
+          gainTarget = 0; 
+        } else if (selectedType === "exp") {
+          // For exp rank goals, save with 0 initially to close modal fast
+          // updateExpRankGoals() will fetch the real target in the background
+          gainTarget = 0;
+        } else {
+          // PP rank goal - still compute synchronously for now (could be optimized later)
+          const currentRank = data.globalRank ?? null;
+          const { pp: targetPp } = await computeRankTarget(rankFetchedRank, currentRank);
+          gainTarget = targetPp - currentVal;
+          if (gainTarget <= 0) gainTarget = 0; // already past, goal starts done
+        }
 
       } else if (selectedMode === "player") {
           if (playerFetchedValue == null) return;
@@ -2580,7 +2557,7 @@ async function getExpRankByUsername(username) {
         targetUsername: selectedMode === "player" ? playerFetchedName : undefined,
         maxQuotes: isMaxQuotes || undefined,
         filter: selectedType === "races" ? selectedFilter : undefined,
-        targetLoaded: selectedMode === "rank" ? false : true, // false for rank goals — target is loaded async by updateRankGoals/updateExpRankGoals
+        targetLoaded: selectedMode === "rank" && nextRankMode ? false : true, // false for next rank goals that need async loading
         [cfg.baselineKey]: currentVal,
         recurrence: selectedRec,
         periodStart: isRecurring ? getCurrentPeriodStart(selectedRec) : null,
@@ -2633,12 +2610,12 @@ async function getExpRankByUsername(username) {
 
     // Progress text — always gain / target
     const gainTextEl = document.getElementById(`${goalId}-gain-text`);
-    if (gd.targetRank && !gd.targetLoaded) {
-      // Any rank goal whose target hasn't been resolved by updateRankGoals /
-      // updateExpRankGoals yet — show a type-specific loading message.
-      gainTextEl.textContent = type === "exp" ? "Loading EXP..." : "Loading PP...";
+    if (gd.nextRank && !gd.targetLoaded) {
+      gainTextEl.textContent = "Loading target...";
     } else if (gd.maxQuotes && gd.target === 0) {
       gainTextEl.textContent = "Loading target...";
+    } else if (gd.targetRank && gd.target === 0 && type === "exp" && !gd.targetLoaded) {
+      gainTextEl.textContent = "Loading EXP...";
     } else if (gd.maxQuotes) {
       // For max quotes, show total completed / total max instead of gain / remaining
       const currentQuotes = gd.baselineQuotes + gain;
@@ -2790,7 +2767,7 @@ async function getExpRankByUsername(username) {
       quotes:         data.stats?.quotesTyped,
       playtime:       data.stats?.playTime,
       rank:           data.globalRank ?? null,
-      chars:          data.stats?.completionCharactersTyped,
+      chars:          data.stats?.charactersTyped,
       quickplayRaces: data.stats?.quickplayRaces,
       soloRaces:      data.stats?.soloRaces,
     };
@@ -2965,22 +2942,7 @@ async function getExpRankByUsername(username) {
 
   // ── Wrap loadStats so concurrent ticks can't stack up ─────────
   const loadStatsGuarded = inFlight(loadStats);
-
-  // ── Self-resetting stats poll (replaces setInterval) ──────────
-  // The poll exists as a fallback in case the quote-finish detector
-  // misses an event. When the detector DOES catch a quote and freshly
-  // updates the goal display, we call scheduleNextStatsPoll() to push
-  // the next fallback fetch out to a full POLL_STATS_MS — no point
-  // re-fetching seconds later when we just got fresh data.
-  let statsPollTimer = null;
-  function scheduleNextStatsPoll() {
-    clearTimeout(statsPollTimer);
-    statsPollTimer = setTimeout(() => {
-      if (anyTabVisibleRecently()) loadStatsGuarded();
-      scheduleNextStatsPoll(); // chain
-    }, POLL_STATS_MS);
-  }
-  // Note: initial loadStats() + scheduleNextStatsPoll() kicked off in leader election block below
+  // Note: actual interval + initial call set up in leader election block below
 
   // ── Quote-finish trigger ─────────────────────────────────────
   // When the user finishes a quote (#typegame-input becomes disabled),
@@ -3033,12 +2995,7 @@ async function getExpRankByUsername(username) {
         data.quotes   !== snap.quotes   ||
         data.chars    !== snap.chars   ||
         data.playtime !== snap.playtime;
-      if (changed) {
-        // We just freshly updated the goal display — push the fallback
-        // poll out to a full interval so we don't re-fetch immediately.
-        scheduleNextStatsPoll();
-        return;
-      }
+      if (changed) return;
     }
     // Fell through all retries with no change — give up.
     // The regular 20s poll will catch any eventual update.
@@ -3213,11 +3170,10 @@ async function getExpRankByUsername(username) {
           ? gd.targetRank
           : gd.targetRank + 1;
         const newPp = await ppByRank(trackedRank);
-        const newTarget = Math.max(0, newPp - gd.baselinePp);
+        const newTarget = newPp - gd.baselinePp;
 
-        if (Math.abs(newTarget - gd.target) > 0.01 || !gd.targetLoaded) {
+        if (Math.abs(newTarget - gd.target) > 0.01) {
           gd.target = newTarget;
-          gd.targetLoaded = true;
           goals[i] = gd;
           saveGoals("pp");
         }
@@ -3291,11 +3247,10 @@ async function getExpRankByUsername(username) {
           ? gd.targetRank
           : gd.targetRank + 1;
         const newExp = await expByRank(trackedRank);
-        const newTarget = Math.max(0, newExp - gd.baselineExp);
+        const newTarget = newExp - gd.baselineExp;
 
-        if (Math.abs(newTarget - gd.target) > 0.01 || !gd.targetLoaded) {
+        if (Math.abs(newTarget - gd.target) > 0.01) {
           gd.target = newTarget;
-          gd.targetLoaded = true;
           goals[i] = gd;
           saveGoals("exp");
         }
@@ -3414,9 +3369,9 @@ async function getExpRankByUsername(username) {
   // ── Start all fetch intervals. Only called once per browser,
   //    by whichever tab wins the leader lock. ─────────────────
   function startLeaderIntervals() {
-    // Primary user-stats polling (fast, self-resetting — see scheduleNextStatsPoll)
+    // Primary user-stats polling (fast)
     loadStats();
-    scheduleNextStatsPoll();
+    setInterval(runIfAnyTabVisible(loadStatsGuarded), POLL_STATS_MS);
 
     // Slow background updates — staggered initial kickoffs so we don't
     // burst the API in the first second after becoming leader
