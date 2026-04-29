@@ -169,6 +169,20 @@
   text-align: right;
 }
 
+/* Requirements sub-line (beneath the header, above the gain row).
+   Only shown for race goals with active requirements. Slightly muted
+   so it reads as supplementary context to the main label, not as
+   primary content. Cyan tint matches the requirement-chip color in
+   the modal so users mentally link "modal chip → goal label". */
+.gt-req-line {
+  font-size: 10px;
+  color: #67e8f9;
+  letter-spacing: 0.3px;
+  margin-top: 2px;
+  margin-bottom: 4px;
+  line-height: 1.3;
+}
+
 .gt-remove-btn {
   background: none;
   border: none;
@@ -200,6 +214,12 @@
   pointer-events: none;
   white-space: nowrap;
   animation: gt-gain-pop 5s ease forwards;
+}
+
+/* Strict-mode reset indicator — same animation, red colour to signal
+   "your streak just broke". */
+.gt-gain-indicator-neg {
+  color: #f87171;
 }
 
 @keyframes gt-gain-pop {
@@ -282,6 +302,110 @@
 .gt-mode-btn.active { border-color: #10b981; background: #022c22; color: #6ee7b7; }
 .gt-rec-btn.active  { border-color: #8b5cf6; background: #2e1065; color: #c4b5fd; }
 .gt-filter-btn.active { border-color: #f59e0b; background: #451a03; color: #fcd34d; }
+
+/* ── Requirements row (race goals + gain mode) ───────────
+   Three chip-shaped inputs (WPM / Acc / PP) plus a right-aligned
+   strict-mode lightning toggle. Each chip activates visually (cyan
+   border + tinted bg) when its input has a positive value. */
+.gt-req-selector {
+  display: flex;
+  gap: 5px;
+  margin-bottom: 12px;
+  align-items: stretch;
+}
+
+/* The three chips share the available width; the strict button sits
+   to the right at a fixed size. */
+.gt-req-group {
+  display: flex;
+  gap: 5px;
+  flex: 1;
+  min-width: 0; /* let the chips shrink instead of overflowing */
+}
+
+/* Chip is a label so clicking the WPM/Acc/PP text focuses the input.
+   Layout: [label] [input] (optional [suffix]) — tight gap, single row. */
+.gt-req-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  border-radius: 7px;
+  border: 1.5px solid #374151;
+  background: transparent;
+  padding: 4px 9px;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+  font-size: 11px;
+  font-weight: 500;
+  color: #9ca3af;
+  cursor: text; /* signal that clicking lands you in the input */
+  user-select: none;
+}
+.gt-req-chip:hover { border-color: #4b5563; color: #e5e7eb; }
+.gt-req-chip.active {
+  border-color: #06b6d4;
+  background: #083344;
+  color: #67e8f9;
+}
+
+.gt-req-label {
+  flex-shrink: 0;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+/* The input is borderless inside the chip — the chip provides the
+   border. tabular-nums keeps "100" / "98.5" from jittering as digits change. */
+.gt-req-input {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  outline: none;
+  padding: 0;
+  font-variant-numeric: tabular-nums;
+  -moz-appearance: textfield;
+}
+.gt-req-input::-webkit-outer-spin-button,
+.gt-req-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.gt-req-input::placeholder { color: #6b7280; }
+
+.gt-req-suffix {
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+/* Lightning strict-mode toggle — square, right-aligned, same height as chips. */
+.gt-req-strict-btn {
+  flex-shrink: 0;
+  width: 32px;
+  border-radius: 7px;
+  border: 1.5px solid #374151;
+  background: transparent;
+  color: #9ca3af;
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+.gt-req-strict-btn:hover {
+  border-color: #4b5563;
+  color: #e5e7eb;
+}
+.gt-req-strict-btn.active {
+  border-color: #06b6d4;
+  background: #083344;
+  color: #67e8f9;
+}
 
 /* ── Target row ──────────────────────────────────────────── */
 .gt-target-row {

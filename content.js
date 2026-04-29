@@ -232,6 +232,7 @@ window.addEventListener("load", () => {
           <button id="${goalId}-remove-btn" class="gt-remove-btn" title="Remove goal">✕</button>
         </div>
       </div>
+      <div id="${goalId}-req-line" class="gt-req-line" style="display:none;"></div>
       <div class="gt-gain-row">
         <span class="gt-gain-text-wrap">
           <span id="${goalId}-gain-text">0 / 0</span>
@@ -949,6 +950,27 @@ window.addEventListener("load", () => {
           <button class="gt-mode-btn"        data-mode="rank" id="gt-rank-btn" style="display:none;">Rank</button>
           <button class="gt-mode-btn"        data-mode="player" id="gt-player-btn" style="display:none;">Player</button>
           </div>
+      </div>
+      <div id="gt-req-row" style="display:none;">
+        <div class="gt-section-label">Requirements</div>
+        <div class="gt-req-selector">
+          <div class="gt-req-group">
+            <label class="gt-req-chip" data-req="wpm">
+              <span class="gt-req-label">WPM</span>
+              <input class="gt-req-input" type="number" min="1" placeholder="—" data-req="wpm" />
+            </label>
+            <label class="gt-req-chip" data-req="accuracy">
+              <span class="gt-req-label">Acc</span>
+              <input class="gt-req-input" type="number" min="1" max="100" step="0.1" placeholder="—" data-req="accuracy" />
+              <span class="gt-req-suffix">%</span>
+            </label>
+            <label class="gt-req-chip" data-req="pp">
+              <span class="gt-req-label">PP</span>
+              <input class="gt-req-input" type="number" min="1" step="0.1" placeholder="—" data-req="pp" />
+            </label>
+          </div>
+          <button id="gt-req-strict-btn" class="gt-req-strict-btn" type="button" title="Strict mode — every race must meet requirements; goal resets to 0 on a miss">⚡</button>
+        </div>
       </div>
       <div id="gt-rec-row">
         <div class="gt-section-label">Recurrence</div>
@@ -2091,6 +2113,9 @@ async function getExpRankByUsername(username) {
   const modeRow     = document.getElementById("gt-mode-row");
   const recRow      = document.getElementById("gt-rec-row");
   const filterRow   = document.getElementById("gt-filter-row");
+  const reqRow      = document.getElementById("gt-req-row");
+  const reqInputs   = document.querySelectorAll(".gt-req-input");
+  const reqStrictBtn = document.getElementById("gt-req-strict-btn");
   const modeHint    = document.getElementById("gt-mode-hint");
   const amountLabel = document.getElementById("gt-amount-label");
 
@@ -2099,6 +2124,10 @@ async function getExpRankByUsername(username) {
   let selectedMode  = "gain";
   let selectedFilter = "all"; // for races: "all" or "quickplay"
   let selectedValue = null; // always raw units (ms for playtime)
+  // Requirements state — only meaningful when type=races + mode=gain.
+  // null on each axis = that axis isn't required. strict = goal resets to 0 on a miss.
+  let selectedReq    = { wpm: null, accuracy: null, pp: null };
+  let selectedStrict = false;
 
   // rank mode state
   let rankFetchedPp     = null; // PP fetched for the entered rank
@@ -2121,6 +2150,61 @@ async function getExpRankByUsername(username) {
   function formatPreset(n) {
     if (n >= 1000) return (n/1000)%1===0 ? `${n/1000}k` : `${(n/1000).toFixed(1)}k`;
     return String(n);
+  }
+
+  // ── Requirements helpers ───────────────────────────────────────
+  // Race goals (gain mode) can attach a `requirements` object that gates
+  // which races count: only races meeting EVERY active threshold qualify.
+  // Active = non-null. Missing axes mean "no requirement on this axis".
+  function hasAnyReq(req) {
+    return !!(req && (req.wpm != null || req.accuracy != null || req.pp != null));
+  }
+
+  // Does a single race object (from /users/{username}/races) meet all
+  // active thresholds in `req`? Missing race fields default to 0 (treated
+  // as "fails any threshold") rather than skipping the check, since the
+  // user explicitly set a threshold and a missing field == not meeting it.
+  function meetsRequirements(race, req) {
+    if (!race || !req) return false;
+    if (req.wpm      != null && (Number(race.wpm)      || 0)       < req.wpm)      return false;
+    // race.accuracy is 0–1 (e.g. 1.0 = 100%); req.accuracy is 0–100 (user input).
+    // Multiply race side by 100 to align scales — without this, a perfect 1.0
+    // race never beats a 90+ threshold.
+    if (req.accuracy != null && (Number(race.accuracy) || 0) * 100 < req.accuracy) return false;
+    if (req.pp       != null && (Number(race.pp)       || 0)       < req.pp)       return false;
+    return true;
+  }
+
+  // Pre-check applied BEFORE meetsRequirements when a goal has a filter
+  // (quickplay / solo). The race object exposes `gamemode` ∈ {"quickplay","solo"}.
+  // Behavior:
+  //   - filter="all" / null / undefined → every race matches
+  //   - filter="quickplay"               → only quickplay races match
+  //   - filter="solo"                    → only solo races match
+  // Races that don't match the filter are SKIPPED entirely in the evaluator
+  // — they don't increment qualifyingProgress AND they don't trigger a
+  // strict-mode reset. This matches the user's mental model: "a slow solo
+  // race shouldn't break my quickplay-only streak".
+  function raceMatchesFilter(race, filter) {
+    if (!filter || filter === "all") return true;
+    return race?.gamemode === filter;
+  }
+
+  // Compact human-readable suffix for the goal label.
+  // e.g., { wpm: 100, accuracy: 98 } → "100+ WPM, 98%+ ACC"
+  // Uppercase units + spaces so units are unambiguous on first read.
+  // PP/WPM use toLocaleString so 4-digit values get locale separators
+  // (e.g. "1,200+ PP" in en-US, "1'200+ PP" in de-CH).
+  // Note: % glues to the number ("100%+ ACC") because that's how accuracy
+  // is universally read; the bare numbers (WPM, PP) get a space ("150+ WPM").
+  function formatRequirementsSuffix(req, strict) {
+    const parts = [];
+    if (req.wpm      != null) parts.push(`${Number(req.wpm).toLocaleString()}+ WPM`);
+    if (req.pp       != null) parts.push(`${Number(req.pp).toLocaleString()}+ PP`);
+    if (req.accuracy != null) parts.push(`${req.accuracy}%+ ACC`);
+    if (parts.length === 0) return "";
+    const joined = parts.join(", ");
+    return strict ? `⚡ ${joined}` : joined;
   }
 
   function updateModeHint() {
@@ -2456,6 +2540,9 @@ async function getExpRankByUsername(username) {
     // Recurrence row mirrors the final mode: shown only for gain
     recRow.style.display = (selectedMode === "gain") ? "block" : "none";
 
+    // Requirements row: races + gain only
+    updateReqRowVisibility();
+
     renderPresets();
   }));
 
@@ -2467,6 +2554,7 @@ async function getExpRankByUsername(username) {
       recBtns.forEach(b => b.classList.toggle("active", b.dataset.rec === "none"));
       recRow.style.display = "none";
     } else { recRow.style.display = "block"; }
+    updateReqRowVisibility();
     renderPresets();
   }));
 
@@ -2480,6 +2568,50 @@ async function getExpRankByUsername(username) {
     selectedFilter = btn.dataset.filter;
   }));
 
+  // ── Requirements inputs / strict toggle ─────────────────────────
+  // Each input drives one axis of selectedReq. Empty / 0 / NaN = inactive
+  // (null). Any positive number activates that axis. The chip's .active
+  // class is purely visual (cyan border) and follows the input value.
+  reqInputs.forEach(input => {
+    function syncFromInput() {
+      const axis = input.dataset.req;
+      const v = parseFloat(input.value);
+      const valid = !isNaN(v) && v > 0;
+      selectedReq[axis] = valid ? v : null;
+      const chip = input.closest(".gt-req-chip");
+      if (chip) chip.classList.toggle("active", valid);
+    }
+    input.addEventListener("input", syncFromInput);
+    // Defensive sync on blur — covers paste / autofill paths that don't fire 'input' reliably
+    input.addEventListener("blur", syncFromInput);
+  });
+
+  reqStrictBtn.addEventListener("click", () => {
+    selectedStrict = !selectedStrict;
+    reqStrictBtn.classList.toggle("active", selectedStrict);
+  });
+
+  // Reset the requirements UI to the cleared / inactive state. Called
+  // on modal open, on type/mode changes that hide the row, and on close.
+  function resetRequirementsUI() {
+    selectedReq = { wpm: null, accuracy: null, pp: null };
+    selectedStrict = false;
+    reqInputs.forEach(input => {
+      input.value = "";
+      const chip = input.closest(".gt-req-chip");
+      if (chip) chip.classList.remove("active");
+    });
+    reqStrictBtn.classList.remove("active");
+  }
+
+  // The requirements row is only meaningful for races + gain.
+  // Called from type / mode click handlers.
+  function updateReqRowVisibility() {
+    const visible = selectedType === "races" && selectedMode === "gain";
+    reqRow.style.display = visible ? "block" : "none";
+    if (!visible) resetRequirementsUI();
+  }
+
   function openModal() {
     overlay.classList.add("open");
     typeBtns.forEach(b => b.classList.toggle("active", b.dataset.type === "exp"));
@@ -2489,10 +2621,12 @@ async function getExpRankByUsername(username) {
     selectedType = "exp"; selectedRec = "none"; selectedMode = "gain"; selectedFilter = "all";
     rankFetchedPp = null; rankFetchedRank = null; nextRankMode = false;
     maxQuotesMode = false; maxQuotesFetched = null;
+    resetRequirementsUI();
     playerBtn.style.display = (selectedType === "pp" || selectedType === "exp") ? "" : "none";
     rankBtn.style.display = (selectedType === "pp" || selectedType === "exp") ? "" : "none";
     nextRankRow.style.display = "none";
     filterRow.style.display = "none"; // hide filter row initially (only show for races)
+    reqRow.style.display = "none";    // hide req row initially (only show for races + gain)
     modeRow.style.display = "block"; recRow.style.display = "block";
     renderPresets();
   }
@@ -2500,6 +2634,7 @@ async function getExpRankByUsername(username) {
     overlay.classList.remove("open");
     selectedValue = null; rankFetchedPp = null; rankFetchedRank = null; nextRankMode = false;
     maxQuotesMode = false; maxQuotesFetched = null;
+    resetRequirementsUI();
     clearTimeout(rankDebounce);
     customInput.value = "";
   }
@@ -2697,7 +2832,16 @@ async function getExpRankByUsername(username) {
 
       const isRecurring = selectedRec !== "none";
       const goalId = generateGoalId(selectedType);
-      
+
+      // Requirements: only set for race + gain goals where the user actually
+      // entered ≥1 threshold. Stored as { wpm, accuracy, pp } (any subset can be null).
+      // qualifyingProgress replaces the gain calculation for these goals — it's
+      // incremented by the requirement evaluator (see evaluateRaceRequirements),
+      // not derived from currentVal - baseline.
+      const reqActive = selectedType === "races" && selectedMode === "gain" && hasAnyReq(selectedReq);
+      const requirements = reqActive ? { ...selectedReq } : undefined;
+      const strictMode   = reqActive ? selectedStrict : undefined;
+
       const newGoal = {
         id: goalId,
         target: gainTarget,
@@ -2713,6 +2857,19 @@ async function getExpRankByUsername(username) {
         streak: 0,
         totalCompletions: 0,
         completedThisPeriod: false,
+        // Requirements fields (undefined fields are dropped on JSON serialization)
+        requirements,
+        strictMode,
+        qualifyingProgress: reqActive ? 0 : undefined,
+        // Snapshot of the LIFETIME races stat we've already evaluated.
+        // The evaluator works off currentStats.races (lifetime), not the
+        // filtered counter — so this must be seeded from the same field.
+        // Bug fix: previously seeded from `currentVal`, which for a quickplay
+        // goal is `quickplayRaces` (e.g. 200) while the evaluator's snapshot
+        // was lifetime races (e.g. 5000). Mismatch → delta of 4800 → goal
+        // instantly filled itself with the most recent threshold-passing
+        // races. Always seed from lifetime here.
+        lastEvalRaces: reqActive ? (currentStats.races ?? 0) : undefined,
       };
 
       goalData[selectedType].push(newGoal);
@@ -2736,6 +2893,9 @@ async function getExpRankByUsername(username) {
         inFlight(updateRankGoals)();
         inFlight(updateExpRankGoals)();
         inFlight(updateMaxQuotesGoals)();
+        // Newly-created req goal — kick off an evaluation in case races
+        // happened between the cached baseline and now (rare, but cheap to check)
+        if (reqActive) evaluateRaceRequirementsGuarded();
       }
     } catch (err) { console.error("Failed to set goal:", err); }
   });
@@ -2815,6 +2975,16 @@ async function getExpRankByUsername(username) {
     if (isRecurring) { countdownEl.textContent = formatCountdown(getNextResetTime(gd.recurrence) - Date.now()); countdownEl.style.display = "block"; }
     else countdownEl.style.display = "none";
 
+    // Requirement line (sub-row beneath the header) — shown only for race
+    // goals with active requirements. Always reset to hidden first so that
+    // a goal that lost its requirements (or a non-req goal) doesn't keep
+    // a stale line from a previous render.
+    const reqLineEl = document.getElementById(`${goalId}-req-line`);
+    if (reqLineEl) {
+      reqLineEl.textContent = "";
+      reqLineEl.style.display = "none";
+    }
+
     if (gd.nextRank && gd.targetRank) {
       document.getElementById(`${goalId}-label`).textContent = `${cfg.label} → #${gd.targetRank} (next rank)`;
     } else if (gd.targetRank) {
@@ -2824,6 +2994,17 @@ async function getExpRankByUsername(username) {
         `${cfg.label} (vs ${gd.targetUsername})`;
     } else if (gd.maxQuotes) {
       document.getElementById(`${goalId}-label`).textContent = `${cfg.label} → max quotes`;
+    } else if (type === "races" && hasAnyReq(gd.requirements)) {
+      // Requirement-bearing race goal — keep main label clean (just the
+      // type + filter chip) and put the threshold summary on its own row
+      // so it doesn't compete with the recurrence badge / streak counter
+      // that already live in the header.
+      const filterStr = (gd.filter && gd.filter !== "all") ? ` (${gd.filter})` : "";
+      document.getElementById(`${goalId}-label`).textContent = `${cfg.label}${filterStr}`;
+      if (reqLineEl) {
+        reqLineEl.textContent = formatRequirementsSuffix(gd.requirements, gd.strictMode);
+        reqLineEl.style.display = "block";
+      }
     } else if (type === "races" && gd.filter === "quickplay") {
       document.getElementById(`${goalId}-label`).textContent = `${cfg.label} (quickplay)`;
     } else if (type === "races" && gd.filter === "solo") {
@@ -2839,17 +3020,22 @@ async function getExpRankByUsername(username) {
       scheduleNextRankReset(goalId, type);
     }
 
-    // ── Gain delta indicator (+X pop-up) ───────────────────────
-    if (gainDelta > 0) {
-      // Format the delta the same way the gain text is formatted
+    // ── Gain delta indicator (+X / −X pop-up) ──────────────────
+    // Positive delta = green "+N" indicator (a qualifying race).
+    // Negative delta = red "−N ⚡" indicator (strict-mode reset on a miss).
+    if (gainDelta !== 0) {
+      const positive = gainDelta > 0;
+      const absDelta = Math.abs(gainDelta);
       let deltaStr;
       if (cfg.isTime) {
-        deltaStr = `+${formatPlaytime(gainDelta)}`;
+        deltaStr = `${positive ? "+" : "−"}${formatPlaytime(absDelta)}`;
       } else if (cfg.decimals > 0) {
-        deltaStr = `+${parseFloat(gainDelta).toFixed(cfg.decimals)}`;
+        deltaStr = `${positive ? "+" : "−"}${parseFloat(absDelta).toFixed(cfg.decimals)}`;
       } else {
-        deltaStr = `+${Math.round(gainDelta).toLocaleString()}`;
+        deltaStr = `${positive ? "+" : "−"}${Math.round(absDelta).toLocaleString()}`;
       }
+      // Append the lightning glyph for strict resets so the cause is obvious
+      if (!positive) deltaStr += " ⚡";
 
       // Remove any existing indicator so re-triggering restarts the animation
       const existing = document.getElementById(`${goalId}-gain-indicator`);
@@ -2857,7 +3043,8 @@ async function getExpRankByUsername(username) {
 
       const indicator = document.createElement("span");
       indicator.id = `${goalId}-gain-indicator`;
-      indicator.className = "gt-gain-indicator";
+      // Reuse the same CSS animation; .gt-gain-indicator-neg overrides the colour
+      indicator.className = positive ? "gt-gain-indicator" : "gt-gain-indicator gt-gain-indicator-neg";
       indicator.textContent = deltaStr;
 
       // Insert into the gain row so it sits next to the progress text
@@ -2925,6 +3112,8 @@ async function getExpRankByUsername(username) {
   // ── Apply fetched user data to in-memory state + render ──────
   function applyUserData(data) {
     if (!data) return;
+    // Snapshot prev races BEFORE we overwrite — used to gate requirement evaluation
+    const prevRaces = currentStats.races;
     currentStats.exp            = data.exp;
     currentStats.pp             = data.pp;
     currentStats.races          = data.races;
@@ -2935,6 +3124,16 @@ async function getExpRankByUsername(username) {
     currentStats.quickplayRaces = data.quickplayRaces;
     currentStats.soloRaces      = data.soloRaces;
     renderAllGoals();
+
+    // Leader-only: when the lifetime races count changes, re-evaluate any
+    // race goals that carry requirements. We trigger on ANY races-stat
+    // change (not just increases) to also handle the initial-hydration
+    // case where prevRaces was null and a goal's lastEvalRaces is behind.
+    // The function self-gates further on whether any goal actually has
+    // pending races to look at.
+    if (isLeader && data.races != null && data.races !== prevRaces) {
+      evaluateRaceRequirementsGuarded();
+    }
   }
 
   // ── Render all goal sections using in-memory state ───────────
@@ -3038,6 +3237,7 @@ async function getExpRankByUsername(username) {
         }
 
         const isRecurring = !!(gd.recurrence && gd.recurrence !== "none");
+        const hasReq = type === "races" && hasAnyReq(gd.requirements);
 
         // Period reset check
         if (isRecurring) {
@@ -3052,15 +3252,36 @@ async function getExpRankByUsername(username) {
             const nextTotal  = completed ? prevTotal + 1 : prevTotal;
             gd = { ...gd, [cfg.baselineKey]: currentVal, periodStart: currentPeriodStart,
                    streak: nextStreak, totalCompletions: nextTotal, completedThisPeriod: false };
+            // Requirement goals: also reset the qualifying progress and
+            // jump lastEvalRaces forward to the current count, so races
+            // from the previous period don't leak into the new one.
+            if (hasReq) {
+              gd.qualifyingProgress = 0;
+              gd.lastEvalRaces      = currentVal;
+            }
             goals[i] = gd;
             saveGoals(type);
           }
         }
 
-        const gain = Math.max(0, currentVal - gd[cfg.baselineKey]);
+        // For requirement goals, ignore the lifetime-stat delta and use
+        // qualifyingProgress instead. The evaluator (evaluateRaceRequirements)
+        // is the only writer of qualifyingProgress; render is purely a reader here.
+        const gain = hasReq
+          ? (gd.qualifyingProgress ?? 0)
+          : Math.max(0, currentVal - gd[cfg.baselineKey]);
         // Compute delta for the +X indicator. Skip on first render (prevGain == null).
         const prevGain = prevGainMap[goalId];
-        const gainDelta = (prevGain != null && gain > prevGain) ? gain - prevGain : 0;
+        let gainDelta = 0;
+        if (prevGain != null) {
+          if (gain > prevGain) {
+            gainDelta = gain - prevGain;
+          } else if (gain < prevGain && hasReq && gd.strictMode) {
+            // Strict mode reset — surface this with a negative indicator
+            // so the user sees WHY their progress dropped.
+            gainDelta = gain - prevGain; // negative
+          }
+        }
         prevGainMap[goalId] = gain;
         
 
@@ -3140,9 +3361,24 @@ async function getExpRankByUsername(username) {
     for (let i = 0; i < QF_RETRY_DELAYS_MS.length; i++) {
       await new Promise(r => setTimeout(r, QF_RETRY_DELAYS_MS[i]));
 
+      // Prefetch /races IN PARALLEL with the user-data fetch. Both arrive
+      // around the same time, and the cache primed here is consumed by the
+      // eval inside applyUserData → req-goal indicator now pops alongside
+      // the non-req gain indicators instead of ~1s later.
+      // Only the leader prefetches (followers don't run the eval anyway).
+      const racesPrefetch = isLeader ? prefetchRacesIfNeeded() : null;
+
       let data;
       try { data = await fetchUserData(); }
-      catch { continue; } // transient error — try again next tick
+      catch {
+        if (racesPrefetch) await racesPrefetch; // don't leak the promise
+        continue;
+      }
+
+      // Wait for prefetch to land before applyUserData triggers the eval —
+      // otherwise the eval might fire before the cache is warm and fall
+      // back to a sequential fetch (defeating the optimization).
+      if (racesPrefetch) await racesPrefetch;
 
       // Always apply + broadcast the freshest data we got
       applyUserData(data);
@@ -3499,6 +3735,185 @@ async function getExpRankByUsername(username) {
   // Check for player PP updates every 60 seconds
   // Interval set up in leader election block below
 
+  // ── /races endpoint cache ────────────────────────────────────
+  // Used to eliminate the gain-indicator lag for requirement goals.
+  //
+  // Without a cache: on every quote-finish, fetchUserData runs and updates
+  // currentStats.races, applyUserData renders non-req goals (indicator pops),
+  // then evaluator triggers a SECOND HTTP fetch to /races and only then
+  // updates req goals (indicator pops ~1s later).
+  //
+  // With this cache + a parallel prefetch on quote-finish: /races is fetched
+  // alongside fetchUserData, so by the time applyUserData triggers the eval,
+  // the data is already sitting in cache and the eval is effectively
+  // synchronous → req-goal indicator pops at the same time as non-req ones.
+  //
+  // TTL is short — just long enough to bridge the gap between prefetch and
+  // applyUserData. Much longer and we'd risk evaluating against stale data
+  // if a user keeps racing while a previous /races response is still cached.
+  const RACES_CACHE_TTL_MS = 3000;
+  let racesEndpointCache = null; // { races: [...], ts: <ms> }
+
+  function isRacesCacheFresh() {
+    return racesEndpointCache && (Date.now() - racesEndpointCache.ts) < RACES_CACHE_TTL_MS;
+  }
+
+  // Fetches the /v1/users/<name>/races list. Returns the races array or
+  // throws on auth/network failure (caller handles). Always updates the
+  // cache on success so a parallel fetcher (e.g. quote-finish prefetch)
+  // benefits the next eval.
+  async function fetchRacesEndpoint() {
+    const { username } = getAuth();
+    if (!username) throw new Error("no auth");
+    const url = `https://api.typegg.io/v1/users/${encodeURIComponent(username)}/races`;
+    const r = await fetch(url, { headers: authHeaders() });
+    if (!r.ok) throw new Error(`races endpoint ${r.status}`);
+    const data = await r.json();
+    const races = Array.isArray(data?.races) ? data.races : null;
+    if (races) racesEndpointCache = { races, ts: Date.now() };
+    return races;
+  }
+
+  // Public helper: returns races, using cache when fresh.
+  async function getRecentRacesData() {
+    if (isRacesCacheFresh()) return racesEndpointCache.races;
+    return await fetchRacesEndpoint();
+  }
+
+  // Prefetch only if there's at least one req goal AND we don't already
+  // have fresh cache. Fires-and-forgets on error so it never blocks the
+  // quote-finish flow.
+  function prefetchRacesIfNeeded() {
+    const goals = goalData.races;
+    if (!goals || !goals.some(g => hasAnyReq(g.requirements))) return Promise.resolve();
+    if (isRacesCacheFresh()) return Promise.resolve();
+    return fetchRacesEndpoint().catch(() => {/* swallow */});
+  }
+
+
+  // For race goals carrying requirements, the displayed gain isn't the
+  // raw delta in the lifetime `races` stat — it's `qualifyingProgress`,
+  // counting only races that meet every active threshold. This function
+  // walks the user's most recent races (via /users/{username}/races) and
+  // updates qualifyingProgress for each requirement-bearing goal.
+  //
+  // Strict mode: a single non-qualifying race resets qualifyingProgress
+  // to 0 — UNTIL the goal is completed; afterwards strictness no longer
+  // applies (consistent with the "10 in a row to complete" semantics).
+  //
+  // Filter interaction: the evaluator uses `currentStats.races` (lifetime
+  // total) for delta math — i.e. "how many recent races to look at" — and
+  // then per-race applies the goal's filter via raceMatchesFilter (using
+  // each race's `gamemode` field). Non-matching races are invisible: they
+  // don't qualify and they don't trigger strict resets. This means filter
+  // and requirements compose cleanly (e.g. "5 quickplay races at 100+ WPM").
+  async function evaluateRaceRequirements() {
+    if (!isLeader) return;
+    const goals = goalData.races;
+    if (!goals || goals.length === 0) return;
+    if (currentStats.races == null) return;
+
+    // Snapshot currentStats.races at entry so we use a consistent count
+    // across the async fetch boundary. If a race finishes WHILE we're
+    // fetching, currentStats.races bumps mid-flight; using the snapshot
+    // means we don't accidentally treat the still-uncounted race as
+    // already-evaluated. The next applyUserData → eval cycle picks it up.
+    const racesSnapshot = currentStats.races;
+
+    // Filter to goals that actually need work
+    const targets = goals
+      .map((g, i) => ({ g, i }))
+      .filter(({ g }) => hasAnyReq(g.requirements) &&
+                         racesSnapshot > (g.lastEvalRaces ?? g[GOAL_CONFIG.races.baselineKey] ?? 0));
+    if (targets.length === 0) return;
+
+    // Maximum number of recent races we may need to look at across all goals.
+    // The /users/{username}/races endpoint returns a chunk of recent races
+    // (typically newest-first); we trust that races[0] is the latest.
+    const maxDelta = Math.max(...targets.map(({ g }) =>
+      racesSnapshot - (g.lastEvalRaces ?? g[GOAL_CONFIG.races.baselineKey] ?? 0)
+    ));
+    if (maxDelta <= 0) return;
+
+    // Fetch the user's recent race list (via cache when warm).
+    let recentRaces;
+    try {
+      recentRaces = await getRecentRacesData();
+    } catch (err) {
+      console.error("Race requirement fetch failed:", err);
+      return;
+    }
+    if (!Array.isArray(recentRaces) || recentRaces.length === 0) return;
+
+    let changed = false;
+    for (const { i } of targets) {
+      const gd = goals[i];
+      if (!gd) continue;
+      const baseline = gd[GOAL_CONFIG.races.baselineKey] ?? 0;
+      const lastEval = gd.lastEvalRaces ?? baseline;
+      const delta = racesSnapshot - lastEval;
+      if (delta <= 0) continue;
+
+      // The new races are the most recent `delta` in the API response.
+      // recentRaces is newest-first; reverse the slice so we evaluate in
+      // chronological order — important for strict-mode reset semantics
+      // (a streak of qualifies followed by a miss should reset, not the
+      // other way around).
+      const window = recentRaces.slice(0, Math.min(delta, recentRaces.length));
+      const chronological = window.slice().reverse();
+
+      let qualifying = gd.qualifyingProgress ?? 0;
+      const target = gd.target ?? 0;
+
+      for (const race of chronological) {
+        // Strict-only freeze: once a strict goal has been completed, stop
+        // counting. A subsequent miss must NOT undo the completion (cruel),
+        // and we don't over-fill either (the goal is done).
+        //
+        // Non-strict goals keep counting past target — same UX as regular
+        // gain goals which show "55 / 50" once you blow past your target.
+        // Resetting isn't a concern here since strictMode is off.
+        if (gd.strictMode && target > 0 && qualifying >= target) break;
+
+        // Filter check: a race that doesn't match the goal's filter is
+        // invisible to this goal — neither qualifying nor strict-resetting.
+        // (e.g. a 60 WPM solo race during a "100+ WPM quickplay" strict goal
+        // shouldn't break the streak.)
+        if (!raceMatchesFilter(race, gd.filter)) continue;
+
+        if (meetsRequirements(race, gd.requirements)) {
+          qualifying++;
+        } else if (gd.strictMode) {
+          qualifying = 0;
+        }
+        // else: not strict + not qualifying → no change
+      }
+
+      // Cap qualifyingProgress at target ONLY for strict goals — for the
+      // same reason as the freeze above. Non-strict goals are allowed to
+      // exceed target so the user gets the same "overshoot" feedback as
+      // regular gain goals.
+      if (gd.strictMode && target > 0 && qualifying > target) qualifying = target;
+
+      // Always advance lastEvalRaces to the snapshot — even if the API
+      // returned fewer races than the delta (in which case we missed a few).
+      // Trade-off: we might under-count by 1-2 races during API lag, but we
+      // never DOUBLE-count, which is the bigger correctness concern.
+      if (qualifying !== (gd.qualifyingProgress ?? 0) || lastEval !== racesSnapshot) {
+        goals[i] = { ...gd, qualifyingProgress: qualifying, lastEvalRaces: racesSnapshot };
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      saveGoals("races");
+      renderAllGoals();
+    }
+  }
+
+  // Wrap with inFlight so concurrent triggers (rapid quote-finishes) coalesce
+  const evaluateRaceRequirementsGuarded = inFlight(evaluateRaceRequirements);
+
   // ── Max quotes goal target computation ────────────────────────
   async function updateMaxQuotesGoals() {
     try {
@@ -3550,6 +3965,7 @@ async function getExpRankByUsername(username) {
     setTimeout(() => runIfAnyTabVisible(inFlight(updateExpRankGoals))(),   6_000);
     setTimeout(() => runIfAnyTabVisible(inFlight(updatePlayerGoals))(),    9_000);
     setTimeout(() => runIfAnyTabVisible(inFlight(updateMaxQuotesGoals))(), 12_000);
+    setTimeout(() => runIfAnyTabVisible(evaluateRaceRequirementsGuarded)(), 15_000);
     updateExpRankTracking(); // gated internally on having EXP rank goals
 
     setInterval(runIfAnyTabVisible(inFlight(updateRankGoals)),       POLL_SLOW_MS);
@@ -3557,6 +3973,11 @@ async function getExpRankByUsername(username) {
     setInterval(runIfAnyTabVisible(inFlight(updatePlayerGoals)),     POLL_SLOW_MS);
     setInterval(runIfAnyTabVisible(inFlight(updateMaxQuotesGoals)),  POLL_SLOW_MS);
     setInterval(runIfAnyTabVisible(inFlight(updateExpRankTracking)), POLL_SLOW_MS);
+    // Slow safety-net for race requirement goals — the primary trigger is
+    // applyUserData detecting a races stat bump (driven by quote-finish events
+    // and the 20s stats poll). This interval just catches edge cases where
+    // a quote-finish was missed and stats were already in sync on next render.
+    setInterval(runIfAnyTabVisible(evaluateRaceRequirementsGuarded), POLL_SLOW_MS);
   }
 
   // ── Channel listener (followers receive stats from leader) ──
@@ -3618,6 +4039,7 @@ async function getExpRankByUsername(username) {
           if (t === 'pp')     inFlight(updateRankGoals)();
           if (t === 'exp')    inFlight(updateExpRankGoals)();
           if (t === 'quotes') inFlight(updateMaxQuotesGoals)();
+          if (t === 'races')  evaluateRaceRequirementsGuarded();
           if (t === 'pp' || t === 'exp') inFlight(updatePlayerGoals)();
         }
       }
@@ -3670,6 +4092,7 @@ async function getExpRankByUsername(username) {
           if (type === 'pp')     inFlight(updateRankGoals)();
           if (type === 'exp')    inFlight(updateExpRankGoals)();
           if (type === 'quotes') inFlight(updateMaxQuotesGoals)();
+          if (type === 'races')  evaluateRaceRequirementsGuarded();
           if (type === 'pp' || type === 'exp') inFlight(updatePlayerGoals)();
         }
         return;
