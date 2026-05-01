@@ -183,6 +183,17 @@
   line-height: 1.3;
 }
 
+/* Second req line (LEN/DIFF — quote-property thresholds).
+   Slightly more muted than the skill line to convey the visual hierarchy
+   "user-skill is primary, text-properties are secondary". Negative top
+   margin tightens the gap so the two lines feel like a paired group
+   rather than two separate annotations. */
+.gt-req-line-quote {
+  color: #5eced8;
+  margin-top: -2px;
+  opacity: 0.85;
+}
+
 .gt-remove-btn {
   background: none;
   border: none;
@@ -312,6 +323,14 @@
   gap: 5px;
   margin-bottom: 12px;
   align-items: stretch;
+}
+
+/* Second requirements row (LEN / DIFF — quote-property thresholds).
+   Tighter top margin since it follows another req row, and no strict
+   button on this row (strict applies to the whole goal but visually
+   anchors to the skill row above). */
+.gt-req-selector-bottom {
+  margin-top: -7px; /* tighten gap; cancels half the previous row's bottom margin */
 }
 
 /* The three chips share the available width; the strict button sits

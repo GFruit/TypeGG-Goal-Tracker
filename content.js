@@ -233,6 +233,7 @@ window.addEventListener("load", () => {
         </div>
       </div>
       <div id="${goalId}-req-line" class="gt-req-line" style="display:none;"></div>
+      <div id="${goalId}-req-line-2" class="gt-req-line gt-req-line-quote" style="display:none;"></div>
       <div class="gt-gain-row">
         <span class="gt-gain-text-wrap">
           <span id="${goalId}-gain-text">0 / 0</span>
@@ -970,6 +971,22 @@ window.addEventListener("load", () => {
             </label>
           </div>
           <button id="gt-req-strict-btn" class="gt-req-strict-btn" type="button" title="Strict mode — every race must meet requirements; goal resets to 0 on a miss">⚡</button>
+        </div>
+        <!-- Second row: quote-property requirements (length + difficulty).
+             These are about the text itself, not the user's performance,
+             so they live on their own row. Strict button stays anchored
+             to the skill row — it applies to the whole goal regardless. -->
+        <div class="gt-req-selector gt-req-selector-bottom">
+          <div class="gt-req-group">
+            <label class="gt-req-chip" data-req="length">
+              <span class="gt-req-label">Len</span>
+              <input class="gt-req-input" type="number" min="1" placeholder="—" data-req="length" />
+            </label>
+            <label class="gt-req-chip" data-req="difficulty">
+              <span class="gt-req-label">Diff</span>
+              <input class="gt-req-input" type="number" min="0" step="0.1" placeholder="—" data-req="difficulty" />
+            </label>
+          </div>
         </div>
       </div>
       <div id="gt-rec-row">
@@ -2126,7 +2143,7 @@ async function getExpRankByUsername(username) {
   let selectedValue = null; // always raw units (ms for playtime)
   // Requirements state — only meaningful when type=races + mode=gain.
   // null on each axis = that axis isn't required. strict = goal resets to 0 on a miss.
-  let selectedReq    = { wpm: null, accuracy: null, pp: null };
+  let selectedReq    = { wpm: null, accuracy: null, pp: null, length: null, difficulty: null };
   let selectedStrict = false;
 
   // rank mode state
@@ -2156,15 +2173,34 @@ async function getExpRankByUsername(username) {
   // Race goals (gain mode) can attach a `requirements` object that gates
   // which races count: only races meeting EVERY active threshold qualify.
   // Active = non-null. Missing axes mean "no requirement on this axis".
+  //
+  // There are two CATEGORIES of requirement:
+  //   - SKILL axes (wpm, accuracy, pp): properties of how the user raced.
+  //     Available directly on the race object from /users/{name}/races.
+  //   - QUOTE axes (length, difficulty): properties of the quote itself.
+  //     Need a SECOND fetch to /quotes/{quoteId} to evaluate.
+  //
+  // The split matters because quote fetches are extra HTTP calls per race
+  // that we only want to make if at least one active goal actually has
+  // a length or difficulty threshold set.
+  const REQ_SKILL_AXES = ["wpm", "accuracy", "pp"];
+  const REQ_QUOTE_AXES = ["length", "difficulty"];
+  const REQ_ALL_AXES = [...REQ_SKILL_AXES, ...REQ_QUOTE_AXES];
+
   function hasAnyReq(req) {
-    return !!(req && (req.wpm != null || req.accuracy != null || req.pp != null));
+    if (!req) return false;
+    return REQ_ALL_AXES.some(axis => req[axis] != null);
   }
 
-  // Does a single race object (from /users/{username}/races) meet all
-  // active thresholds in `req`? Missing race fields default to 0 (treated
-  // as "fails any threshold") rather than skipping the check, since the
-  // user explicitly set a threshold and a missing field == not meeting it.
-  function meetsRequirements(race, req) {
+  // Does this goal's requirements need /quotes/{id} data to evaluate?
+  // True iff at least one quote-axis threshold (length or difficulty) is set.
+  function goalNeedsQuoteData(req) {
+    if (!req) return false;
+    return REQ_QUOTE_AXES.some(axis => req[axis] != null);
+  }
+
+  // Skill-axis check: race-level fields only.
+  function meetsSkillRequirements(race, req) {
     if (!race || !req) return false;
     if (req.wpm      != null && (Number(race.wpm)      || 0)       < req.wpm)      return false;
     // race.accuracy is 0–1 (e.g. 1.0 = 100%); req.accuracy is 0–100 (user input).
@@ -2173,6 +2209,29 @@ async function getExpRankByUsername(username) {
     if (req.accuracy != null && (Number(race.accuracy) || 0) * 100 < req.accuracy) return false;
     if (req.pp       != null && (Number(race.pp)       || 0)       < req.pp)       return false;
     return true;
+  }
+
+  // Quote-axis check: properties read from the quote object (separate fetch).
+  // If a quote axis is set but `quote` is null/undefined, the race fails —
+  // we can't verify, so we don't qualify. Caller is responsible for fetching
+  // the quote up-front for any goal where goalNeedsQuoteData(req) is true.
+  function meetsQuoteRequirements(quote, req) {
+    if (!req) return true;
+    if (req.length     != null) {
+      if (!quote) return false;
+      if ((Number(quote.length)     || 0) < req.length)     return false;
+    }
+    if (req.difficulty != null) {
+      if (!quote) return false;
+      if ((Number(quote.difficulty) || 0) < req.difficulty) return false;
+    }
+    return true;
+  }
+
+  // Combined check used by the evaluator. `quote` may be null/undefined
+  // when the goal has no quote-axis requirements (no fetch was needed).
+  function meetsRequirements(race, quote, req) {
+    return meetsSkillRequirements(race, req) && meetsQuoteRequirements(quote, req);
   }
 
   // Pre-check applied BEFORE meetsRequirements when a goal has a filter
@@ -2190,21 +2249,32 @@ async function getExpRankByUsername(username) {
     return race?.gamemode === filter;
   }
 
-  // Compact human-readable suffix for the goal label.
-  // e.g., { wpm: 100, accuracy: 98 } → "100+ WPM, 98%+ ACC"
-  // Uppercase units + spaces so units are unambiguous on first read.
-  // PP/WPM use toLocaleString so 4-digit values get locale separators
+  // Compact human-readable suffix for the goal label, split into two
+  // strings so they can be rendered on separate lines in the goal display:
+  //   - skill: "100+ WPM, 98%+ ACC"  (user-skill requirements)
+  //   - quote: "200+ LEN, 0.7+ DIFF" (quote-property requirements)
+  // The lightning prefix only attaches to the skill line (it's the line
+  // that "leads" visually; strict applies to the whole goal regardless).
+  // PP/WPM/LEN use toLocaleString so 4-digit values get locale separators
   // (e.g. "1,200+ PP" in en-US, "1'200+ PP" in de-CH).
-  // Note: % glues to the number ("100%+ ACC") because that's how accuracy
-  // is universally read; the bare numbers (WPM, PP) get a space ("150+ WPM").
   function formatRequirementsSuffix(req, strict) {
-    const parts = [];
-    if (req.wpm      != null) parts.push(`${Number(req.wpm).toLocaleString()}+ WPM`);
-    if (req.pp       != null) parts.push(`${Number(req.pp).toLocaleString()}+ PP`);
-    if (req.accuracy != null) parts.push(`${req.accuracy}%+ ACC`);
-    if (parts.length === 0) return "";
-    const joined = parts.join(", ");
-    return strict ? `⚡ ${joined}` : joined;
+    const skillParts = [];
+    if (req.wpm      != null) skillParts.push(`${Number(req.wpm).toLocaleString()}+ WPM`);
+    if (req.pp       != null) skillParts.push(`${Number(req.pp).toLocaleString()}+ PP`);
+    if (req.accuracy != null) skillParts.push(`${req.accuracy}%+ ACC`);
+
+    const quoteParts = [];
+    if (req.length     != null) quoteParts.push(`${Number(req.length).toLocaleString()}+ LEN`);
+    if (req.difficulty != null) quoteParts.push(`${req.difficulty}+ DIFF`);
+
+    let skill = skillParts.join(", ");
+    const quote = quoteParts.join(", ");
+    if (strict && skill) skill = `⚡ ${skill}`;
+    // Edge case: strict + only quote-axis reqs (no skill) — still show ⚡
+    // somewhere. Prefix the quote line in that case.
+    let quoteOut = quote;
+    if (strict && !skill && quote) quoteOut = `⚡ ${quote}`;
+    return { skill, quote: quoteOut };
   }
 
   function updateModeHint() {
@@ -2594,7 +2664,7 @@ async function getExpRankByUsername(username) {
   // Reset the requirements UI to the cleared / inactive state. Called
   // on modal open, on type/mode changes that hide the row, and on close.
   function resetRequirementsUI() {
-    selectedReq = { wpm: null, accuracy: null, pp: null };
+    selectedReq = { wpm: null, accuracy: null, pp: null, length: null, difficulty: null };
     selectedStrict = false;
     reqInputs.forEach(input => {
       input.value = "";
@@ -2975,15 +3045,17 @@ async function getExpRankByUsername(username) {
     if (isRecurring) { countdownEl.textContent = formatCountdown(getNextResetTime(gd.recurrence) - Date.now()); countdownEl.style.display = "block"; }
     else countdownEl.style.display = "none";
 
-    // Requirement line (sub-row beneath the header) — shown only for race
-    // goals with active requirements. Always reset to hidden first so that
-    // a goal that lost its requirements (or a non-req goal) doesn't keep
-    // a stale line from a previous render.
-    const reqLineEl = document.getElementById(`${goalId}-req-line`);
-    if (reqLineEl) {
-      reqLineEl.textContent = "";
-      reqLineEl.style.display = "none";
-    }
+    // Requirement lines (sub-rows beneath the header) — shown only for race
+    // goals with active requirements. Two separate lines so skill axes
+    // (WPM/ACC/PP) and quote axes (LEN/DIFF) can render independently;
+    // the user explicitly asked for these on different rows since they're
+    // conceptually different (user performance vs text properties).
+    // Always reset both to hidden first so a goal that lost a category
+    // (or a non-req goal) doesn't keep a stale line from a previous render.
+    const reqLineEl  = document.getElementById(`${goalId}-req-line`);
+    const reqLine2El = document.getElementById(`${goalId}-req-line-2`);
+    if (reqLineEl)  { reqLineEl.textContent  = ""; reqLineEl.style.display  = "none"; }
+    if (reqLine2El) { reqLine2El.textContent = ""; reqLine2El.style.display = "none"; }
 
     if (gd.nextRank && gd.targetRank) {
       document.getElementById(`${goalId}-label`).textContent = `${cfg.label} → #${gd.targetRank} (next rank)`;
@@ -2996,14 +3068,19 @@ async function getExpRankByUsername(username) {
       document.getElementById(`${goalId}-label`).textContent = `${cfg.label} → max quotes`;
     } else if (type === "races" && hasAnyReq(gd.requirements)) {
       // Requirement-bearing race goal — keep main label clean (just the
-      // type + filter chip) and put the threshold summary on its own row
+      // type + filter chip) and put the threshold summary on its own row(s)
       // so it doesn't compete with the recurrence badge / streak counter
       // that already live in the header.
       const filterStr = (gd.filter && gd.filter !== "all") ? ` (${gd.filter})` : "";
       document.getElementById(`${goalId}-label`).textContent = `${cfg.label}${filterStr}`;
-      if (reqLineEl) {
-        reqLineEl.textContent = formatRequirementsSuffix(gd.requirements, gd.strictMode);
+      const { skill, quote } = formatRequirementsSuffix(gd.requirements, gd.strictMode);
+      if (reqLineEl && skill) {
+        reqLineEl.textContent = skill;
         reqLineEl.style.display = "block";
+      }
+      if (reqLine2El && quote) {
+        reqLine2El.textContent = quote;
+        reqLine2El.style.display = "block";
       }
     } else if (type === "races" && gd.filter === "quickplay") {
       document.getElementById(`${goalId}-label`).textContent = `${cfg.label} (quickplay)`;
@@ -3110,9 +3187,22 @@ async function getExpRankByUsername(username) {
   }
 
   // ── Apply fetched user data to in-memory state + render ──────
-  function applyUserData(data) {
-    if (!data) return;
-    // Snapshot prev races BEFORE we overwrite — used to gate requirement evaluation
+  // Apply incoming stats data:
+  //   - commitUserData updates currentStats only (no render, no eval)
+  //   - applyUserData = commit + renderAllGoals + trigger req eval
+  //
+  // The split exists so the quote-finish flow can sequence things as:
+  //   commit → await eval → render
+  // …which collapses what would otherwise be two renders (one before eval
+  // updates qualifyingProgress, one after) into a single render where all
+  // gain indicators pop in the same animation frame. Without this, req-goal
+  // indicators always appear ~1 microtask after non-req ones, which is
+  // visible to the user as a slight stagger.
+  //
+  // Returns: prevRaces (the value of currentStats.races BEFORE the commit),
+  // so callers can decide whether a races-based eval is needed.
+  function commitUserData(data) {
+    if (!data) return undefined;
     const prevRaces = currentStats.races;
     currentStats.exp            = data.exp;
     currentStats.pp             = data.pp;
@@ -3123,6 +3213,12 @@ async function getExpRankByUsername(username) {
     currentStats.chars          = data.chars;
     currentStats.quickplayRaces = data.quickplayRaces;
     currentStats.soloRaces      = data.soloRaces;
+    return prevRaces;
+  }
+
+  function applyUserData(data) {
+    if (!data) return;
+    const prevRaces = commitUserData(data);
     renderAllGoals();
 
     // Leader-only: when the lifetime races count changes, re-evaluate any
@@ -3131,6 +3227,10 @@ async function getExpRankByUsername(username) {
     // case where prevRaces was null and a goal's lastEvalRaces is behind.
     // The function self-gates further on whether any goal actually has
     // pending races to look at.
+    //
+    // Note: this is the "general" path (background polls, cross-tab, etc).
+    // The quote-finish path bypasses applyUserData and uses commitUserData
+    // + explicit eval-then-render to avoid a double-render stagger.
     if (isLeader && data.races != null && data.races !== prevRaces) {
       evaluateRaceRequirementsGuarded();
     }
@@ -3365,23 +3465,54 @@ async function getExpRankByUsername(username) {
       // around the same time, and the cache primed here is consumed by the
       // eval inside applyUserData → req-goal indicator now pops alongside
       // the non-req gain indicators instead of ~1s later.
+      //
+      // Quote prefetch is CHAINED after races prefetch (we need the races
+      // list before we know which quoteIds to fetch), but the whole chain
+      // still runs in parallel with fetchUserData. If no goal has length
+      // or difficulty requirements, prefetchQuotesIfNeeded returns
+      // immediately — the quote endpoint is never hit unnecessarily.
       // Only the leader prefetches (followers don't run the eval anyway).
-      const racesPrefetch = isLeader ? prefetchRacesIfNeeded() : null;
+      const reqPrefetch = isLeader
+        ? (async () => {
+            await prefetchRacesIfNeeded();
+            await prefetchQuotesIfNeeded();
+          })()
+        : null;
 
       let data;
       try { data = await fetchUserData(); }
       catch {
-        if (racesPrefetch) await racesPrefetch; // don't leak the promise
+        if (reqPrefetch) await reqPrefetch; // don't leak the promise
         continue;
       }
 
       // Wait for prefetch to land before applyUserData triggers the eval —
-      // otherwise the eval might fire before the cache is warm and fall
-      // back to a sequential fetch (defeating the optimization).
-      if (racesPrefetch) await racesPrefetch;
+      // otherwise the eval might fire before the caches are warm and fall
+      // back to sequential fetches (defeating the optimization).
+      if (reqPrefetch) await reqPrefetch;
 
-      // Always apply + broadcast the freshest data we got
-      applyUserData(data);
+      // ── Single-frame render path ───────────────────────────────
+      // We want every gain indicator (req and non-req) to appear in the
+      // SAME animation frame. The general applyUserData path renders
+      // first and triggers eval async, which produces a tiny stagger
+      // (req goals always pop ~1 microtask after non-req ones). Here
+      // we have full control over the sequence, so:
+      //   1. Commit stats (no render)
+      //   2. Run eval to update qualifyingProgress (no render — defer)
+      //   3. Render once with everything in place
+      //
+      // Followers and tabs without req goals just commit + render directly.
+      const prevRaces = commitUserData(data);
+      const racesChanged = isLeader && data.races != null && data.races !== prevRaces;
+      const anyReqGoals  = (goalData.races || []).some(g => hasAnyReq(g.requirements));
+      if (racesChanged && anyReqGoals) {
+        try {
+          await evaluateRaceRequirementsGuarded({ deferRender: true });
+        } catch (err) {
+          console.error("[Goal Tracker] eval error in quote-finish path:", err);
+        }
+      }
+      renderAllGoals();
       try {
         localStorage.setItem(STATS_CACHE_KEY, JSON.stringify({ data, timestamp: Date.now() }));
       } catch {}
@@ -3790,12 +3921,118 @@ async function getExpRankByUsername(username) {
     return fetchRacesEndpoint().catch(() => {/* swallow */});
   }
 
+  // ── /quotes/{quoteId} endpoint cache ─────────────────────────
+  // Quote-axis requirements (length, difficulty) need data from a SECOND
+  // endpoint that's keyed by quoteId. Each race carries a quoteId, so to
+  // evaluate a race we may need to fetch the quote it was based on.
+  //
+  // Quotes are immutable — same quoteId always returns the same content —
+  // so we cache aggressively. Bounded LRU cap prevents unbounded growth
+  // for long sessions where the user races many distinct quotes.
+  //
+  // Concurrent gets: an in-flight Map prevents double-fetching the same
+  // quoteId from racing parallel callers (e.g. evaluator + prefetcher
+  // both ask for the same quoteId at the same time).
+  const QUOTE_CACHE_MAX = 200;
+  const quoteCache    = new Map(); // quoteId → quote object  (insertion-order = LRU)
+  const quoteInFlight = new Map(); // quoteId → Promise<quote> currently fetching
+
+  async function fetchQuoteFromApi(quoteId) {
+    const url = `https://api.typegg.io/v1/quotes/${encodeURIComponent(quoteId)}`;
+    const r = await fetch(url, { headers: authHeaders() });
+    if (!r.ok) throw new Error(`quote ${quoteId} → ${r.status}`);
+    return await r.json();
+  }
+
+  // Public helper. Returns the quote object (with .length, .difficulty, ...)
+  // or throws on failure. Caller is responsible for catching errors and
+  // deciding whether to bail out of the eval.
+  async function getQuote(quoteId) {
+    if (!quoteId) throw new Error("getQuote: missing quoteId");
+    if (quoteCache.has(quoteId)) {
+      // Touch for LRU: re-insert at end.
+      const v = quoteCache.get(quoteId);
+      quoteCache.delete(quoteId);
+      quoteCache.set(quoteId, v);
+      return v;
+    }
+    if (quoteInFlight.has(quoteId)) return quoteInFlight.get(quoteId);
+
+    const p = (async () => {
+      try {
+        const quote = await fetchQuoteFromApi(quoteId);
+        // Evict oldest if at cap. Map iteration order is insertion order,
+        // so the first key is the least-recently-set.
+        if (quoteCache.size >= QUOTE_CACHE_MAX) {
+          const firstKey = quoteCache.keys().next().value;
+          if (firstKey !== undefined) quoteCache.delete(firstKey);
+        }
+        quoteCache.set(quoteId, quote);
+        return quote;
+      } finally {
+        quoteInFlight.delete(quoteId);
+      }
+    })();
+    quoteInFlight.set(quoteId, p);
+    return p;
+  }
+
+  // Prefetch the quotes for the most-recent N races IF any requirement
+  // goal needs quote data. Used in the quote-finish flow so by the time
+  // the eval runs, the quote data is already in cache → indicator pops
+  // in sync with non-req goals.
+  //
+  // We can only prefetch from cached /races data; if /races itself isn't
+  // cached yet, this no-ops (the eval will fetch quotes itself, just a
+  // tick later — same fallback as before).
+  //
+  // Errors swallowed — prefetch is opportunistic.
+  async function prefetchQuotesIfNeeded() {
+    const goals = goalData.races;
+    if (!goals || !goals.some(g => hasAnyReq(g.requirements) && goalNeedsQuoteData(g.requirements))) {
+      return;
+    }
+    if (!isRacesCacheFresh()) return; // /races prefetch hasn't landed yet
+    const races = racesEndpointCache.races;
+    if (!Array.isArray(races) || races.length === 0) return;
+
+    // How many recent races might we evaluate? Mirror the evaluator's
+    // logic: max delta across all goals that need quote data.
+    const racesSnap = currentStats.races;
+    if (racesSnap == null) return;
+    const targets = goals.filter(g =>
+      hasAnyReq(g.requirements) &&
+      goalNeedsQuoteData(g.requirements) &&
+      racesSnap > (g.lastEvalRaces ?? g[GOAL_CONFIG.races.baselineKey] ?? 0)
+    );
+    if (targets.length === 0) return;
+    const maxDelta = Math.max(...targets.map(g =>
+      racesSnap - (g.lastEvalRaces ?? g[GOAL_CONFIG.races.baselineKey] ?? 0)
+    ));
+    const window = races.slice(0, Math.min(maxDelta, races.length));
+
+    // Kick off all fetches in parallel; await them all (or any to fail
+    // silently — getQuote handles its own caching either way).
+    await Promise.all(
+      window
+        .map(r => r?.quoteId)
+        .filter(Boolean)
+        .map(id => getQuote(id).catch(() => {/* swallow */}))
+    );
+  }
+
 
   // For race goals carrying requirements, the displayed gain isn't the
   // raw delta in the lifetime `races` stat — it's `qualifyingProgress`,
   // counting only races that meet every active threshold. This function
   // walks the user's most recent races (via /users/{username}/races) and
   // updates qualifyingProgress for each requirement-bearing goal.
+  //
+  // There are two requirement categories:
+  //   - SKILL axes (wpm / accuracy / pp): on the race object itself.
+  //   - QUOTE axes (length / difficulty): need a per-race fetch to
+  //     /quotes/{quoteId}. Only fetched when at least one goal in this
+  //     evaluation actually has a quote-axis threshold set.
   //
   // Strict mode: a single non-qualifying race resets qualifyingProgress
   // to 0 — UNTIL the goal is completed; afterwards strictness no longer
@@ -3807,7 +4044,11 @@ async function getExpRankByUsername(username) {
   // each race's `gamemode` field). Non-matching races are invisible: they
   // don't qualify and they don't trigger strict resets. This means filter
   // and requirements compose cleanly (e.g. "5 quickplay races at 100+ WPM").
-  async function evaluateRaceRequirements() {
+  //
+  // Quote-fetch failure: if a quote can't be fetched mid-evaluation, the
+  // affected goal is skipped (state unchanged) and will retry next cycle.
+  // Other goals in the same evaluation are unaffected.
+  async function evaluateRaceRequirements({ deferRender = false } = {}) {
     if (!isLeader) return;
     const goals = goalData.races;
     if (!goals || goals.length === 0) return;
@@ -3845,6 +4086,36 @@ async function getExpRankByUsername(username) {
     }
     if (!Array.isArray(recentRaces) || recentRaces.length === 0) return;
 
+    // ── Quote-data pre-fetch (warmup) ──────────────────────────
+    // Goals with length / difficulty requirements need /quotes/{id} data
+    // for each race they evaluate. We warm the quote cache in parallel
+    // here so the per-race awaits inside the goal loop hit cache instead
+    // of doing sequential round-trips. For goals without quote-axis
+    // requirements this whole block is a no-op.
+    //
+    // Note: we ignore individual fetch failures at this stage and let the
+    // inner loop handle them per-goal — that keeps the bail-out granular
+    // (one transient quote failure shouldn't stall every other goal).
+    const needsQuoteData = targets.some(({ g }) => goalNeedsQuoteData(g.requirements));
+    if (needsQuoteData) {
+      const quoteIds = new Set();
+      for (const { g } of targets) {
+        if (!goalNeedsQuoteData(g.requirements)) continue;
+        const last = g.lastEvalRaces ?? g[GOAL_CONFIG.races.baselineKey] ?? 0;
+        const d = racesSnapshot - last;
+        if (d <= 0) continue;
+        const w = recentRaces.slice(0, Math.min(d, recentRaces.length));
+        for (const race of w) {
+          if (race?.quoteId) quoteIds.add(race.quoteId);
+        }
+      }
+      if (quoteIds.size > 0) {
+        await Promise.all(
+          [...quoteIds].map(id => getQuote(id).catch(() => {/* per-goal handles */}))
+        );
+      }
+    }
+
     let changed = false;
     for (const { i } of targets) {
       const gd = goals[i];
@@ -3861,9 +4132,11 @@ async function getExpRankByUsername(username) {
       // other way around).
       const window = recentRaces.slice(0, Math.min(delta, recentRaces.length));
       const chronological = window.slice().reverse();
+      const goalNeedsQuotes = goalNeedsQuoteData(gd.requirements);
 
       let qualifying = gd.qualifyingProgress ?? 0;
       const target = gd.target ?? 0;
+      let goalFailed = false; // set if a quote fetch fails — bail w/o saving
 
       for (const race of chronological) {
         // Strict-only freeze: once a strict goal has been completed, stop
@@ -3881,13 +4154,38 @@ async function getExpRankByUsername(username) {
         // shouldn't break the streak.)
         if (!raceMatchesFilter(race, gd.filter)) continue;
 
-        if (meetsRequirements(race, gd.requirements)) {
+        // For goals with quote-axis requirements we need the quote object.
+        // Cache should be warm from the pre-fetch above; this await is
+        // effectively synchronous on the happy path.
+        let quote = null;
+        if (goalNeedsQuotes) {
+          if (!race.quoteId) {
+            // Can't evaluate — skip this race. Don't qualify, don't reset.
+            // It'll be re-attempted next eval cycle.
+            continue;
+          }
+          try {
+            quote = await getQuote(race.quoteId);
+          } catch (err) {
+            console.error("[Goal Tracker] quote fetch failed; bailing out of goal", gd.id, err);
+            goalFailed = true;
+            break;
+          }
+        }
+
+        if (meetsRequirements(race, quote, gd.requirements)) {
           qualifying++;
         } else if (gd.strictMode) {
           qualifying = 0;
         }
         // else: not strict + not qualifying → no change
       }
+
+      // If a quote fetch failed mid-loop, bail out of this goal entirely.
+      // Don't update qualifyingProgress or lastEvalRaces — leaving them
+      // unchanged means the next eval will retry from the same point,
+      // which is exactly what we want for a transient API failure.
+      if (goalFailed) continue;
 
       // Cap qualifyingProgress at target ONLY for strict goals — for the
       // same reason as the freeze above. Non-strict goals are allowed to
@@ -3907,7 +4205,11 @@ async function getExpRankByUsername(username) {
 
     if (changed) {
       saveGoals("races");
-      renderAllGoals();
+      // When the caller is going to render right after we return (e.g. the
+      // quote-finish flow does commit → eval → render to keep all gain
+      // indicators in the same animation frame), skip the render here to
+      // avoid a redundant double-paint.
+      if (!deferRender) renderAllGoals();
     }
   }
 
