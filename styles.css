@@ -326,9 +326,10 @@
 }
 
 /* Second requirements row (LEN / DIFF — quote-property thresholds).
-   Tighter top margin since it follows another req row, and no strict
-   button on this row (strict applies to the whole goal but visually
-   anchors to the skill row above). */
+   Tighter top margin since it follows another req row. The strict button
+   is anchored to the skill row above; this row carries the unique-quote
+   toggle (➡️) on the right. Both buttons apply to the whole goal — they
+   visually anchor to whichever row makes the most sense. */
 .gt-req-selector-bottom {
   margin-top: -7px; /* tighten gap; cancels half the previous row's bottom margin */
 }
@@ -400,8 +401,12 @@
   opacity: 0.7;
 }
 
-/* Lightning strict-mode toggle — square, right-aligned, same height as chips. */
-.gt-req-strict-btn {
+/* Lightning strict-mode toggle (top row) and arrow unique-quote toggle
+   (bottom row) — square, right-aligned, same height as chips. They share
+   the same visual treatment (transparent → cyan when active); only the
+   icon and behaviour differ. */
+.gt-req-strict-btn,
+.gt-req-unique-btn {
   flex-shrink: 0;
   width: 32px;
   border-radius: 7px;
@@ -416,11 +421,13 @@
   justify-content: center;
   padding: 0;
 }
-.gt-req-strict-btn:hover {
+.gt-req-strict-btn:hover,
+.gt-req-unique-btn:hover {
   border-color: #4b5563;
   color: #e5e7eb;
 }
-.gt-req-strict-btn.active {
+.gt-req-strict-btn.active,
+.gt-req-unique-btn.active {
   border-color: #06b6d4;
   background: #083344;
   color: #67e8f9;

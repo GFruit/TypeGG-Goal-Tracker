@@ -975,18 +975,20 @@ window.addEventListener("load", () => {
         <!-- Second row: quote-property requirements (length + difficulty).
              These are about the text itself, not the user's performance,
              so they live on their own row. Strict button stays anchored
-             to the skill row — it applies to the whole goal regardless. -->
+             to the skill row above; the unique-quote toggle (✨) lives
+             here on the right — it applies to the whole goal regardless. -->
         <div class="gt-req-selector gt-req-selector-bottom">
           <div class="gt-req-group">
             <label class="gt-req-chip" data-req="length">
-              <span class="gt-req-label">Len</span>
+              <span class="gt-req-label">Length</span>
               <input class="gt-req-input" type="number" min="1" placeholder="—" data-req="length" />
             </label>
             <label class="gt-req-chip" data-req="difficulty">
-              <span class="gt-req-label">Diff</span>
+              <span class="gt-req-label">Difficulty</span>
               <input class="gt-req-input" type="number" min="0" step="0.1" placeholder="—" data-req="difficulty" />
             </label>
           </div>
+          <button id="gt-req-unique-btn" class="gt-req-strict-btn gt-req-unique-btn" type="button" title="Unique-quote mode — each qualifying race must be on a different quote (the same quoteId never counts twice within a period)">✨</button>
         </div>
       </div>
       <div id="gt-rec-row">
@@ -2133,6 +2135,7 @@ async function getExpRankByUsername(username) {
   const reqRow      = document.getElementById("gt-req-row");
   const reqInputs   = document.querySelectorAll(".gt-req-input");
   const reqStrictBtn = document.getElementById("gt-req-strict-btn");
+  const reqUniqueBtn = document.getElementById("gt-req-unique-btn");
   const modeHint    = document.getElementById("gt-mode-hint");
   const amountLabel = document.getElementById("gt-amount-label");
 
@@ -2143,8 +2146,11 @@ async function getExpRankByUsername(username) {
   let selectedValue = null; // always raw units (ms for playtime)
   // Requirements state — only meaningful when type=races + mode=gain.
   // null on each axis = that axis isn't required. strict = goal resets to 0 on a miss.
+  // uniqueOnly = a qualifying race only counts if its quoteId hasn't been
+  // qualified on yet this period (duplicate-quote no-op; doesn't trigger strict reset).
   let selectedReq    = { wpm: null, accuracy: null, pp: null, length: null, difficulty: null };
   let selectedStrict = false;
+  let selectedUnique = false;
 
   // rank mode state
   let rankFetchedPp     = null; // PP fetched for the entered rank
@@ -2192,6 +2198,17 @@ async function getExpRankByUsername(username) {
     return REQ_ALL_AXES.some(axis => req[axis] != null);
   }
 
+  // Does this goal use the requirement-evaluator path (qualifyingProgress)
+  // instead of the simple lifetime-delta path? True iff it has any threshold
+  // requirements OR has uniqueOnly enabled. Standalone uniqueOnly is a valid
+  // configuration — "complete N races on N different quotes" — and needs the
+  // same evaluator plumbing as threshold goals (qualifyingProgress, lastEvalRaces,
+  // race-list fetches), just without any per-axis bar to clear.
+  function goalIsGated(g) {
+    if (!g) return false;
+    return hasAnyReq(g.requirements) || !!g.uniqueOnly;
+  }
+
   // Does this goal's requirements need /quotes/{id} data to evaluate?
   // True iff at least one quote-axis threshold (length or difficulty) is set.
   function goalNeedsQuoteData(req) {
@@ -2199,9 +2216,13 @@ async function getExpRankByUsername(username) {
     return REQ_QUOTE_AXES.some(axis => req[axis] != null);
   }
 
-  // Skill-axis check: race-level fields only.
+  // Skill-axis check: race-level fields only. The "user-controlled" half of
+  // the requirements — these reflect how the user raced (effort/skill).
+  // Strict mode bites on a failure here.
+  // Returns true when no req is set (consistent with meetsQuoteRequirements).
   function meetsSkillRequirements(race, req) {
-    if (!race || !req) return false;
+    if (!race) return false;
+    if (!req)  return true;
     if (req.wpm      != null && (Number(race.wpm)      || 0)       < req.wpm)      return false;
     // race.accuracy is 0–1 (e.g. 1.0 = 100%); req.accuracy is 0–100 (user input).
     // Multiply race side by 100 to align scales — without this, a perfect 1.0
@@ -2212,6 +2233,9 @@ async function getExpRankByUsername(username) {
   }
 
   // Quote-axis check: properties read from the quote object (separate fetch).
+  // The "quote-controlled" half — properties of the text the user got dealt
+  // (length, difficulty), NOT something they chose. A quote-axis miss is
+  // treated like a filter mismatch by the evaluator: invisible, not a fail.
   // If a quote axis is set but `quote` is null/undefined, the race fails —
   // we can't verify, so we don't qualify. Caller is responsible for fetching
   // the quote up-front for any goal where goalNeedsQuoteData(req) is true.
@@ -2228,13 +2252,7 @@ async function getExpRankByUsername(username) {
     return true;
   }
 
-  // Combined check used by the evaluator. `quote` may be null/undefined
-  // when the goal has no quote-axis requirements (no fetch was needed).
-  function meetsRequirements(race, quote, req) {
-    return meetsSkillRequirements(race, req) && meetsQuoteRequirements(quote, req);
-  }
-
-  // Pre-check applied BEFORE meetsRequirements when a goal has a filter
+  // Pre-check applied early in the evaluator when a goal has a filter
   // (quickplay / solo). The race object exposes `gamemode` ∈ {"quickplay","solo"}.
   // Behavior:
   //   - filter="all" / null / undefined → every race matches
@@ -2243,7 +2261,8 @@ async function getExpRankByUsername(username) {
   // Races that don't match the filter are SKIPPED entirely in the evaluator
   // — they don't increment qualifyingProgress AND they don't trigger a
   // strict-mode reset. This matches the user's mental model: "a slow solo
-  // race shouldn't break my quickplay-only streak".
+  // race shouldn't break my quickplay-only streak". Quote-property mismatches
+  // (LEN / DIFF) are skipped under the same principle: see the evaluator.
   function raceMatchesFilter(race, filter) {
     if (!filter || filter === "all") return true;
     return race?.gamemode === filter;
@@ -2253,11 +2272,18 @@ async function getExpRankByUsername(username) {
   // strings so they can be rendered on separate lines in the goal display:
   //   - skill: "100+ WPM, 98%+ ACC"  (user-skill requirements)
   //   - quote: "200+ LEN, 0.7+ DIFF" (quote-property requirements)
-  // The lightning prefix only attaches to the skill line (it's the line
-  // that "leads" visually; strict applies to the whole goal regardless).
+  // The mode glyphs (⚡ strict / ✨ unique-only) attach to the skill line
+  // — and that's not just a visual choice. Strict only fires on skill-axis
+  // misses (the user-controlled half), and unique applies whenever a race
+  // qualifies on skill, so anchoring the glyphs to the skill line accurately
+  // signals what they actually gate. Falls back to the quote line, then to
+  // a glyph-only line, when there's no skill content to attach to.
   // PP/WPM/LEN use toLocaleString so 4-digit values get locale separators
   // (e.g. "1,200+ PP" in en-US, "1'200+ PP" in de-CH).
-  function formatRequirementsSuffix(req, strict) {
+  function formatRequirementsSuffix(req, strict, uniqueOnly) {
+    // `req` may be undefined for uniqueOnly-only goals — default to {} so
+    // the != null checks below don't throw on property access.
+    req = req || {};
     const skillParts = [];
     if (req.wpm      != null) skillParts.push(`${Number(req.wpm).toLocaleString()}+ WPM`);
     if (req.pp       != null) skillParts.push(`${Number(req.pp).toLocaleString()}+ PP`);
@@ -2267,14 +2293,24 @@ async function getExpRankByUsername(username) {
     if (req.length     != null) quoteParts.push(`${Number(req.length).toLocaleString()}+ LEN`);
     if (req.difficulty != null) quoteParts.push(`${req.difficulty}+ DIFF`);
 
+    // Build the mode-glyph prefix (e.g. "⚡", "✨", or "⚡ ✨").
+    // Both modes can co-exist and stack at the start of the line.
+    const glyphs = [];
+    if (strict)     glyphs.push("⚡");
+    if (uniqueOnly) glyphs.push("✨");
+    const prefix = glyphs.join(" ");
+
     let skill = skillParts.join(", ");
-    const quote = quoteParts.join(", ");
-    if (strict && skill) skill = `⚡ ${skill}`;
-    // Edge case: strict + only quote-axis reqs (no skill) — still show ⚡
-    // somewhere. Prefix the quote line in that case.
-    let quoteOut = quote;
-    if (strict && !skill && quote) quoteOut = `⚡ ${quote}`;
-    return { skill, quote: quoteOut };
+    let quote = quoteParts.join(", ");
+    if (prefix && skill) skill = `${prefix} ${skill}`;
+    // Edge case: glyphs present but only quote-axis reqs (no skill) —
+    // still show them somewhere. Prefix the quote line in that case.
+    if (prefix && !skill && quote) quote = `${prefix} ${quote}`;
+    // Final edge: a uniqueOnly-only goal has neither skill nor quote
+    // parts — the glyph alone IS the suffix. Put it on the skill line
+    // so the user gets a visible reminder that unique-mode is on.
+    if (prefix && !skill && !quote) skill = prefix;
+    return { skill, quote };
   }
 
   function updateModeHint() {
@@ -2661,17 +2697,24 @@ async function getExpRankByUsername(username) {
     reqStrictBtn.classList.toggle("active", selectedStrict);
   });
 
+  reqUniqueBtn.addEventListener("click", () => {
+    selectedUnique = !selectedUnique;
+    reqUniqueBtn.classList.toggle("active", selectedUnique);
+  });
+
   // Reset the requirements UI to the cleared / inactive state. Called
   // on modal open, on type/mode changes that hide the row, and on close.
   function resetRequirementsUI() {
     selectedReq = { wpm: null, accuracy: null, pp: null, length: null, difficulty: null };
     selectedStrict = false;
+    selectedUnique = false;
     reqInputs.forEach(input => {
       input.value = "";
       const chip = input.closest(".gt-req-chip");
       if (chip) chip.classList.remove("active");
     });
     reqStrictBtn.classList.remove("active");
+    reqUniqueBtn.classList.remove("active");
   }
 
   // The requirements row is only meaningful for races + gain.
@@ -2908,9 +2951,17 @@ async function getExpRankByUsername(username) {
       // qualifyingProgress replaces the gain calculation for these goals — it's
       // incremented by the requirement evaluator (see evaluateRaceRequirements),
       // not derived from currentVal - baseline.
-      const reqActive = selectedType === "races" && selectedMode === "gain" && hasAnyReq(selectedReq);
+      // uniqueOnly: when true, each qualifying race must be on a different
+      // quoteId. Tracked via seenQuoteIds. Can be enabled standalone (no
+      // thresholds) — in that case every race trivially passes the bar and
+      // the unique-quote check is the ONLY gate. Strict mode is meaningless
+      // without thresholds (nothing can fail), so it's tied to reqActive.
+      const reqActive    = selectedType === "races" && selectedMode === "gain" && hasAnyReq(selectedReq);
+      const uniqueActive = selectedType === "races" && selectedMode === "gain" && selectedUnique;
+      const usesEvaluator = reqActive || uniqueActive;
       const requirements = reqActive ? { ...selectedReq } : undefined;
       const strictMode   = reqActive ? selectedStrict : undefined;
+      const uniqueOnly   = uniqueActive ? true : undefined;
 
       const newGoal = {
         id: goalId,
@@ -2930,7 +2981,13 @@ async function getExpRankByUsername(username) {
         // Requirements fields (undefined fields are dropped on JSON serialization)
         requirements,
         strictMode,
-        qualifyingProgress: reqActive ? 0 : undefined,
+        uniqueOnly,
+        // Quote-IDs we've already qualified on this period. Only initialised
+        // when uniqueOnly is on; the evaluator reads this via `new Set(...)`
+        // each pass and writes back the updated array. Reset to [] on period
+        // rollover so each period gets a fresh slate of quotes to qualify on.
+        seenQuoteIds: uniqueActive ? [] : undefined,
+        qualifyingProgress: usesEvaluator ? 0 : undefined,
         // Snapshot of the LIFETIME races stat we've already evaluated.
         // The evaluator works off currentStats.races (lifetime), not the
         // filtered counter — so this must be seeded from the same field.
@@ -2939,7 +2996,7 @@ async function getExpRankByUsername(username) {
         // was lifetime races (e.g. 5000). Mismatch → delta of 4800 → goal
         // instantly filled itself with the most recent threshold-passing
         // races. Always seed from lifetime here.
-        lastEvalRaces: reqActive ? (currentStats.races ?? 0) : undefined,
+        lastEvalRaces: usesEvaluator ? (currentStats.races ?? 0) : undefined,
       };
 
       goalData[selectedType].push(newGoal);
@@ -2965,7 +3022,7 @@ async function getExpRankByUsername(username) {
         inFlight(updateMaxQuotesGoals)();
         // Newly-created req goal — kick off an evaluation in case races
         // happened between the cached baseline and now (rare, but cheap to check)
-        if (reqActive) evaluateRaceRequirementsGuarded();
+        if (usesEvaluator) evaluateRaceRequirementsGuarded();
       }
     } catch (err) { console.error("Failed to set goal:", err); }
   });
@@ -3066,14 +3123,14 @@ async function getExpRankByUsername(username) {
         `${cfg.label} (vs ${gd.targetUsername})`;
     } else if (gd.maxQuotes) {
       document.getElementById(`${goalId}-label`).textContent = `${cfg.label} → max quotes`;
-    } else if (type === "races" && hasAnyReq(gd.requirements)) {
-      // Requirement-bearing race goal — keep main label clean (just the
-      // type + filter chip) and put the threshold summary on its own row(s)
-      // so it doesn't compete with the recurrence badge / streak counter
-      // that already live in the header.
+    } else if (type === "races" && goalIsGated(gd)) {
+      // Requirement-bearing or unique-quote race goal — keep main label
+      // clean (just the type + filter chip) and put the threshold summary /
+      // mode glyphs on their own row(s) so they don't compete with the
+      // recurrence badge / streak counter that already live in the header.
       const filterStr = (gd.filter && gd.filter !== "all") ? ` (${gd.filter})` : "";
       document.getElementById(`${goalId}-label`).textContent = `${cfg.label}${filterStr}`;
-      const { skill, quote } = formatRequirementsSuffix(gd.requirements, gd.strictMode);
+      const { skill, quote } = formatRequirementsSuffix(gd.requirements, gd.strictMode, gd.uniqueOnly);
       if (reqLineEl && skill) {
         reqLineEl.textContent = skill;
         reqLineEl.style.display = "block";
@@ -3337,7 +3394,7 @@ async function getExpRankByUsername(username) {
         }
 
         const isRecurring = !!(gd.recurrence && gd.recurrence !== "none");
-        const hasReq = type === "races" && hasAnyReq(gd.requirements);
+        const hasReq = type === "races" && goalIsGated(gd);
 
         // Period reset check
         if (isRecurring) {
@@ -3355,9 +3412,17 @@ async function getExpRankByUsername(username) {
             // Requirement goals: also reset the qualifying progress and
             // jump lastEvalRaces forward to the current count, so races
             // from the previous period don't leak into the new one.
+            // For uniqueOnly goals: wipe the seen-quotes list too — the
+            // user gets a fresh slate of quotes to qualify on next period.
+            // NOTE: lastEvalRaces must be seeded from LIFETIME races
+            // (currentStats.races), not from currentVal — currentVal is
+            // the filtered counter for filter=quickplay/solo goals, which
+            // would mismatch the evaluator's snapshot. Same bug, same fix
+            // as the goal-creation path above.
             if (hasReq) {
               gd.qualifyingProgress = 0;
-              gd.lastEvalRaces      = currentVal;
+              gd.lastEvalRaces      = currentStats.races ?? currentVal;
+              if (gd.uniqueOnly) gd.seenQuoteIds = [];
             }
             goals[i] = gd;
             saveGoals(type);
@@ -3504,7 +3569,7 @@ async function getExpRankByUsername(username) {
       // Followers and tabs without req goals just commit + render directly.
       const prevRaces = commitUserData(data);
       const racesChanged = isLeader && data.races != null && data.races !== prevRaces;
-      const anyReqGoals  = (goalData.races || []).some(g => hasAnyReq(g.requirements));
+      const anyReqGoals  = (goalData.races || []).some(g => goalIsGated(g));
       if (racesChanged && anyReqGoals) {
         try {
           await evaluateRaceRequirementsGuarded({ deferRender: true });
@@ -3911,12 +3976,13 @@ async function getExpRankByUsername(username) {
     return await fetchRacesEndpoint();
   }
 
-  // Prefetch only if there's at least one req goal AND we don't already
-  // have fresh cache. Fires-and-forgets on error so it never blocks the
+  // Prefetch only if there's at least one gated goal (thresholds OR
+  // uniqueOnly — both need the races list) AND we don't already have
+  // fresh cache. Fires-and-forgets on error so it never blocks the
   // quote-finish flow.
   function prefetchRacesIfNeeded() {
     const goals = goalData.races;
-    if (!goals || !goals.some(g => hasAnyReq(g.requirements))) return Promise.resolve();
+    if (!goals || !goals.some(g => goalIsGated(g))) return Promise.resolve();
     if (isRacesCacheFresh()) return Promise.resolve();
     return fetchRacesEndpoint().catch(() => {/* swallow */});
   }
@@ -4034,16 +4100,24 @@ async function getExpRankByUsername(username) {
   //     /quotes/{quoteId}. Only fetched when at least one goal in this
   //     evaluation actually has a quote-axis threshold set.
   //
-  // Strict mode: a single non-qualifying race resets qualifyingProgress
-  // to 0 — UNTIL the goal is completed; afterwards strictness no longer
-  // applies (consistent with the "10 in a row to complete" semantics).
+  // Strict mode: a single SKILL-axis miss resets qualifyingProgress to 0
+  // — UNTIL the goal is completed; afterwards strictness no longer applies
+  // (consistent with the "10 in a row to complete" semantics). Quote-axis
+  // misses do NOT reset (see below) — strict only fires on user-controlled
+  // failures.
   //
   // Filter interaction: the evaluator uses `currentStats.races` (lifetime
   // total) for delta math — i.e. "how many recent races to look at" — and
   // then per-race applies the goal's filter via raceMatchesFilter (using
-  // each race's `gamemode` field). Non-matching races are invisible: they
+  // each race's `gamemode` field). Non-matching races are INVISIBLE: they
   // don't qualify and they don't trigger strict resets. This means filter
   // and requirements compose cleanly (e.g. "5 quickplay races at 100+ WPM").
+  //
+  // Quote-axis miss = also INVISIBLE. Same principle as filter: the user
+  // can't choose which quote shows up, only how they race on it. So a
+  // 100-char quote during a "200+ LEN" goal is treated like the wrong
+  // gamemode — silently skipped, no qualification, no strict reset. Only
+  // skill-axis misses on a qualifying-context race trigger strict reset.
   //
   // Quote-fetch failure: if a quote can't be fetched mid-evaluation, the
   // affected goal is skipped (state unchanged) and will retry next cycle.
@@ -4061,10 +4135,11 @@ async function getExpRankByUsername(username) {
     // already-evaluated. The next applyUserData → eval cycle picks it up.
     const racesSnapshot = currentStats.races;
 
-    // Filter to goals that actually need work
+    // Filter to goals that actually need work — any gated goal (thresholds
+    // OR uniqueOnly) with new races since its last evaluation.
     const targets = goals
       .map((g, i) => ({ g, i }))
-      .filter(({ g }) => hasAnyReq(g.requirements) &&
+      .filter(({ g }) => goalIsGated(g) &&
                          racesSnapshot > (g.lastEvalRaces ?? g[GOAL_CONFIG.races.baselineKey] ?? 0));
     if (targets.length === 0) return;
 
@@ -4138,6 +4213,12 @@ async function getExpRankByUsername(username) {
       const target = gd.target ?? 0;
       let goalFailed = false; // set if a quote fetch fails — bail w/o saving
 
+      // Unique-quote tracking: a Set seeded from the persisted array so
+      // membership checks are O(1). We mutate this in-loop and serialize
+      // back to an array on save. Null when uniqueOnly is off — every
+      // call site checks for null before using it.
+      const seenQuoteIds = gd.uniqueOnly ? new Set(gd.seenQuoteIds || []) : null;
+
       for (const race of chronological) {
         // Strict-only freeze: once a strict goal has been completed, stop
         // counting. A subsequent miss must NOT undo the completion (cruel),
@@ -4173,10 +4254,37 @@ async function getExpRankByUsername(username) {
           }
         }
 
-        if (meetsRequirements(race, quote, gd.requirements)) {
+        // Quote-property check: a race on a quote that doesn't meet the
+        // LEN/DIFF bar is INVISIBLE to the goal — same semantics as filter.
+        // The user can't choose which quote shows up (especially in quickplay),
+        // so punishing them with a strict reset for getting "the wrong quote"
+        // would be unfair. Strict only fires on things the user controls (skill).
+        if (!meetsQuoteRequirements(quote, gd.requirements)) continue;
+
+        // Skill check: this is the user-controlled half (WPM / ACC / PP).
+        // Failure here IS a strict reset — the race was on a qualifying
+        // quote (otherwise we'd have skipped above) and the user didn't
+        // hit the bar. Returns true when there are no skill thresholds set
+        // (e.g. uniqueOnly-only goals or quote-property-only goals).
+        if (meetsSkillRequirements(race, gd.requirements)) {
+          // Unique-only: a passing race on a quoteId we've already counted
+          // this period is a NO-OP — doesn't add to qualifying, and (notably)
+          // doesn't trigger a strict reset either. The user *did* meet the
+          // bar; the race just doesn't count for THIS goal because of the
+          // unique restriction. Penalising them with a strict reset for
+          // re-typing a quote they already qualified on would be wrong.
+          if (seenQuoteIds && race.quoteId && seenQuoteIds.has(race.quoteId)) {
+            continue;
+          }
           qualifying++;
+          if (seenQuoteIds && race.quoteId) seenQuoteIds.add(race.quoteId);
         } else if (gd.strictMode) {
           qualifying = 0;
+          // Wipe the seen set on a strict reset — the streak is gone, so
+          // the no-repeat-quotes restriction starts fresh too. Without this
+          // a user who strict-resets would still be locked out of every
+          // quote they previously qualified on, which feels punishing.
+          if (seenQuoteIds) seenQuoteIds.clear();
         }
         // else: not strict + not qualifying → no change
       }
@@ -4198,7 +4306,12 @@ async function getExpRankByUsername(username) {
       // Trade-off: we might under-count by 1-2 races during API lag, but we
       // never DOUBLE-count, which is the bigger correctness concern.
       if (qualifying !== (gd.qualifyingProgress ?? 0) || lastEval !== racesSnapshot) {
-        goals[i] = { ...gd, qualifyingProgress: qualifying, lastEvalRaces: racesSnapshot };
+        const next = { ...gd, qualifyingProgress: qualifying, lastEvalRaces: racesSnapshot };
+        // Serialize the seen-quotes Set back to an array for storage.
+        // Only when uniqueOnly is on — otherwise we leave the field absent
+        // to avoid polluting old goal shapes.
+        if (seenQuoteIds) next.seenQuoteIds = [...seenQuoteIds];
+        goals[i] = next;
         changed = true;
       }
     }
