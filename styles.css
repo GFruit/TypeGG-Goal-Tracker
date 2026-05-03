@@ -240,6 +240,143 @@
   100% { opacity: 0;    transform: translateY(-4px); }
 }
 
+/* ── Rolling-average goal UI ──────────────────────────────── */
+/* These rows replace gt-gain-row + gt-progress-bar for goals where
+   gd.mode === "average". Layout matches the mockup: best line on top
+   (sticky goal-vs-target pair), live line in the middle (current value
+   and threshold for tactical feedback), footer below (window-fill state
+   and a hint string). All three rows are display:none until
+   updateAverageGoalSection flips them to flex. */
+
+.gt-avg-best-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 14px;
+  margin: 4px 0 6px;
+  color: #e5e7eb;
+}
+/* Sub-group inside the best row that holds label/value/target/delta-pill.
+   Lives on the left side of the row; the ✓ pill anchors to the row's
+   right edge via space-between. */
+.gt-avg-best-group {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+.gt-avg-best-val {
+  font-weight: 600;
+  color: #e5e7eb;
+}
+.gt-avg-best-val.gt-avg-best-empty {
+  color: #6b7280;
+  letter-spacing: 0.08em;
+  font-weight: 400;
+}
+.gt-avg-best-val.gt-avg-best-done {
+  color: #4ade80;
+}
+.gt-avg-target {
+  color: #9ca3af;
+  font-size: 13px;
+  font-weight: 400;
+}
+.gt-avg-done {
+  font-weight: 700;
+  color: #4ade80;
+  background: #052e16;
+  border: 1px solid #166534;
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+/* Live line: just "current 138.2" — the +/- pill anchors right after
+   the current value via the current-wrap subgroup. The bottom row
+   below carries threshold + race counter (combined to save space).
+   The best-avg increase pill anchors to the best-group instead and
+   reuses the existing .gt-gain-indicator class — no separate styles. */
+.gt-avg-live-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+  color: #9ca3af;
+  margin: 4px 0 2px;
+  flex-wrap: wrap;
+}
+.gt-avg-current-wrap {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+}
+.gt-avg-label {
+  color: #6b7280;
+  font-size: 11px;
+}
+.gt-avg-current,
+.gt-avg-threshold {
+  color: #e5e7eb;
+  font-weight: 500;
+}
+
+/* Bottom row — merges what used to be the threshold row and the race-
+   counter footer into one. Threshold left, race counter right.
+   space-between mirrors the existing gt-gain-row pattern. */
+.gt-avg-bottom-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: #9ca3af;
+  margin: 0 0 4px;
+}
+.gt-avg-thresh-wrap {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+}
+.gt-avg-progress {
+  font-size: 10px;
+  color: #6b7280;
+  flex-shrink: 0;
+}
+
+/* ── Modal: metric picker (avg mode) ─────────────────────── */
+/* Re-uses gt-mode-selector layout; this class is just for the
+   metric-button group specifically so future styling tweaks don't
+   collide with the main mode buttons. */
+.gt-metric-selector {
+  display: flex;
+  gap: 4px;
+}
+.gt-metric-btn {
+  flex: 1;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1.5px solid #374151;
+  background: transparent;
+  color: #9ca3af;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+.gt-metric-btn:hover {
+  border-color: #4b5563;
+  color: #e5e7eb;
+}
+.gt-metric-btn.active {
+  border-color: #06b6d4;
+  background: #083344;
+  color: #67e8f9;
+}
+
 /* ── Modal overlay ───────────────────────────────────────── */
 #gt-overlay {
   display: none;
