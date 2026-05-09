@@ -998,16 +998,29 @@ window.addEventListener("load", () => {
           <button class="gt-mode-btn"        data-mode="average" id="gt-avg-btn" style="display:none;">Average</button>
           </div>
       </div>
-      <!-- Average-mode controls (races + average only). Metric picker decides
-           which race-level field is averaged; window size picks how many
-           recent races make up the rolling window. Both rows hidden in any
-           other mode. -->
-      <div id="gt-avg-metric-row" style="display:none;">
-        <div class="gt-section-label">Metric</div>
-        <div class="gt-mode-selector gt-metric-selector">
-          <button class="gt-metric-btn active" data-metric="wpm">WPM</button>
-          <button class="gt-metric-btn"        data-metric="accuracy">Accuracy</button>
-          <button class="gt-metric-btn"        data-metric="pp">PP</button>
+      <!-- Average-mode controls (races + average only). The target-average
+           row uses chip-style inputs (mirroring the requirements row in
+           gain mode) where each chip = one metric. Mutually exclusive:
+           typing in WPM clears ACC and PP, etc. The ✨ button on the
+           right toggles unique-quote mode for the rolling window. -->
+      <div id="gt-avg-target-row" style="display:none;">
+        <div class="gt-section-label">Target average</div>
+        <div class="gt-req-selector gt-avg-selector">
+          <div class="gt-req-group">
+            <label class="gt-req-chip" data-avg="wpm">
+              <span class="gt-req-label">Wpm</span>
+              <input class="gt-avg-input" type="number" min="1" step="0.1" placeholder="—" data-avg="wpm" />
+            </label>
+            <label class="gt-req-chip" data-avg="accuracy">
+              <span class="gt-req-label">Acc</span>
+              <input class="gt-avg-input" type="number" min="0" max="100" step="0.01" placeholder="—" data-avg="accuracy" />
+            </label>
+            <label class="gt-req-chip" data-avg="pp">
+              <span class="gt-req-label">Pp</span>
+              <input class="gt-avg-input" type="number" min="1" step="0.1" placeholder="—" data-avg="pp" />
+            </label>
+          </div>
+          <button id="gt-avg-unique-btn" class="gt-req-strict-btn gt-avg-unique-btn" type="button" title="Unique-quote mode — each race in the rolling window must be on a different quote">✨</button>
         </div>
       </div>
       <div id="gt-req-row" style="display:none;">
@@ -1033,20 +1046,20 @@ window.addEventListener("load", () => {
         <!-- Second row: quote-property requirements (length + difficulty).
              These are about the text itself, not the user's performance,
              so they live on their own row. Strict button stays anchored
-             to the skill row above; the unique-quote toggle (➡️) lives
+             to the skill row above; the unique-quote toggle (✨) lives
              here on the right — it applies to the whole goal regardless. -->
         <div class="gt-req-selector gt-req-selector-bottom">
           <div class="gt-req-group">
             <label class="gt-req-chip" data-req="length">
-              <span class="gt-req-label">Len</span>
+              <span class="gt-req-label">Length</span>
               <input class="gt-req-input" type="number" min="1" placeholder="—" data-req="length" />
             </label>
             <label class="gt-req-chip" data-req="difficulty">
-              <span class="gt-req-label">Diff</span>
+              <span class="gt-req-label">Difficulty</span>
               <input class="gt-req-input" type="number" min="0" step="0.1" placeholder="—" data-req="difficulty" />
             </label>
           </div>
-          <button id="gt-req-unique-btn" class="gt-req-strict-btn gt-req-unique-btn" type="button" title="Unique-quote mode — each qualifying race must be on a different quote (the same quoteId never counts twice within a period)">➡️</button>
+          <button id="gt-req-unique-btn" class="gt-req-strict-btn gt-req-unique-btn" type="button" title="Unique-quote mode — each qualifying race must be on a different quote (the same quoteId never counts twice within a period)">✨</button>
         </div>
       </div>
       <div id="gt-rec-row">
@@ -1058,13 +1071,18 @@ window.addEventListener("load", () => {
           <button class="gt-rec-btn"        data-rec="monthly">Monthly</button>
         </div>
       </div>
-      <div class="gt-section-label" id="gt-amount-label">Amount</div>
-      <div class="gt-target-row">
-        <div id="gt-next-rank-row" style="display:none; margin-bottom: 6px;">
-          <button id="gt-next-rank-btn" class="gt-mode-btn" style="width:100%;">⚡ Next Rank</button>
+      <!-- Main amount section. Hidden in avg mode (replaced by the
+           target-average chip row above). Wrapped in gt-amount-row so we
+           can show/hide as a unit including the section label. -->
+      <div id="gt-amount-row">
+        <div class="gt-section-label" id="gt-amount-label">Amount</div>
+        <div class="gt-target-row">
+          <div id="gt-next-rank-row" style="display:none; margin-bottom: 6px;">
+            <button id="gt-next-rank-btn" class="gt-mode-btn" style="width:100%;">⚡ Next Rank</button>
+          </div>
+          <div id="gt-presets" class="gt-presets"></div>
+          <input id="gt-custom-input" class="gt-custom-input" type="number" min="1" placeholder="Custom" />
         </div>
-        <div id="gt-presets" class="gt-presets"></div>
-        <input id="gt-custom-input" class="gt-custom-input" type="number" min="1" placeholder="Custom" />
       </div>
       <div id="gt-mode-hint" class="gt-mode-hint" style="display:none;"></div>
       <!-- Window size row: only visible in average mode, sits right above
@@ -2210,11 +2228,13 @@ async function getExpRankByUsername(username) {
   const reqUniqueBtn = document.getElementById("gt-req-unique-btn");
   const modeHint    = document.getElementById("gt-mode-hint");
   const amountLabel = document.getElementById("gt-amount-label");
+  const amountRow   = document.getElementById("gt-amount-row");
 
   // Average-mode (rolling-average) controls
-  const avgBtn         = document.getElementById("gt-avg-btn");
-  const avgMetricRow   = document.getElementById("gt-avg-metric-row");
-  const avgMetricBtns  = document.querySelectorAll(".gt-metric-btn");
+  const avgBtn          = document.getElementById("gt-avg-btn");
+  const avgTargetRow    = document.getElementById("gt-avg-target-row");
+  const avgInputs       = document.querySelectorAll(".gt-avg-input");
+  const avgUniqueBtn    = document.getElementById("gt-avg-unique-btn");
   const avgWindowRow     = document.getElementById("gt-avg-window-row");
   const avgWindowPresets = document.getElementById("gt-avg-window-presets");
   const avgWindowInput   = document.getElementById("gt-avg-window-input");
@@ -2239,9 +2259,11 @@ async function getExpRankByUsername(username) {
   let selectedUnique = false;
 
   // Rolling-average state. Only consulted in mode=average.
-  // selectedMetric ∈ {"wpm","accuracy","pp"} — which race field gets averaged.
+  // selectedMetric ∈ {"wpm","accuracy","pp"} — which race field gets
+  // averaged. Driven by typing in one of the chip inputs (mutually
+  // exclusive: typing in WPM clears ACC/PP). Null = no metric picked yet.
   // selectedWindow — how many races make up the rolling window. Validated >0.
-  let selectedMetric = "wpm";
+  let selectedMetric = null;
   let selectedWindow = null;
 
   // rank mode state
@@ -2468,7 +2490,7 @@ async function getExpRankByUsername(username) {
   // strings so they can be rendered on separate lines in the goal display:
   //   - skill: "100+ WPM, 98%+ ACC"  (user-skill requirements)
   //   - quote: "200+ LEN, 0.7+ DIFF" (quote-property requirements)
-  // The mode glyphs (⚡ strict / ➡️ unique-only) attach to the skill line
+  // The mode glyphs (⚡ strict / ✨ unique-only) attach to the skill line
   // — and that's not just a visual choice. Strict only fires on skill-axis
   // misses (the user-controlled half), and unique applies whenever a race
   // qualifies on skill, so anchoring the glyphs to the skill line accurately
@@ -2489,23 +2511,24 @@ async function getExpRankByUsername(username) {
     if (req.length     != null) quoteParts.push(`${Number(req.length).toLocaleString()}+ LEN`);
     if (req.difficulty != null) quoteParts.push(`${req.difficulty}+ DIFF`);
 
-    // Build the mode-glyph prefix (e.g. "⚡", "➡️", or "⚡ ➡️").
-    // Both modes can co-exist and stack at the start of the line.
+    // Build the mode-glyph trailer (e.g. "⚡", "✨", or "⚡ ✨").
+    // Both modes can co-exist and stack at the end of the line, sitting
+    // just to the right of the requirements text (e.g. "100+ WPM ⚡ ✨").
     const glyphs = [];
     if (strict)     glyphs.push("⚡");
-    if (uniqueOnly) glyphs.push("➡️");
-    const prefix = glyphs.join(" ");
+    if (uniqueOnly) glyphs.push("✨");
+    const glyphStr = glyphs.join(" ");
 
     let skill = skillParts.join(", ");
     let quote = quoteParts.join(", ");
-    if (prefix && skill) skill = `${prefix} ${skill}`;
+    if (glyphStr && skill) skill = `${skill} ${glyphStr}`;
     // Edge case: glyphs present but only quote-axis reqs (no skill) —
-    // still show them somewhere. Prefix the quote line in that case.
-    if (prefix && !skill && quote) quote = `${prefix} ${quote}`;
+    // still show them somewhere. Append to the quote line in that case.
+    if (glyphStr && !skill && quote) quote = `${quote} ${glyphStr}`;
     // Final edge: a uniqueOnly-only goal has neither skill nor quote
     // parts — the glyph alone IS the suffix. Put it on the skill line
     // so the user gets a visible reminder that unique-mode is on.
-    if (prefix && !skill && !quote) skill = prefix;
+    if (glyphStr && !skill && !quote) skill = glyphStr;
     return { skill, quote };
   }
 
@@ -2545,9 +2568,11 @@ async function getExpRankByUsername(username) {
       return;
     }
     if (selectedMode === "average") {
-      // Average mode: needs a positive target avg AND a positive window
-      // size. Accuracy is bounded 0-100 — reject anything outside that
-      // range. WPM/PP just need to be positive.
+      // Average mode: needs an active metric (one chip with a valid value)
+      // AND a positive window size. Accuracy bounds (0-100) are enforced
+      // at chip-input time, so by the time selectedMetric+selectedValue are
+      // set they're already in range — defensive re-check anyway.
+      if (selectedMetric == null) { confirmBtn.disabled = true; return; }
       if (selectedValue == null || selectedValue <= 0) { confirmBtn.disabled = true; return; }
       if (selectedMetric === "accuracy" && selectedValue > 100) { confirmBtn.disabled = true; return; }
       if (selectedWindow == null || selectedWindow <= 0) { confirmBtn.disabled = true; return; }
@@ -2576,33 +2601,21 @@ async function getExpRankByUsername(username) {
 
     if (isAvgMode) {
       // ── Average mode (races + average) ────────────────────────
-      // The amount input becomes "Target average". No presets — the
-      // useful range varies a lot per metric and per user, so making the
-      // user just type a number is cleaner than guessing presets. Window
-      // size has its own dedicated input (see the avgWindowRow above).
-      customInput.style.display = "";
-      customInput.type          = "number";
-      const mLabel = metricLabel(selectedMetric);
-      amountLabel.textContent   = `Target average (${mLabel})`;
-      customInput.placeholder   = selectedMetric === "accuracy" ? "e.g. 98" : "e.g. 150";
-      // Accuracy is bounded — surface that as an input attribute too so
-      // the browser's number-input controls reflect it. Step matches the
-      // display precision (2 decimals for accuracy, 1 for WPM/PP) so
-      // arrow-key increments don't produce values the display can't show.
-      if (selectedMetric === "accuracy") {
-        customInput.max = "100";
-        customInput.step = "0.01";
-      } else {
-        customInput.removeAttribute("max");
-        customInput.step = "0.1";
-      }
+      // Target & metric live in the chip row (gt-avg-target-row) which
+      // is shown by updateAvgRowVisibility. The standalone amount row
+      // (gt-amount-row) is hidden — its job is taken over entirely by
+      // the chip row. Window size has its own dedicated row below.
+      amountRow.style.display = "none";
+      customInput.style.display = "none";
       presetsEl.innerHTML = "";
       nextRankRow.style.display = "none";
       modeHint.style.display = "none";
       return;
     }
-    // Other modes don't constrain the input range — clear any leftover
-    // attributes from a prior render in average mode.
+    // Other modes: ensure the amount row is visible (in case we're
+    // returning from avg mode) and clear any leftover input attributes.
+    amountRow.style.display = "";
+    customInput.style.display = "";
     customInput.removeAttribute("max");
     customInput.removeAttribute("step");
 
@@ -2965,6 +2978,10 @@ async function getExpRankByUsername(username) {
     });
     reqStrictBtn.classList.remove("active");
     reqUniqueBtn.classList.remove("active");
+    // selectedUnique is shared with avg mode — clear that button's active
+    // state too, so the user doesn't see a stale ✨ if they switch modes
+    // back and forth.
+    avgUniqueBtn.classList.remove("active");
   }
 
   // The requirements row is only meaningful for races + gain.
@@ -2976,16 +2993,53 @@ async function getExpRankByUsername(username) {
   }
 
   // ── Average-mode controls ──────────────────────────────────────
-  // Metric button group (WPM / ACC / PP) — single-select. Driven the
-  // same way as the type/mode/filter button groups for consistency.
-  avgMetricBtns.forEach(btn => btn.addEventListener("click", () => {
-    avgMetricBtns.forEach(b => b.classList.remove("active"));
-    btn.classList.add("active");
-    selectedMetric = btn.dataset.metric;
-    // Re-render the amount row so the placeholder/label can reflect the
-    // active metric (e.g., suggesting an accuracy target vs WPM target).
-    if (selectedMode === "average") renderPresets();
-  }));
+  // Chip-style metric inputs: WPM / ACC / PP, mutually exclusive. Typing
+  // in one input deactivates and clears the others, then sets selectedMetric
+  // and selectedValue from the active input. Empty input = no metric picked.
+  // The unique-quote (✨) toggle on the right of the row applies to the
+  // entire rolling window (only one quoteId can occupy the window at a time).
+  avgInputs.forEach(input => {
+    function syncFromInput() {
+      const metric = input.dataset.avg;
+      const v = parseFloat(input.value);
+      const valid = !isNaN(v) && v > 0
+                    && !(metric === "accuracy" && v > 100);
+      if (valid) {
+        // Activate this chip + set selectedMetric/Value, clear others.
+        avgInputs.forEach(other => {
+          if (other === input) return;
+          other.value = "";
+          const otherChip = other.closest(".gt-req-chip");
+          if (otherChip) otherChip.classList.remove("active");
+        });
+        const chip = input.closest(".gt-req-chip");
+        if (chip) chip.classList.add("active");
+        selectedMetric = metric;
+        selectedValue  = v;
+      } else {
+        // This input went invalid — but ONLY clear selectedMetric/Value
+        // if it was this metric that was previously active. If a different
+        // metric was active, leave it alone (this can happen if focus
+        // moves and an empty/invalid event fires on another chip).
+        const chip = input.closest(".gt-req-chip");
+        if (chip) chip.classList.remove("active");
+        if (selectedMetric === metric) {
+          selectedMetric = null;
+          selectedValue  = null;
+        }
+      }
+      validateConfirm();
+    }
+    input.addEventListener("input", syncFromInput);
+    // Defensive sync on blur — covers paste / autofill paths that don't
+    // fire 'input' reliably.
+    input.addEventListener("blur", syncFromInput);
+  });
+
+  avgUniqueBtn.addEventListener("click", () => {
+    selectedUnique = !selectedUnique;
+    avgUniqueBtn.classList.toggle("active", selectedUnique);
+  });
 
   // Render the window-size preset chips. Mirrors renderPresets's main
   // chip-rendering path — clicking a chip selects it (deselects others)
@@ -3019,20 +3073,30 @@ async function getExpRankByUsername(username) {
   // Reset the average-mode UI to defaults. Called on modal open and on
   // mode/type changes that hide the average rows.
   function resetAverageUI() {
-    selectedMetric = "wpm";
+    selectedMetric = null;
     selectedWindow = null;
+    selectedValue  = null;  // shared with non-avg modes; safe to clear
+    selectedUnique = false; // shared with gain mode; safe to clear
     avgWindowInput.value = "";
-    avgMetricBtns.forEach(b => b.classList.toggle("active", b.dataset.metric === "wpm"));
+    avgInputs.forEach(input => {
+      input.value = "";
+      const chip = input.closest(".gt-req-chip");
+      if (chip) chip.classList.remove("active");
+    });
+    avgUniqueBtn.classList.remove("active");
+    // selectedUnique is shared with gain mode — clear that button's
+    // active state too (mirror of resetRequirementsUI's avg cleanup).
+    reqUniqueBtn.classList.remove("active");
     // Clear any selected window-preset chip. Defensive — the chips may
     // not be rendered yet on first modal open, in which case this is a no-op.
     avgWindowPresets.querySelectorAll(".gt-preset-chip").forEach(c => c.classList.remove("selected"));
   }
 
-  // Average-mode rows (metric picker + window size input) are only
+  // Average-mode rows (target-average chips + window size) are only
   // meaningful for races + average. Mirror updateReqRowVisibility().
   function updateAvgRowVisibility() {
     const visible = selectedType === "races" && selectedMode === "average";
-    avgMetricRow.style.display = visible ? "block" : "none";
+    avgTargetRow.style.display = visible ? "block" : "none";
     avgWindowRow.style.display = visible ? "block" : "none";
     if (visible) {
       // Lazy-render the window-size presets the first time the avg rows
@@ -3061,7 +3125,7 @@ async function getExpRankByUsername(username) {
     nextRankRow.style.display = "none";
     filterRow.style.display = "none"; // hide filter row initially (only show for races)
     reqRow.style.display = "none";    // hide req row initially (only show for races + gain)
-    avgMetricRow.style.display = "none"; // hide avg rows initially (only show for races + average)
+    avgTargetRow.style.display = "none"; // hide avg rows initially (only show for races + average)
     avgWindowRow.style.display = "none";
     modeRow.style.display = "block"; recRow.style.display = "block";
     renderPresets();
@@ -3288,13 +3352,25 @@ async function getExpRankByUsername(username) {
       // incremented by the requirement evaluator (see evaluateRaceRequirements),
       // not derived from currentVal - baseline.
       // uniqueOnly: when true, each qualifying race must be on a different
-      // quoteId. Tracked via seenQuoteIds. Can be enabled standalone (no
-      // thresholds) — in that case every race trivially passes the bar and
-      // the unique-quote check is the ONLY gate. Strict mode is meaningless
-      // without thresholds (nothing can fail), so it's tied to reqActive.
-      const reqActive    = selectedType === "races" && selectedMode === "gain" && hasAnyReq(selectedReq);
-      const uniqueActive = selectedType === "races" && selectedMode === "gain" && selectedUnique;
-      const usesEvaluator = reqActive || uniqueActive;
+      // quoteId.
+      //   - In gain mode: tracked via seenQuoteIds (a permanent set of
+      //     quoteIds we've already qualified on this period). Can be
+      //     enabled standalone (no thresholds) — in that case every race
+      //     trivially passes the bar and the unique-quote check is the
+      //     ONLY gate.
+      //   - In avg mode: tracked via windowQuoteIds (an array running
+      //     parallel to windowRaces). When a race is evicted from the
+      //     window, its quoteId is also evicted — so the user can re-do
+      //     a quote once it leaves the window. This keeps "the last 25
+      //     races consist of 25 different quotes" without permanent
+      //     lockout.
+      // Strict mode is meaningless without thresholds (nothing can fail),
+      // so it's tied to reqActive.
+      const reqActive       = selectedType === "races" && selectedMode === "gain" && hasAnyReq(selectedReq);
+      const gainUniqueActive = selectedType === "races" && selectedMode === "gain"    && selectedUnique;
+      const avgUniqueActive  = selectedType === "races" && selectedMode === "average" && selectedUnique;
+      const uniqueActive    = gainUniqueActive || avgUniqueActive;
+      const usesEvaluator   = reqActive || gainUniqueActive;
       const requirements = reqActive ? { ...selectedReq } : undefined;
       const strictMode   = reqActive ? selectedStrict : undefined;
       const uniqueOnly   = uniqueActive ? true : undefined;
@@ -3329,11 +3405,10 @@ async function getExpRankByUsername(username) {
         requirements,
         strictMode,
         uniqueOnly,
-        // Quote-IDs we've already qualified on this period. Only initialised
-        // when uniqueOnly is on; the evaluator reads this via `new Set(...)`
-        // each pass and writes back the updated array. Reset to [] on period
-        // rollover so each period gets a fresh slate of quotes to qualify on.
-        seenQuoteIds: uniqueActive ? [] : undefined,
+        // Gain-mode unique tracker: a permanent set of quoteIds we've
+        // already qualified on this period. Reset to [] on period rollover
+        // so each period gets a fresh slate of quotes to qualify on.
+        seenQuoteIds: gainUniqueActive ? [] : undefined,
         qualifyingProgress: usesEvaluator ? 0 : undefined,
         // Snapshot of the LIFETIME races stat we've already evaluated.
         // The evaluator works off currentStats.races (lifetime), not the
@@ -3353,6 +3428,10 @@ async function getExpRankByUsername(username) {
         windowSize: avgWindow,
         targetAvg: avgTarget,
         windowRaces: isAvgMode ? [] : undefined,
+        // Avg-mode unique tracker: parallel to windowRaces. Push together,
+        // shift together. When a race leaves the window, so does its
+        // quoteId — letting the user re-race that quote later.
+        windowQuoteIds: avgUniqueActive ? [] : undefined,
         bestAvg: isAvgMode ? null : undefined,
       };
 
@@ -3428,11 +3507,14 @@ async function getExpRankByUsername(username) {
     if (bottomRow) bottomRow.style.display = "flex";
 
     // ── Header label & badges ─────────────────────────────────
-    // "Rolling avg WPM" + filter chip if any. Clean and consistent with
-    // other race-goal labels.
+    // "Rolling avg WPM (quickplay) ✨" — filter chip and unique-mode
+    // glyph both appended after the metric label. The ✨ tells the user
+    // at a glance that the goal requires unique quotes; without it,
+    // there's no other on-card indication of the unique-quote setting.
     const filterStr = (gd.filter && gd.filter !== "all") ? ` (${gd.filter})` : "";
+    const uniqueStr = gd.uniqueOnly ? " ✨" : "";
     document.getElementById(`${goalId}-label`).textContent =
-      `Rolling avg ${metricLabel(gd.metric)}${filterStr}`;
+      `Avg ${metricLabel(gd.metric)}${filterStr}${uniqueStr}`;
 
     // Recurrence badge — same visual treatment as other goals.
     const recBadgeEl = document.getElementById(`${goalId}-rec-badge`);
@@ -4017,10 +4099,13 @@ async function getExpRankByUsername(username) {
             // for the same reason as gated goals (prevent old races from
             // leaking into the new period). Streak/totalCompletions handled
             // by the generic block above based on completedThisPeriod.
+            // For uniqueOnly avg goals: also wipe windowQuoteIds in lockstep
+            // (it must match windowRaces' state).
             if (isAvg) {
               gd.windowRaces  = [];
               gd.bestAvg      = null;
               gd.lastEvalRaces = currentStats.races ?? currentVal;
+              if (gd.uniqueOnly) gd.windowQuoteIds = [];
               // Wipe the delta-tracker maps so the first race of the new
               // period doesn't compute a delta against last period's avg.
               delete prevAvgMap[goalId];
@@ -4845,11 +4930,23 @@ async function getExpRankByUsername(username) {
       // (no qualifyingProgress, no seenQuoteIds, no quote fetches). We
       // walk the new races, apply the goal's filter, and slide the
       // window. Best avg only updates once the window is full.
+      //
+      // Unique-quote handling: when gd.uniqueOnly is on, we maintain
+      // a parallel windowQuoteIds array that mirrors windowRaces. A
+      // race is skipped entirely if its quoteId is already in that
+      // array (i.e. currently in the window). On eviction, both arrays
+      // shift in lockstep — so a quoteId leaves the "blocked" set the
+      // moment it leaves the window, letting the user re-race that
+      // quote. This avoids the "ran out of quotes" failure mode that
+      // a permanent set would produce over time.
       if (goalIsAverage(gd)) {
-        let windowRaces = Array.isArray(gd.windowRaces) ? gd.windowRaces.slice() : [];
-        let bestAvg     = gd.bestAvg ?? null;
-        const windowSize = gd.windowSize ?? 0;
-        const metric    = gd.metric;
+        let windowRaces    = Array.isArray(gd.windowRaces) ? gd.windowRaces.slice() : [];
+        let windowQuoteIds = gd.uniqueOnly
+          ? (Array.isArray(gd.windowQuoteIds) ? gd.windowQuoteIds.slice() : [])
+          : null;
+        let bestAvg        = gd.bestAvg ?? null;
+        const windowSize   = gd.windowSize ?? 0;
+        const metric       = gd.metric;
         let avgChanged = false;
 
         for (const race of chronological) {
@@ -4858,8 +4955,22 @@ async function getExpRankByUsername(username) {
           const v = getRaceMetricValue(race, metric);
           if (!isFinite(v)) continue;
 
+          // Unique-quote check: skip if this quoteId is already in the
+          // current window. Defensive: also skip if uniqueOnly is on
+          // but the race has no quoteId (can't enforce uniqueness, so
+          // safer to drop than to count). includes() is O(n) but n is
+          // small (window size, typically 25-250).
+          if (windowQuoteIds) {
+            if (!race.quoteId) continue;
+            if (windowQuoteIds.includes(race.quoteId)) continue;
+          }
+
           windowRaces.push(v);
-          if (windowRaces.length > windowSize) windowRaces.shift();
+          if (windowQuoteIds) windowQuoteIds.push(race.quoteId);
+          if (windowRaces.length > windowSize) {
+            windowRaces.shift();
+            if (windowQuoteIds) windowQuoteIds.shift();
+          }
           avgChanged = true;
 
           // Best avg only tracks once the window is full. Partial-window
@@ -4874,12 +4985,17 @@ async function getExpRankByUsername(username) {
         }
 
         if (avgChanged || lastEval !== racesSnapshot) {
-          goals[i] = {
+          const next = {
             ...gd,
             windowRaces,
             bestAvg,
             lastEvalRaces: racesSnapshot,
           };
+          // Only write windowQuoteIds back when uniqueOnly is on. If
+          // it's off, leave the field absent so old goal shapes don't
+          // get polluted with empty arrays they don't need.
+          if (windowQuoteIds) next.windowQuoteIds = windowQuoteIds;
+          goals[i] = next;
           changed = true;
         }
         continue; // avg goals don't run the gated-goal logic below

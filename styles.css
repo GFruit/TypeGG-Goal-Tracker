@@ -90,6 +90,13 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
+  /* gap acts as the minimum buffer between the label group and the
+     actions (streak + remove). Without it, when the goal display is
+     narrow enough that the label wraps to two lines and fills the
+     left side, the recurrence badge ends up almost touching the
+     streak. space-between still pushes them apart when there's
+     slack — gap only kicks in once they'd otherwise collide. */
+  gap: 8px;
   margin-bottom: 3px;
 }
 
@@ -126,6 +133,13 @@
   font-size: 11px;
   font-weight: 600;
   color: #fb923c;
+  /* Streak text is "🔥 N" with a regular space — without nowrap the
+     browser will break between the flame and the count when the row
+     is tight (e.g. when the label wraps to two lines). Keeping them
+     together also lets .gt-gain-header's align-items:center vertically
+     center the whole streak as a single atomic unit, so it lines up
+     horizontally with the recurrence badge. */
+  white-space: nowrap;
 }
 
 .gt-gain-row {
@@ -347,36 +361,6 @@
   flex-shrink: 0;
 }
 
-/* ── Modal: metric picker (avg mode) ─────────────────────── */
-/* Re-uses gt-mode-selector layout; this class is just for the
-   metric-button group specifically so future styling tweaks don't
-   collide with the main mode buttons. */
-.gt-metric-selector {
-  display: flex;
-  gap: 4px;
-}
-.gt-metric-btn {
-  flex: 1;
-  padding: 6px 10px;
-  border-radius: 6px;
-  border: 1.5px solid #374151;
-  background: transparent;
-  color: #9ca3af;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: border-color 0.15s, background 0.15s, color 0.15s;
-}
-.gt-metric-btn:hover {
-  border-color: #4b5563;
-  color: #e5e7eb;
-}
-.gt-metric-btn.active {
-  border-color: #06b6d4;
-  background: #083344;
-  color: #67e8f9;
-}
-
 /* ── Modal overlay ───────────────────────────────────────── */
 #gt-overlay {
   display: none;
@@ -515,7 +499,8 @@
 
 /* The input is borderless inside the chip — the chip provides the
    border. tabular-nums keeps "100" / "98.5" from jittering as digits change. */
-.gt-req-input {
+.gt-req-input,
+.gt-avg-input {
   flex: 1;
   min-width: 0;
   width: 100%;
@@ -530,8 +515,11 @@
   -moz-appearance: textfield;
 }
 .gt-req-input::-webkit-outer-spin-button,
-.gt-req-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
-.gt-req-input::placeholder { color: #6b7280; }
+.gt-req-input::-webkit-inner-spin-button,
+.gt-avg-input::-webkit-outer-spin-button,
+.gt-avg-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.gt-req-input::placeholder,
+.gt-avg-input::placeholder { color: #6b7280; }
 
 .gt-req-suffix {
   flex-shrink: 0;
