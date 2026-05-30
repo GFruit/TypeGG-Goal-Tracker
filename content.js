@@ -221,6 +221,62 @@ window.addEventListener("load", () => {
     return w ? w.querySelector(".gt-content") : null;
   }
 
+  // Does any goal currently in this group have mode === "average"?
+  // Used to gate the .gt-widget-has-avg class — see updateWidgetAvgClass
+  // below. Defined here (alongside the other group/widget lookups) rather
+  // than inline at the call site so the predicate is reusable. The
+  // double loop is fine: groups are small (a handful of goals each) and
+  // goalData is split across types so we have to scan all type buckets
+  // to find the goal record matching an id.
+  function groupHasAvgGoal(groupId) {
+    // Defensive: this can run during the initial renderGroupWidgets()
+    // pass at module load (createDetachedWidget calls updateWidgetAvgClass
+    // for each new widget), which happens BEFORE the `let goalData`
+    // declaration further down in the file is executed. Reading goalData
+    // before its declaration line is hit triggers a TDZ ReferenceError;
+    // catch it and return false. That's correct behaviour for this
+    // moment anyway: there are no goal sections in the widget yet, so
+    // no avg-class bump is needed. Once goalData is initialized and
+    // the first renderAllGoals pass runs, updateAllWidgetAvgClasses
+    // sets the class correctly.
+    let goals;
+    try { goals = goalData; } catch { return false; }
+    const group = groupData[groupId];
+    if (!group) return false;
+    for (const goalId of group.goalIds) {
+      for (const type of Object.keys(goals)) {
+        const gd = goals[type].find(g => g.id === goalId);
+        if (gd && goalIsAverage(gd)) return true;
+      }
+    }
+    return false;
+  }
+
+  // Toggle .gt-widget-has-avg on a widget based on whether its group
+  // currently holds an average goal. The class bumps the widget's
+  // min-width (see styles.css) to reserve room for the new-best gain
+  // pill on the avg-best-row, which would otherwise overlap the ✓
+  // achievement badge at the default 180px min-width. Widgets that
+  // never host avg goals keep the original 180px so users without
+  // average goals don't see their widgets get wider for no reason.
+  function updateWidgetAvgClass(groupId) {
+    const w = widgetElForGroup(groupId);
+    if (!w) return;
+    w.classList.toggle("gt-widget-has-avg", groupHasAvgGoal(groupId));
+  }
+
+  // Refresh the .gt-widget-has-avg class on every existing widget.
+  // Called from renderAllGoals so any change that triggers a render
+  // (goal added / removed / moved between groups, settings changed,
+  // period rolled over, etc.) also updates the min-width gating
+  // without needing to thread a call through each individual
+  // mutation site.
+  function updateAllWidgetAvgClasses() {
+    for (const gid of Object.keys(groupData)) {
+      updateWidgetAvgClass(gid);
+    }
+  }
+
   // ── Create goal section HTML ───────────────────────────────────
   // parentContent: the .gt-content element of whichever widget owns this goal.
   // Callers look it up via contentElForGroup(findGroupIdOfGoal(goalId)) — or
@@ -333,6 +389,13 @@ window.addEventListener("load", () => {
     // start tracking future resizes so the new width survives reload.
     applyWidgetTransform(w, groupId);
     observeWidgetResize(w, groupId);
+    // Apply the .gt-widget-has-avg class right away if this group
+    // already holds an avg goal — otherwise the widget would render
+    // at the default 180px min-width and only snap up to 220px on the
+    // next renderAllGoals tick. That gap was visible to users when
+    // dragging a goal out into a new widget: they could resize below
+    // the proper min-width briefly before it auto-corrected.
+    updateWidgetAvgClass(groupId);
     return w;
   }
 
@@ -936,6 +999,16 @@ window.addEventListener("load", () => {
       gDrag = null;
       dragInProgress = false;
       document.body.classList.remove("gt-dragging");
+      // A drag commit can change which widgets host avg goals — moving
+      // an avg goal into a previously-non-avg widget needs to bump that
+      // widget's min-width, and emptying the source widget of its only
+      // avg goal needs to drop the bumped min-width back. The drag
+      // handler doesn't otherwise call renderAllGoals (the snap
+      // animation moves DOM directly), so the .gt-widget-has-avg class
+      // would only refresh on the next stats poll without this — a
+      // visible delay where the user can briefly resize a fresh
+      // avg-only widget below its proper min-width.
+      updateAllWidgetAvgClasses();
     }
   });
 
@@ -996,6 +1069,7 @@ window.addEventListener("load", () => {
           <button class="gt-mode-btn"        data-mode="rank" id="gt-rank-btn" style="display:none;">Rank</button>
           <button class="gt-mode-btn"        data-mode="player" id="gt-player-btn" style="display:none;">Player</button>
           <button class="gt-mode-btn"        data-mode="average" id="gt-avg-btn" style="display:none;">Average</button>
+          <button class="gt-mode-btn"        data-mode="improvement" id="gt-improvement-btn" style="display:none;">Improvement</button>
           </div>
       </div>
       <!-- Average-mode controls (races + average only). The target-average
@@ -1021,6 +1095,21 @@ window.addEventListener("load", () => {
             </label>
           </div>
           <button id="gt-avg-unique-btn" class="gt-req-strict-btn gt-avg-unique-btn" type="button" title="Unique-quote mode — each race in the rolling window must be on a different quote">✨</button>
+        </div>
+      </div>
+      <!-- Improvement-mode controls (races + improvement only). A small
+           WPM/PP metric selector chooses which stat's per-quote gain is
+           accumulated, plus a right-aligned toggle (∞). Off by default:
+           only quotes you've typed at least once count (improvement needs a
+           prior best). When active, the first race on a quote counts too. -->
+      <div id="gt-improvement-metric-row" style="display:none;">
+        <div class="gt-section-label">Metric</div>
+        <div class="gt-req-selector">
+          <div class="gt-req-group gt-improvement-metric-group">
+            <button class="gt-mode-btn active" data-imp-metric="wpm" type="button">WPM</button>
+            <button class="gt-mode-btn"        data-imp-metric="pp"  type="button">PP</button>
+          </div>
+          <button id="gt-improvement-firsttime-btn" class="gt-req-strict-btn" type="button" title="Count first-ever attempts — also count the first time you type a quote (no prior best needed). Off by default: only quotes you've typed before count, since improvement needs a previous best to measure against.">∞</button>
         </div>
       </div>
       <div id="gt-req-row" style="display:none;">
@@ -1960,9 +2049,30 @@ window.addEventListener("load", () => {
     return null;
   }
   function formatCountdown(ms) {
-    const s=Math.floor(ms/1000), d=Math.floor(s/86400), h=Math.floor((s%86400)/3600), m=Math.floor((s%3600)/60);
-    if(d>0) return `resets in ${d}d ${h}h`;
-    if(h>0) return `resets in ${h}h ${m}m`;
+    // Round remaining time UP to whole minutes so the displayed
+    // countdown lines up with the wall-clock minute the user reads
+    // off their screen. Reset times are stored at minute precision
+    // (see getCurrentPeriodStart sets seconds = 0), so e.g. at
+    // 10:32:50 with a reset at 10:33:00 the diff is 10s — the user
+    // thinks "1 minute" because their clock says 10:32, and ceil
+    // yields 1m. The old floor produced "0m" here. Clamp to 1 to
+    // avoid a transient "0m" frame at the exact reset boundary or
+    // from tiny negative drift between render and period rollover.
+    const totalMin = Math.max(1, Math.ceil(ms / 60000));
+    const d = Math.floor(totalMin / 1440);
+    const h = Math.floor((totalMin % 1440) / 60);
+    const m = totalMin % 60;
+    if (d > 0) {
+      // Daily just-reset boundary: exactly 24h remaining → d=1, h=0,
+      // m=0. Display "24h" rather than "1d 0h" — matches the user's
+      // intuition that "the clock just hit the reset minute, so the
+      // next reset is 24 hours away". The same edge fires once per
+      // period for weekly/monthly (the moment that's exactly 24h
+      // before the next reset), and "24h" reads naturally there too.
+      if (d === 1 && h === 0 && m === 0) return "resets in 24h";
+      return `resets in ${d}d ${h}h`;
+    }
+    if (h > 0) return m > 0 ? `resets in ${h}h ${m}m` : `resets in ${h}h`;
     return `resets in ${m}m`;
   }
 
@@ -2232,6 +2342,7 @@ async function getExpRankByUsername(username) {
 
   // Average-mode (rolling-average) controls
   const avgBtn          = document.getElementById("gt-avg-btn");
+  const improvementBtn  = document.getElementById("gt-improvement-btn");
   const avgTargetRow    = document.getElementById("gt-avg-target-row");
   const avgInputs       = document.querySelectorAll(".gt-avg-input");
   const avgUniqueBtn    = document.getElementById("gt-avg-unique-btn");
@@ -2239,11 +2350,24 @@ async function getExpRankByUsername(username) {
   const avgWindowPresets = document.getElementById("gt-avg-window-presets");
   const avgWindowInput   = document.getElementById("gt-avg-window-input");
 
+  // Improvement-mode controls
+  const improvementMetricRow  = document.getElementById("gt-improvement-metric-row");
+  const improvementMetricBtns = document.querySelectorAll(".gt-improvement-metric-group .gt-mode-btn");
+  const improvementFirstTimeBtn = document.getElementById("gt-improvement-firsttime-btn");
+
   // Presets for the rolling-window size. Common values for typing-test
   // analytics — small enough that brand-new accounts can hit them, large
   // enough that the avg actually means something. Custom input handles
   // anything outside this set.
   const AVG_WINDOW_PRESETS = [10, 25, 50, 100, 250];
+
+  // Preset target values (cumulative gain) for improvement goals, per
+  // metric — PP accrues in much larger numbers than WPM, so the two sets
+  // differ. The custom input handles anything outside these.
+  const IMPROVEMENT_PRESETS = {
+    wpm: [50, 100, 250, 500, 1000],
+    pp:  [500, 1000, 2500, 5000, 10000],
+  };
 
   let selectedType  = "exp";
   let selectedRec   = "none";
@@ -2265,6 +2389,15 @@ async function getExpRankByUsername(username) {
   // selectedWindow — how many races make up the rolling window. Validated >0.
   let selectedMetric = null;
   let selectedWindow = null;
+
+  // Improvement-mode state. Only consulted in mode=improvement.
+  // selectedImprovementMetric ∈ {"wpm","pp"} — which race field's per-quote
+  // gain is accumulated (defaults to wpm). selectedCountFirstTime: when true,
+  // the FIRST time you type a quote also counts (baseline 0); when false
+  // (the default) only quotes you've already typed at least once count, since
+  // "improvement" needs a previous best to measure against.
+  let selectedImprovementMetric = "wpm";
+  let selectedCountFirstTime    = false;
 
   // rank mode state
   let rankFetchedPp     = null; // PP fetched for the entered rank
@@ -2345,11 +2478,29 @@ async function getExpRankByUsername(username) {
     return !!g && g.mode === "average";
   }
 
+  // ── Improvement-mode helper ─────────────────────────────────────
+  // An improvement goal (mode="improvement") tracks cumulative WPM gain
+  // measured per-quote against the user's best on that quote BEFORE the
+  // race (the "S1" semantic). State (in addition to common goal fields):
+  //   mode: "improvement"
+  //   target: number             ← target cumulative WPM gain
+  //   quoteBests: { [quoteId]: bestWpm }
+  //                              ← per-quote baseline, seeded at quote-start
+  //                                (capturing the pre-race PB) and then
+  //                                ratcheted up by the evaluator on each PB.
+  //   accumulatedGain: number    ← sum of positive (wpm − prevBest) deltas
+  //   lastEvalRaces: number      ← lifetime-races snapshot, like avg/gated.
+  // completedThisPeriod is reused as the sticky achievement flag, same as
+  // gain/avg goals (drives streak +1 and resets at period rollover).
+  function goalIsImprovement(g) {
+    return !!g && g.mode === "improvement";
+  }
+
   // Does this goal need the racesEndpoint (for window math or req eval)?
-  // Both gated and average goals consume new races; everything else is
-  // pure stat-delta and doesn't need the per-race list.
+  // Gated, average AND improvement goals all consume new races; everything
+  // else is pure stat-delta and doesn't need the per-race list.
   function goalNeedsRaceList(g) {
-    return goalIsGated(g) || goalIsAverage(g);
+    return goalIsGated(g) || goalIsAverage(g) || goalIsImprovement(g);
   }
 
   // Pull the right metric value out of a race object. Accuracy is stored
@@ -2619,6 +2770,32 @@ async function getExpRankByUsername(username) {
     customInput.removeAttribute("max");
     customInput.removeAttribute("step");
 
+    if (selectedMode === "improvement") {
+      // ── Improvement mode (races only) ─────────────────────────
+      // Single numeric target = cumulative gain in the chosen metric.
+      // Reuses the standard Amount row + presets; no "above current"
+      // constraint (it's a fresh accumulator, not an absolute target).
+      const metric = selectedImprovementMetric;          // "wpm" | "pp"
+      const metricLbl = metric === "pp" ? "PP" : "WPM";
+      customInput.type          = "number";
+      nextRankRow.style.display = "none";
+      amountLabel.textContent   = `Target ${metricLbl} gain`;
+      customInput.placeholder   = "Custom";
+      modeHint.style.display    = "none";
+      presetsEl.innerHTML = (IMPROVEMENT_PRESETS[metric] || IMPROVEMENT_PRESETS.wpm).map(v =>
+        `<button class="gt-preset-chip" data-value="${v}">${formatPreset(v)}</button>`
+      ).join("");
+      presetsEl.querySelectorAll(".gt-preset-chip").forEach(chip => {
+        chip.addEventListener("click", () => {
+          presetsEl.querySelectorAll(".gt-preset-chip").forEach(c => c.classList.remove("selected"));
+          chip.classList.add("selected"); customInput.value = "";
+          selectedValue = parseFloat(chip.dataset.value);
+          validateConfirm();
+        });
+      });
+      return;
+    }
+
     if (isRankMode) {
       amountLabel.textContent = "Target rank";
       presetsEl.innerHTML     = "";
@@ -2884,6 +3061,8 @@ async function getExpRankByUsername(username) {
 
     // Average mode is races-only — same visibility pattern as rank/player.
     avgBtn.style.display = (selectedType === "races") ? "" : "none";
+    // Improvement mode is races-only too.
+    improvementBtn.style.display = (selectedType === "races") ? "" : "none";
 
 
     // If rank/player was active and we switched away from PP/EXP, fall back to gain
@@ -2891,8 +3070,8 @@ async function getExpRankByUsername(username) {
       selectedMode = "gain";
       modeBtns.forEach(b => b.classList.toggle("active", b.dataset.mode === "gain"));
     }
-    // Same fallback for average when leaving races
-    if (selectedMode === "average" && selectedType !== "races") {
+    // Same fallback for average/improvement when leaving races
+    if ((selectedMode === "average" || selectedMode === "improvement") && selectedType !== "races") {
       selectedMode = "gain";
       modeBtns.forEach(b => b.classList.toggle("active", b.dataset.mode === "gain"));
     }
@@ -2903,13 +3082,15 @@ async function getExpRankByUsername(username) {
       modeBtns.forEach(b => b.classList.toggle("active", b.dataset.mode === "gain"));
     }
 
-    // Recurrence row: hidden in target/rank/player; visible in gain/average.
-    recRow.style.display = (selectedMode === "gain" || selectedMode === "average") ? "block" : "none";
+    // Recurrence row: hidden in target/rank/player; visible in gain/average/improvement.
+    recRow.style.display = (selectedMode === "gain" || selectedMode === "average" || selectedMode === "improvement") ? "block" : "none";
 
     // Requirements row: races + gain only
     updateReqRowVisibility();
     // Average-mode rows: races + average only
     updateAvgRowVisibility();
+    // Improvement-mode row: races + improvement only
+    updateImprovementRowVisibility();
 
     renderPresets();
   }));
@@ -2924,6 +3105,7 @@ async function getExpRankByUsername(username) {
     } else { recRow.style.display = "block"; }
     updateReqRowVisibility();
     updateAvgRowVisibility();
+    updateImprovementRowVisibility();
     renderPresets();
   }));
 
@@ -3041,6 +3223,24 @@ async function getExpRankByUsername(username) {
     avgUniqueBtn.classList.toggle("active", selectedUnique);
   });
 
+  // Improvement metric selector (WPM / PP) — mutually exclusive, mirrors
+  // the mode-button look. Switching metric re-renders the Amount presets
+  // since the two metrics use different preset magnitudes.
+  improvementMetricBtns.forEach(btn => btn.addEventListener("click", () => {
+    improvementMetricBtns.forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    selectedImprovementMetric = btn.dataset.impMetric; // "wpm" | "pp"
+    if (selectedMode === "improvement") renderPresets();
+  }));
+
+  // Count-first-time toggle. Off (default) → only quotes you've typed
+  // before count (improvement needs a prior best). On → the first race on
+  // a quote counts too (baseline 0).
+  improvementFirstTimeBtn.addEventListener("click", () => {
+    selectedCountFirstTime = !selectedCountFirstTime;
+    improvementFirstTimeBtn.classList.toggle("active", selectedCountFirstTime);
+  });
+
   // Render the window-size preset chips. Mirrors renderPresets's main
   // chip-rendering path — clicking a chip selects it (deselects others)
   // and clears the custom input. Typing in the custom input deselects
@@ -3108,6 +3308,24 @@ async function getExpRankByUsername(username) {
     }
   }
 
+  // Reset the improvement-mode UI to defaults (WPM metric, count-first-time
+  // off). Called on modal open and on mode/type changes that hide the row.
+  function resetImprovementUI() {
+    selectedImprovementMetric = "wpm";
+    selectedCountFirstTime    = false;
+    improvementMetricBtns.forEach(b =>
+      b.classList.toggle("active", b.dataset.impMetric === "wpm"));
+    improvementFirstTimeBtn.classList.remove("active");
+  }
+
+  // Improvement-mode row (metric selector + count-first-time toggle) is
+  // only meaningful for races + improvement. Mirror updateAvgRowVisibility().
+  function updateImprovementRowVisibility() {
+    const visible = selectedType === "races" && selectedMode === "improvement";
+    improvementMetricRow.style.display = visible ? "block" : "none";
+    if (!visible) resetImprovementUI();
+  }
+
   function openModal() {
     overlay.classList.add("open");
     typeBtns.forEach(b => b.classList.toggle("active", b.dataset.type === "exp"));
@@ -3119,14 +3337,17 @@ async function getExpRankByUsername(username) {
     maxQuotesMode = false; maxQuotesFetched = null;
     resetRequirementsUI();
     resetAverageUI();
+    resetImprovementUI();
     playerBtn.style.display = (selectedType === "pp" || selectedType === "exp") ? "" : "none";
     rankBtn.style.display = (selectedType === "pp" || selectedType === "exp") ? "" : "none";
     avgBtn.style.display = (selectedType === "races") ? "" : "none";
+    improvementBtn.style.display = (selectedType === "races") ? "" : "none";
     nextRankRow.style.display = "none";
     filterRow.style.display = "none"; // hide filter row initially (only show for races)
     reqRow.style.display = "none";    // hide req row initially (only show for races + gain)
     avgTargetRow.style.display = "none"; // hide avg rows initially (only show for races + average)
     avgWindowRow.style.display = "none";
+    improvementMetricRow.style.display = "none"; // hide improvement row initially
     modeRow.style.display = "block"; recRow.style.display = "block";
     renderPresets();
   }
@@ -3136,6 +3357,7 @@ async function getExpRankByUsername(username) {
     maxQuotesMode = false; maxQuotesFetched = null;
     resetRequirementsUI();
     resetAverageUI();
+    resetImprovementUI();
     clearTimeout(rankDebounce);
     customInput.value = "";
   }
@@ -3279,6 +3501,11 @@ async function getExpRankByUsername(username) {
       }
       saveGroups();
     }
+    // Removing the last avg goal from a widget should drop its bumped
+    // min-width back to the default. This handler doesn't call
+    // renderAllGoals, so refresh the .gt-widget-has-avg gating
+    // explicitly — same reasoning as in the drag-drop handler.
+    updateAllWidgetAvgClasses();
   }
 
   confirmBtn.addEventListener("click", async () => {
@@ -3326,6 +3553,11 @@ async function getExpRankByUsername(username) {
       if (selectedWindow == null || selectedWindow <= 0) return;
       if (selectedMetric === "accuracy" && selectedValue > 100) return;
       gainTarget = 0;
+    } else if (selectedMode === "improvement") {
+      // Improvement mode: target is a cumulative WPM-gain figure. No
+      // "above current" check — it's a fresh accumulator starting at 0.
+      if (selectedValue == null || selectedValue <= 0) return;
+      gainTarget = selectedValue;
     } else if (selectedMode === "target" && cfg.supportsTarget) {
         if (selectedType === "quotes" && maxQuotesMode) {
           // Max quotes mode
@@ -3384,7 +3616,13 @@ async function getExpRankByUsername(username) {
       const avgMetric    = isAvgMode ? selectedMetric : undefined;
       const avgWindow    = isAvgMode ? selectedWindow : undefined;
       const avgTarget    = isAvgMode ? selectedValue : undefined;
-      const goalMode     = isAvgMode ? "average" : undefined;
+
+      // Improvement mode. Like avg, it consumes the recent-races list and
+      // seeds lastEvalRaces from lifetime races so only post-creation races
+      // count. quoteBests starts empty (baselines are seeded lazily at
+      // quote-start); accumulatedGain starts at 0.
+      const isImprovementMode = selectedMode === "improvement" && selectedType === "races";
+      const goalMode     = isAvgMode ? "average" : (isImprovementMode ? "improvement" : undefined);
 
       const newGoal = {
         id: goalId,
@@ -3420,7 +3658,7 @@ async function getExpRankByUsername(username) {
         // races. Always seed from lifetime here.
         // For average goals: same field, same purpose — the evaluator
         // also walks the recent-races list to slide the window.
-        lastEvalRaces: (usesEvaluator || isAvgMode) ? (currentStats.races ?? 0) : undefined,
+        lastEvalRaces: (usesEvaluator || isAvgMode || isImprovementMode) ? (currentStats.races ?? 0) : undefined,
         // Average-mode fields. mode="average" is the marker that flips
         // render and eval onto the rolling-avg path.
         mode: goalMode,
@@ -3433,6 +3671,16 @@ async function getExpRankByUsername(username) {
         // quoteId — letting the user re-race that quote later.
         windowQuoteIds: avgUniqueActive ? [] : undefined,
         bestAvg: isAvgMode ? null : undefined,
+        // Improvement-mode fields. quoteBests maps quoteId → the user's best
+        // (in the chosen metric) on that quote captured BEFORE racing it
+        // (seeded at quote-start); accumulatedGain sums the positive
+        // (race − prevBest) deltas. improvementMetric picks wpm vs pp.
+        // countFirstTime: when true, the first race on a quote also counts
+        // (baseline 0); when false (default) only quotes with a prior best do.
+        quoteBests: isImprovementMode ? {} : undefined,
+        accumulatedGain: isImprovementMode ? 0 : undefined,
+        improvementMetric: isImprovementMode ? selectedImprovementMetric : undefined,
+        countFirstTime: isImprovementMode ? selectedCountFirstTime : undefined,
       };
 
       goalData[selectedType].push(newGoal);
@@ -3464,7 +3712,7 @@ async function getExpRankByUsername(username) {
         // so seeding lastEvalRaces = currentStats.races above means "look
         // at races AFTER right now". So this kick-off is a no-op on
         // creation but ensures the eval cycle has a chance to wire up.
-        if (usesEvaluator || isAvgMode) evaluateRaceRequirementsGuarded();
+        if (usesEvaluator || isAvgMode || isImprovementMode) evaluateRaceRequirementsGuarded();
       }
     } catch (err) { console.error("Failed to set goal:", err); }
   });
@@ -3669,10 +3917,32 @@ async function getExpRankByUsername(username) {
         // 5s pop animation). Only difference is the DOM anchor point.
         indicator.className = "gt-gain-indicator";
         indicator.textContent = deltaStr;
-        // Anchor inside the best-group span (left side of the row), so
-        // the pill sits right after the value rather than getting pushed
-        // to the far right by the space-between layout. The ✓ stays
-        // anchored to the row's right edge regardless.
+        // Anchor the pill as a SIBLING of the target span (inside
+        // .gt-avg-best-group), not as a child of target. Two reasons:
+        //
+        //  1. textContent reset survival. The render path reassigns
+        //     bestTargetEl.textContent on every tick (`/ 150`), and at
+        //     the moment a goal is first achieved updateAverageGoalSection
+        //     is called twice in a row (once on the bestAvg cross, then
+        //     again after completedThisPeriod is flipped so the ✓ shows
+        //     immediately) — a pill nested inside target would be wiped
+        //     by the second pass before the user ever saw it. As a
+        //     sibling, the textContent reset on target leaves it alone.
+        //
+        //  2. Baseline alignment. As a regular flex item of
+        //     .gt-avg-best-group (which has align-items: baseline),
+        //     the pill baselines correctly with target/val automatically
+        //     — same pattern as the current-row pill on .gt-avg-current-wrap.
+        //     An earlier iteration anchored on bestTargetEl with
+        //     position:absolute to keep adding the pill from changing
+        //     the row's geometry, but lost baseline alignment in
+        //     practice and put the pill too high.
+        //
+        // Adding the pill expands best-group's content rightward, but
+        // the row's space-between keeps ✓ anchored to the right edge
+        // and nothing visible shifts. Min-width on widgets that host
+        // avg goals (.gt-widget-has-avg) reserves enough horizontal
+        // room that the pill never collides with ✓.
         const bestGroup = document.querySelector(`#${goalId}-goal-section .gt-avg-best-group`);
         if (bestGroup) bestGroup.appendChild(indicator);
         indicator.addEventListener("animationend", () => indicator.remove());
@@ -3792,6 +4062,10 @@ async function getExpRankByUsername(username) {
         `${cfg.label} (vs ${gd.targetUsername})`;
     } else if (gd.maxQuotes) {
       document.getElementById(`${goalId}-label`).textContent = `${cfg.label} → max quotes`;
+    } else if (type === "races" && goalIsImprovement(gd)) {
+      const metricLbl = (gd.improvementMetric === "pp") ? "PP" : "WPM";
+      const filterStr = (gd.filter && gd.filter !== "all") ? ` (${gd.filter})` : "";
+      document.getElementById(`${goalId}-label`).textContent = `${metricLbl} gain${filterStr}`;
     } else if (type === "races" && goalIsGated(gd)) {
       // Requirement-bearing or unique-quote race goal — keep main label
       // clean (just the type + filter chip) and put the threshold summary /
@@ -4065,6 +4339,7 @@ async function getExpRankByUsername(username) {
         const isRecurring = !!(gd.recurrence && gd.recurrence !== "none");
         const hasReq = type === "races" && goalIsGated(gd);
         const isAvg  = type === "races" && goalIsAverage(gd);
+        const isImprovement = type === "races" && goalIsImprovement(gd);
 
         // Period reset check
         if (isRecurring) {
@@ -4111,6 +4386,17 @@ async function getExpRankByUsername(username) {
               delete prevAvgMap[goalId];
               delete prevBestMap[goalId];
             }
+            // Improvement goals: zero the accumulated gain and clear the
+            // per-quote baselines so each period measures improvement from
+            // scratch. lastEvalRaces jumps forward like avg/gated goals.
+            // Wipe prevGainMap so the new period's first +X indicator isn't
+            // computed against last period's accumulated total.
+            if (isImprovement) {
+              gd.accumulatedGain = 0;
+              gd.quoteBests      = {};
+              gd.lastEvalRaces   = currentStats.races ?? currentVal;
+              delete prevGainMap[goalId];
+            }
             goals[i] = gd;
             saveGoals(type);
           }
@@ -4142,9 +4428,12 @@ async function getExpRankByUsername(username) {
         // For requirement goals, ignore the lifetime-stat delta and use
         // qualifyingProgress instead. The evaluator (evaluateRaceRequirements)
         // is the only writer of qualifyingProgress; render is purely a reader here.
-        const gain = hasReq
-          ? (gd.qualifyingProgress ?? 0)
-          : Math.max(0, currentVal - gd[cfg.baselineKey]);
+        // Improvement goals read accumulatedGain (also written by the evaluator).
+        const gain = isImprovement
+          ? (gd.accumulatedGain ?? 0)
+          : hasReq
+            ? (gd.qualifyingProgress ?? 0)
+            : Math.max(0, currentVal - gd[cfg.baselineKey]);
         // Compute delta for the +X indicator. Skip on first render (prevGain == null).
         const prevGain = prevGainMap[goalId];
         let gainDelta = 0;
@@ -4170,6 +4459,13 @@ async function getExpRankByUsername(username) {
         updateGoalSection(goalId, type, cfg, gd, gain, isRecurring, gainDelta);
       }
     }
+    // Re-evaluate which widgets currently host an avg goal and toggle
+    // the .gt-widget-has-avg class accordingly. Cheap (loops over a
+    // handful of groups), and putting it in renderAllGoals means every
+    // mutation that triggers a render — goal add/remove, drag between
+    // groups, period rollover — also updates the min-width gating
+    // without each call site needing to remember to do it explicitly.
+    updateAllWidgetAvgClasses();
   }
 
   // ── Stats + reset logic (leader only) ────────────────────────
@@ -4343,6 +4639,126 @@ async function getExpRankByUsername(username) {
     }
   }
 
+  // ── Improvement-goal seeding (S1 baselines) ──────────────────
+  // Improvement goals measure each race against the user's best on that
+  // quote captured BEFORE the race. We therefore record that baseline at
+  // quote-START, before the new race is absorbed by the API. Solo races
+  // carry the quoteId in the URL (/solo/{id}); quickplay races expose it
+  // via the "view in solo" link inside #typegame-view. The URL is the
+  // primary source (rock-solid); the link is the quickplay fallback,
+  // keyed on the href rather than brittle utility classes.
+  function getCurrentQuoteIdLive() {
+    const m = location.pathname.match(/^\/solo\/([^/?#]+)/);
+    if (m) return m[1];
+    const a = document.querySelector('#typegame-view a[href^="/solo/"]');
+    if (a) {
+      const hm = (a.getAttribute("href") || "").match(/\/solo\/([^/?#]+)/);
+      if (hm) return hm[1];
+    }
+    return null;
+  }
+
+  // The user's best on a quote, via /v1/users/{username}/quotes/{quoteId}.
+  // Returns { wpm, pp } from bestRace, or null when the user has never raced
+  // the quote (404 "User has not raced this quote", or no bestRace). One
+  // fetch serves both WPM- and PP-metric goals. In-flight dedupe keyed by
+  // quoteId so multiple improvement goals seeding the same quote at once
+  // share one request. No long-lived cache: once a quote is seeded into a
+  // goal's quoteBests we never re-fetch it (the evaluator ratchets it).
+  const userQuoteBestInFlight = new Map(); // quoteId → Promise<{wpm,pp}|null>
+  async function fetchUserQuoteBest(quoteId) {
+    const { username } = getAuth();
+    if (!username) return null;
+    const url = `https://api.typegg.io/v1/users/${encodeURIComponent(username)}/quotes/${encodeURIComponent(quoteId)}`;
+    const r = await fetch(url, { headers: authHeaders() });
+    if (r.status === 404) return null;          // never raced this quote
+    if (!r.ok) throw new Error(`user-quote ${quoteId} → ${r.status}`);
+    const data = await r.json();
+    const br = data?.bestRace;
+    if (!br) return null;
+    return { wpm: Number(br.wpm), pp: Number(br.pp) };
+  }
+  function getUserQuoteBest(quoteId) {
+    if (userQuoteBestInFlight.has(quoteId)) return userQuoteBestInFlight.get(quoteId);
+    const p = fetchUserQuoteBest(quoteId).finally(() => userQuoteBestInFlight.delete(quoteId));
+    userQuoteBestInFlight.set(quoteId, p);
+    return p;
+  }
+
+  // Seed the current quote's baseline into every improvement goal that
+  // doesn't already have it. Runs in whichever tab is racing (the only one
+  // that can read the live quoteId). The quickplay link can render a beat
+  // after the start edge, so we retry the read for a few seconds — we have
+  // the whole attempt duration before the race result lands. Per-quoteId
+  // fetch dedupe + idempotent writes make overlapping calls safe.
+  const SEED_RETRY_DELAYS_MS = [0, 250, 700, 1500, 3000];
+  async function seedImprovementForCurrentQuote(knownQuoteId) {
+    const goals = goalData.races;
+    if (!goals || !goals.some(g => goalIsImprovement(g))) return;
+
+    // The quote-change watcher already has the live id, so it passes it in
+    // and we skip the read/retry. The input-edge trigger doesn't (and the
+    // quickplay link can lag), so without a known id we retry the read for
+    // a few seconds — we have the whole attempt before the result lands.
+    let quoteId = knownQuoteId || null;
+    if (!quoteId) {
+      for (const d of SEED_RETRY_DELAYS_MS) {
+        if (d) await new Promise(r => setTimeout(r, d));
+        quoteId = getCurrentQuoteIdLive();
+        if (quoteId) break;
+      }
+    }
+    if (!quoteId) return; // couldn't detect — this race won't count (pure S1)
+
+    // Anything still missing a baseline for this quote? (Already-seeded
+    // quotes are left untouched — only the evaluator ratchets them.)
+    const needsSeed = goalData.races.some(
+      g => goalIsImprovement(g) && !(g.quoteBests && quoteId in g.quoteBests)
+    );
+    if (!needsSeed) return;
+
+    let best;
+    try { best = await getUserQuoteBest(quoteId); } // { wpm, pp } | null
+    catch (err) { console.warn("[Goal Tracker] improvement seed failed:", err); return; }
+
+    let changed = false;
+    const arr = goalData.races;
+    for (let i = 0; i < arr.length; i++) {
+      const g = arr[i];
+      if (!goalIsImprovement(g)) continue;
+      const qb = g.quoteBests || {};
+      if (quoteId in qb) continue;
+
+      let baseline;
+      if (best === null) {
+        // Never raced this quote before → no prior best to measure against.
+        if (g.countFirstTime) {
+          baseline = 0; // count this first race in full (gain from scratch)
+        } else {
+          // Default: don't plant a baseline. The first race then can't be
+          // counted (evaluator skips quotes absent from quoteBests), and
+          // since the quote stays unseeded we re-check it next time — once a
+          // best exists, subsequent races are measured against it.
+          continue;
+        }
+      } else {
+        const metric = g.improvementMetric || "wpm";
+        baseline = Number(best[metric]);
+        if (!isFinite(baseline)) baseline = 0;
+      }
+
+      arr[i] = { ...g, quoteBests: { ...qb, [quoteId]: baseline } };
+      changed = true;
+    }
+    if (changed) saveGoals("races");
+  }
+
+  function onQuoteStarted(knownQuoteId) {
+    const goals = goalData.races;
+    if (!goals || !goals.some(g => goalIsImprovement(g))) return;
+    seedImprovementForCurrentQuote(knownQuoteId);
+  }
+
   // ── Input-disabled watcher ──────────────────────────────────
   // Runs in every tab. Watches #typegame-input for the
   // enabled→disabled transition that signals quote completion.
@@ -4366,14 +4782,24 @@ async function getExpRankByUsername(username) {
           fired = true;
           onQuoteFinished();
         }
-        // New quote started: reset the fire-once flag
-        if (wasDisabled && !isDisabled) fired = false;
+        // New quote started: reset the fire-once flag and seed the
+        // improvement baseline for the freshly-loaded quote.
+        if (wasDisabled && !isDisabled) {
+          fired = false;
+          onQuoteStarted();
+        }
         wasDisabled = isDisabled;
       });
       inputObserver.observe(input, {
         attributes: true,
         attributeFilter: ['disabled'],
       });
+
+      // If we attach mid-attempt — the session's first quote, or a refresh
+      // while the input is already enabled — there's no disabled→enabled
+      // edge to catch, so seed the current quote now. Otherwise that quote
+      // would lack an S1 baseline and its race wouldn't count.
+      if (!input.disabled) onQuoteStarted();
     }
 
     function scan() {
@@ -4387,6 +4813,38 @@ async function getExpRankByUsername(username) {
       subtree:   true,
     });
     scan();
+  })();
+
+  // ── Quote-change watcher (quoteId-based) ────────────────────
+  // The input-disabled watcher above catches the cases where the input
+  // toggles: finishing a quote → next quote, and redoing a finished quote.
+  // It MISSES the cases where the input stays put while the quote changes:
+  //   • skipping an un-typed quote (input never goes disabled→enabled)
+  //   • the first quote of a session (input goes absent→enabled, with no
+  //     edge the observer reliably catches)
+  // Both are unambiguous at the quoteId level: when the live quoteId
+  // changes — or is seen for the first time — a new quote has started.
+  // So we poll the live quoteId and fire onQuoteStarted on any change.
+  // This runs ON TOP of the input watcher; seeding is idempotent (a quote
+  // already in quoteBests is skipped), so overlapping triggers are safe.
+  // We pass the id we just read straight through, so the seed skips its
+  // own read/retry. Skipped while the tab is hidden (no racing happens in
+  // a background tab, and the id can't change without interaction).
+  (() => {
+    let lastSeenQuoteId = null;
+    function check() {
+      if (document.hidden) return;
+      const goals = goalData.races;
+      if (!goals || !goals.some(g => goalIsImprovement(g))) return; // cheap no-op when irrelevant
+      const qid = getCurrentQuoteIdLive();
+      if (qid && qid !== lastSeenQuoteId) {
+        lastSeenQuoteId = qid;
+        onQuoteStarted(qid);
+      }
+    }
+    // 500ms latency is irrelevant — we have the whole attempt to seed.
+    setInterval(check, 500);
+    check(); // immediate pass for the cold-start (first quote of the session)
   })();
 
   // ── Rank goal target computation ──────────────────────────────
@@ -4999,6 +5457,46 @@ async function getExpRankByUsername(username) {
           changed = true;
         }
         continue; // avg goals don't run the gated-goal logic below
+      }
+
+      // ── Improvement branch (S1 cumulative WPM gain) ───────────────
+      // Each finished race's WPM is compared against the per-quote best
+      // captured BEFORE that race — seeded at quote-start into quoteBests
+      // by seedImprovementForCurrentQuote(). Positive (wpm − prevBest)
+      // deltas accumulate into accumulatedGain, and the stored best then
+      // ratchets up to the new PB. Keyed off the FINISHED race's quoteId
+      // (the ground truth from /races), so a quote we never seeded in time
+      // simply isn't counted — we never derive a baseline from post-race
+      // data, which keeps this strictly S1 (no S2 fallback). It seeds
+      // normally at its next quote-start. lastEvalRaces still advances so
+      // the unmeasured race isn't reprocessed.
+      if (goalIsImprovement(gd)) {
+        const metric = gd.improvementMetric || "wpm";   // "wpm" | "pp"
+        const quoteBests = { ...(gd.quoteBests || {}) };
+        let accumulatedGain = gd.accumulatedGain ?? 0;
+        let impChanged = false;
+
+        for (const race of chronological) {
+          // Filter (all/solo/quickplay) — same semantics as avg/gated goals.
+          if (!raceMatchesFilter(race, gd.filter)) continue;
+          const val = Number(race[metric]);
+          if (!isFinite(val)) continue;
+          const qid = race.quoteId;
+          if (!qid) continue;                  // can't attribute → skip
+          if (!(qid in quoteBests)) continue;  // no pre-race baseline → unmeasurable
+          const prev = quoteBests[qid];
+          if (val > prev) {
+            accumulatedGain += (val - prev);
+            quoteBests[qid]  = val;            // ratchet the stored best up
+            impChanged = true;
+          }
+        }
+
+        if (impChanged || lastEval !== racesSnapshot) {
+          goals[i] = { ...gd, quoteBests, accumulatedGain, lastEvalRaces: racesSnapshot };
+          changed = true;
+        }
+        continue; // improvement goals don't run the gated-goal logic below
       }
 
       const goalNeedsQuotes = goalNeedsQuoteData(gd.requirements);

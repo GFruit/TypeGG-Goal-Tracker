@@ -15,6 +15,14 @@
   box-sizing: border-box;
   resize: horizontal;
   overflow: hidden;
+  /* Default min-width is sized for non-avg goals (rank, races, etc.),
+     where the gain pill sits inline in the bottom row and has plenty
+     of horizontal room. Widgets that actually contain an average goal
+     get the .gt-widget-has-avg class added by JS, which bumps min-width
+     enough to reserve space for the new-best gain pill on the right
+     side of the avg-best-row without it overlapping the ✓ badge. See
+     the .gt-widget-has-avg rule further down for the bumped value and
+     why this is a per-widget toggle rather than a blanket increase. */
   min-width: 180px;
   max-width: 480px;
 }
@@ -267,18 +275,27 @@
   align-items: baseline;
   justify-content: space-between;
   gap: 6px;
-  font-size: 14px;
+  /* 12px to match .gt-avg-live-row and the gain pill's base font-size.
+     Keeping every text run in the avg display at the same size means
+     baseline alignment (which is what align-items: baseline gives us
+     within each flex container) becomes pixel-perfect alignment —
+     no smaller font sitting visibly lower than its neighbours. */
+  font-size: 12px;
   margin: 4px 0 6px;
   color: #e5e7eb;
 }
-/* Sub-group inside the best row that holds label/value/target/delta-pill.
-   Lives on the left side of the row; the ✓ pill anchors to the row's
-   right edge via space-between. */
+/* Sub-group inside the best row that holds label/value/target and the
+   new-best gain pill. Lives on the left side of the row; the ✓ pill
+   anchors to the row's right edge via the row's space-between. */
 .gt-avg-best-group {
   display: inline-flex;
   align-items: baseline;
   gap: 6px;
-  flex: 1;
+  /* Sized to its content (no flex:1) so adding the gain pill expands
+     best-group rightward into the empty space between target and ✓
+     rather than reflowing what's inside it. The row's space-between
+     keeps the ✓ anchored to the right edge regardless of best-group's
+     width, so users don't see ✓ shift when the pill pops. */
   min-width: 0;
 }
 .gt-avg-best-val {
@@ -295,9 +312,29 @@
 }
 .gt-avg-target {
   color: #9ca3af;
-  font-size: 13px;
   font-weight: 400;
+  /* Defensive: at minimum widget width, flex items can shrink below
+     their content size, and "/ 150" would otherwise be a wrap candidate
+     inside the span. nowrap prevents the text itself from breaking
+     across lines independently of how the surrounding flex layout
+     resolves. */
+  white-space: nowrap;
 }
+/* The new-best gain pill (the "+5" that pops on bestAvg increase) is
+   appended as a sibling of target inside .gt-avg-best-group — see the
+   JS comment for why sibling, not child. As a regular flex item of a
+   baseline-aligned container, it baselines correctly with target/val
+   automatically (matching the current-row pill, which is structured the
+   same way). The base .gt-gain-indicator font-size (12px) now matches
+   every avg-row context — best, live, and the non-avg gain row — so
+   no font-size override is needed; same size + shared baseline =
+   pixel-perfect alignment. An earlier iteration tried position:absolute
+   here to keep adding the pill from changing best-group's width, but
+   that lost baseline alignment (browsers don't reliably give absolute
+   children of baseline-aligned flex containers a baseline-aligned
+   static position). The flex-item placement matches the current-row
+   pill, which the user noted feels right. */
+
 .gt-avg-done {
   font-weight: 700;
   color: #4ade80;
@@ -1047,8 +1084,34 @@
      handle resizes without also initiating a drag. */
   resize: horizontal;
   overflow: hidden;
+  /* Same min-width as #goal-tracker — see the comment there. The
+     .gt-widget-has-avg class bumps it for widgets that actually need
+     the extra room. */
   min-width: 180px;
   max-width: 480px;
+}
+
+/* Bumped min-width for widgets containing at least one average goal.
+   The avg-best-row's content ("best [value] / [target]" + the gain pill
+   to the right of target + the ✓ badge anchored to the row's right
+   edge) needs more horizontal room than non-avg layouts. At 180px,
+   worst-case content has the pill landing on top of the ✓; 220px
+   reserves enough slack that they don't collide.
+
+   Toggled on the widget element by JS (see updateWidgetAvgClass in
+   content.js) whenever a goal is added, removed, or moved between
+   widgets. Non-avg-only widgets keep the original 180px so users
+   without average goals don't see their widgets get wider.
+
+   Specificity note: #goal-tracker matches the main widget by id, so
+   a bare `.gt-widget-has-avg { min-width }` rule loses to the id
+   selector and the bump never applies to the main widget. Combining
+   the class with #goal-tracker / .gt-widget-detached in the selector
+   matches each widget kind at equal-or-higher specificity than the
+   default min-width rule, so the bump actually wins. */
+#goal-tracker.gt-widget-has-avg,
+.gt-widget-detached.gt-widget-has-avg {
+  min-width: 220px;
 }
 
 /* Individual goal sections are grab-handles for goal-level drag */
