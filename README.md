@@ -84,20 +84,23 @@ Use the built-in presets, or set your own custom goals.
 
 **From the stores:**
 
-- Chrome / Edge — [Chrome Web Store](#) <!-- add link -->
-- Firefox — [Firefox Add-ons](#) <!-- add link -->
+- **Chrome** — [Chrome Web Store](https://chromewebstore.google.com/detail/typegg-goal-tracker/bemdlbiilfkdbaoiepjbknhinpkiicaa?hl=en)
+- **Edge** — [Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/typegg-goal-tracker/ijeddnikoigpmleiadnkahkfflggjjhl)
+- **Firefox** — [Firefox Add-ons](https://addons.mozilla.org/firefox/addon/ADDON_SLUG/)
+
+> Chrome, Edge, and Firefox are three separate stores with separate URLs — replace the placeholders above with your real listing links once published.
 
 **Load it unpacked (for development):**
 
 1. Download or clone this repository.
-2. **Chrome / Edge:** open `chrome://extensions`, enable *Developer mode*, click *Load unpacked*, and select the extension folder.
+2. **Chrome / Edge:** open `chrome://extensions` (or `edge://extensions`), enable *Developer mode*, click *Load unpacked*, and select the extension folder.
 3. **Firefox:** open `about:debugging` → *This Firefox* → *Load Temporary Add-on…*, and select the `manifest.json` file.
 
 ## Notes
 
 - Goals are stored in `localStorage` and stay in sync across multiple open tabs.
 - You need a TypeGG account for the extension to work properly.
-- **Privacy:** no data is sent to the developer or any third party. The extension only reads your own TypeGG data (via TypeGG's API) and stores your goals locally in your browser.
+- **Privacy:** the extension uses your existing TypeGG login session to read your own account data from TypeGG's API (the same data the site already shows you) and stores your goals locally in your browser. No data is ever sent to the developer or any third party.
 
 ## Disclaimer
 
