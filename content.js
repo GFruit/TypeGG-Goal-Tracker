@@ -1109,7 +1109,7 @@ window.addEventListener("load", () => {
             <button class="gt-mode-btn active" data-imp-metric="wpm" type="button">WPM</button>
             <button class="gt-mode-btn"        data-imp-metric="pp"  type="button">PP</button>
           </div>
-          <button id="gt-improvement-firsttime-btn" class="gt-req-strict-btn" type="button" title="Count first-ever attempts — also count the first time you type a quote (no prior best needed). Off by default: only quotes you've typed before count, since improvement needs a previous best to measure against.">∞</button>
+          <button id="gt-improvement-firsttime-btn" class="gt-req-strict-btn" type="button" title="Count first-ever attempts — also count the first time you type a quote (no prior best needed). Off by default: only quotes you've typed before count, since improvement needs a previous best to measure against.">🌱</button>
         </div>
       </div>
       <div id="gt-req-row" style="display:none;">
