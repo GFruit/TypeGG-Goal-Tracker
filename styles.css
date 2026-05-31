@@ -563,6 +563,29 @@
   opacity: 0.7;
 }
 
+/* Rolling-average window input (improvement mode → Average → Last n races).
+   Bordered standalone control sitting to the right of the All Time / Last n
+   buttons, matching the toggle-button height in the same row. */
+.gt-improvement-avgwindow-input {
+  flex: 0 0 auto;
+  width: 84px;
+  border: 1.5px solid #374151;
+  border-radius: 7px;
+  background: transparent;
+  color: #e5e7eb;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 4px 8px;
+  outline: none;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  -moz-appearance: textfield;
+}
+.gt-improvement-avgwindow-input::-webkit-outer-spin-button,
+.gt-improvement-avgwindow-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.gt-improvement-avgwindow-input::placeholder { color: #6b7280; }
+.gt-improvement-avgwindow-input:focus { border-color: #06b6d4; }
+
 /* Lightning strict-mode toggle (top row) and arrow unique-quote toggle
    (bottom row) — square, right-aligned, same height as chips. They share
    the same visual treatment (transparent → cyan when active); only the

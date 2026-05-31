@@ -1112,6 +1112,30 @@ window.addEventListener("load", () => {
           <button id="gt-improvement-firsttime-btn" class="gt-req-strict-btn" type="button" title="Count first-ever attempts — also count the first time you type a quote (no prior best needed). Off by default: only quotes you've typed before count, since improvement needs a previous best to measure against.">🌱</button>
         </div>
       </div>
+      <!-- Track: what to measure improvement against — your Best on each quote
+           (default; ratchets your PB) or your rolling Average on each quote
+           (improve your typical performance; see the Window row). -->
+      <div id="gt-improvement-track-row" style="display:none;">
+        <div class="gt-section-label">Track</div>
+        <div class="gt-req-selector">
+          <div class="gt-req-group gt-improvement-track-group">
+            <button class="gt-mode-btn active" data-imp-track="best"    type="button">Best</button>
+            <button class="gt-mode-btn"        data-imp-track="average" type="button">Average</button>
+          </div>
+        </div>
+      </div>
+      <!-- Rolling window (only shown when Track = Average). This single number
+           is the rolling-average window, the warm-up length, AND the number
+           of races the baseline is averaged over. A quote becomes eligible
+           once it has this many races (history counts); its rolling average
+           at that point locks in as the baseline, and gain is how far the
+           rolling average later climbs above it (peak, never negative). -->
+      <div id="gt-improvement-window-row" style="display:none;">
+        <div class="gt-section-label">Rolling window (races)</div>
+        <div class="gt-req-selector">
+          <input id="gt-improvement-avgwindow-input" class="gt-improvement-avgwindow-input" type="number" min="2" placeholder="e.g. 5" />
+        </div>
+      </div>
       <div id="gt-req-row" style="display:none;">
         <div class="gt-section-label">Requirements</div>
         <div class="gt-req-selector">
@@ -2354,6 +2378,10 @@ async function getExpRankByUsername(username) {
   const improvementMetricRow  = document.getElementById("gt-improvement-metric-row");
   const improvementMetricBtns = document.querySelectorAll(".gt-improvement-metric-group .gt-mode-btn");
   const improvementFirstTimeBtn = document.getElementById("gt-improvement-firsttime-btn");
+  const improvementTrackRow     = document.getElementById("gt-improvement-track-row");
+  const improvementTrackBtns    = document.querySelectorAll(".gt-improvement-track-group .gt-mode-btn");
+  const improvementWindowRow    = document.getElementById("gt-improvement-window-row");
+  const improvementAvgWindowInput = document.getElementById("gt-improvement-avgwindow-input");
 
   // Presets for the rolling-window size. Common values for typing-test
   // analytics — small enough that brand-new accounts can hit them, large
@@ -2398,6 +2426,12 @@ async function getExpRankByUsername(username) {
   // "improvement" needs a previous best to measure against.
   let selectedImprovementMetric = "wpm";
   let selectedCountFirstTime    = false;
+  // Track row: compare each race against your per-quote "best" (default,
+  // ratchets your PB) or your rolling "average". The average track is always
+  // rolling over improvementAvgWindow races — that one number is the window,
+  // the warm-up length, and the baseline sample size.
+  let selectedImprovementTrack     = "best";     // "best" | "average"
+  let selectedImprovementAvgWindow = 5;          // rolling window / warm-up
 
   // rank mode state
   let rankFetchedPp     = null; // PP fetched for the entered rank
@@ -2727,6 +2761,18 @@ async function getExpRankByUsername(username) {
       if (selectedValue == null || selectedValue <= 0) { confirmBtn.disabled = true; return; }
       if (selectedMetric === "accuracy" && selectedValue > 100) { confirmBtn.disabled = true; return; }
       if (selectedWindow == null || selectedWindow <= 0) { confirmBtn.disabled = true; return; }
+      confirmBtn.disabled = false;
+      return;
+    }
+    if (selectedMode === "improvement") {
+      // Needs a positive target gain, and — for the average track — a rolling
+      // window of at least 2 (a window of 1 is just "vs your last race").
+      if (selectedValue == null || selectedValue <= 0) { confirmBtn.disabled = true; return; }
+      if (selectedImprovementTrack === "average") {
+        if (!Number.isFinite(selectedImprovementAvgWindow) || selectedImprovementAvgWindow < 2) {
+          confirmBtn.disabled = true; return;
+        }
+      }
       confirmBtn.disabled = false;
       return;
     }
@@ -3241,6 +3287,27 @@ async function getExpRankByUsername(username) {
     improvementFirstTimeBtn.classList.toggle("active", selectedCountFirstTime);
   });
 
+  // Track selector (Best / Average) — mutually exclusive. Average reveals the
+  // rolling-window row; the 🌱 first-time toggle only applies to the Best
+  // track (the average track's warm-up handles new quotes), so hide it for
+  // Average.
+  improvementTrackBtns.forEach(btn => btn.addEventListener("click", () => {
+    improvementTrackBtns.forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    selectedImprovementTrack = btn.dataset.impTrack; // "best" | "average"
+    if (selectedImprovementTrack === "average" && !improvementAvgWindowInput.value) {
+      improvementAvgWindowInput.value = selectedImprovementAvgWindow || 5; // show default
+    }
+    updateImprovementWindowRowVisibility();
+    validateConfirm();
+  }));
+
+  improvementAvgWindowInput.addEventListener("input", () => {
+    const v = parseInt(improvementAvgWindowInput.value, 10);
+    selectedImprovementAvgWindow = (Number.isFinite(v) && v >= 1) ? v : NaN;
+    validateConfirm();
+  });
+
   // Render the window-size preset chips. Mirrors renderPresets's main
   // chip-rendering path — clicking a chip selects it (deselects others)
   // and clears the custom input. Typing in the custom input deselects
@@ -3311,19 +3378,39 @@ async function getExpRankByUsername(username) {
   // Reset the improvement-mode UI to defaults (WPM metric, count-first-time
   // off). Called on modal open and on mode/type changes that hide the row.
   function resetImprovementUI() {
-    selectedImprovementMetric = "wpm";
-    selectedCountFirstTime    = false;
+    selectedImprovementMetric    = "wpm";
+    selectedCountFirstTime       = false;
+    selectedImprovementTrack     = "best";
+    selectedImprovementAvgWindow = 5;
     improvementMetricBtns.forEach(b =>
       b.classList.toggle("active", b.dataset.impMetric === "wpm"));
     improvementFirstTimeBtn.classList.remove("active");
+    improvementFirstTimeBtn.style.display = ""; // shown for Best track
+    improvementTrackBtns.forEach(b =>
+      b.classList.toggle("active", b.dataset.impTrack === "best"));
+    improvementAvgWindowInput.value = "";
+    improvementWindowRow.style.display = "none";
   }
 
-  // Improvement-mode row (metric selector + count-first-time toggle) is
-  // only meaningful for races + improvement. Mirror updateAvgRowVisibility().
+  // Improvement-mode rows (metric + track, and conditionally the rolling
+  // window) are only meaningful for races + improvement. Mirror
+  // updateAvgRowVisibility().
   function updateImprovementRowVisibility() {
     const visible = selectedType === "races" && selectedMode === "improvement";
     improvementMetricRow.style.display = visible ? "block" : "none";
-    if (!visible) resetImprovementUI();
+    improvementTrackRow.style.display  = visible ? "block" : "none";
+    if (!visible) { resetImprovementUI(); return; }
+    updateImprovementWindowRowVisibility();
+  }
+
+  // The rolling-window row applies only to the Average track. The 🌱
+  // first-time toggle applies only to the Best track (Average's warm-up
+  // handles new quotes), so it's hidden for Average.
+  function updateImprovementWindowRowVisibility() {
+    const avg = selectedType === "races" && selectedMode === "improvement"
+                && selectedImprovementTrack === "average";
+    improvementWindowRow.style.display = avg ? "block" : "none";
+    improvementFirstTimeBtn.style.display = avg ? "none" : "";
   }
 
   function openModal() {
@@ -3347,7 +3434,9 @@ async function getExpRankByUsername(username) {
     reqRow.style.display = "none";    // hide req row initially (only show for races + gain)
     avgTargetRow.style.display = "none"; // hide avg rows initially (only show for races + average)
     avgWindowRow.style.display = "none";
-    improvementMetricRow.style.display = "none"; // hide improvement row initially
+    improvementMetricRow.style.display = "none"; // hide improvement rows initially
+    improvementTrackRow.style.display = "none";
+    improvementWindowRow.style.display = "none";
     modeRow.style.display = "block"; recRow.style.display = "block";
     renderPresets();
   }
@@ -3624,6 +3713,15 @@ async function getExpRankByUsername(username) {
       const isImprovementMode = selectedMode === "improvement" && selectedType === "races";
       const goalMode     = isAvgMode ? "average" : (isImprovementMode ? "improvement" : undefined);
 
+      // Improvement track config: "best" (ratchet your PB) vs "average"
+      // (rolling-average improvement). The average track always uses a rolling
+      // window — improvementAvgWindow is the window, warm-up, and baseline
+      // sample size. Per-quote state lives in quoteBests (best) or quoteAvgs
+      // (average); only the relevant one is initialized.
+      const impTrack    = isImprovementMode ? selectedImprovementTrack : undefined;
+      const impIsAvg    = isImprovementMode && selectedImprovementTrack === "average";
+      const impAvgWin   = impIsAvg ? selectedImprovementAvgWindow : undefined;
+
       const newGoal = {
         id: goalId,
         target: gainTarget,
@@ -3672,15 +3770,16 @@ async function getExpRankByUsername(username) {
         windowQuoteIds: avgUniqueActive ? [] : undefined,
         bestAvg: isAvgMode ? null : undefined,
         // Improvement-mode fields. quoteBests maps quoteId → the user's best
-        // (in the chosen metric) on that quote captured BEFORE racing it
-        // (seeded at quote-start); accumulatedGain sums the positive
-        // (race − prevBest) deltas. improvementMetric picks wpm vs pp.
-        // countFirstTime: when true, the first race on a quote also counts
-        // (baseline 0); when false (default) only quotes with a prior best do.
-        quoteBests: isImprovementMode ? {} : undefined,
+        // (best track). quoteAvgs maps quoteId → rolling-average state
+        // {window:[…], baseline, peak} (average track), seeded lazily at
+        // quote-start. accumulatedGain sums the per-quote banked peak lift.
+        quoteBests: (isImprovementMode && !impIsAvg) ? {} : undefined,
+        quoteAvgs:  impIsAvg ? {} : undefined,
         accumulatedGain: isImprovementMode ? 0 : undefined,
         improvementMetric: isImprovementMode ? selectedImprovementMetric : undefined,
-        countFirstTime: isImprovementMode ? selectedCountFirstTime : undefined,
+        countFirstTime: (isImprovementMode && !impIsAvg) ? selectedCountFirstTime : undefined,
+        improvementTrack: impTrack,
+        improvementAvgWindow: impAvgWin,
       };
 
       goalData[selectedType].push(newGoal);
@@ -3976,7 +4075,7 @@ async function getExpRankByUsername(username) {
       pct = totalQuotes > 0 ? Math.min(Math.floor((currentQuotes / totalQuotes) * 100), 100) : 0;
       isComplete = currentQuotes >= totalQuotes && totalQuotes > 0;
     } else {
-      pct = Math.min(Math.floor((gain / gd.target) * 100), 100);
+      pct = Math.max(0, Math.min(Math.floor((gain / gd.target) * 100), 100));
       isComplete = gain >= gd.target && gd.target > 0;
     }
 
@@ -4065,7 +4164,10 @@ async function getExpRankByUsername(username) {
     } else if (type === "races" && goalIsImprovement(gd)) {
       const metricLbl = (gd.improvementMetric === "pp") ? "PP" : "WPM";
       const filterStr = (gd.filter && gd.filter !== "all") ? ` (${gd.filter})` : "";
-      document.getElementById(`${goalId}-label`).textContent = `${metricLbl} gain${filterStr}`;
+      const trackStr = (gd.improvementTrack === "average")
+        ? ` avg·${Math.max(2, gd.improvementAvgWindow || 5)}`
+        : "";
+      document.getElementById(`${goalId}-label`).textContent = `${metricLbl}${trackStr} gain${filterStr}`;
     } else if (type === "races" && goalIsGated(gd)) {
       // Requirement-bearing or unique-quote race goal — keep main label
       // clean (just the type + filter chip) and put the threshold summary /
@@ -4394,6 +4496,7 @@ async function getExpRankByUsername(username) {
             if (isImprovement) {
               gd.accumulatedGain = 0;
               gd.quoteBests      = {};
+              gd.quoteAvgs       = {};
               gd.lastEvalRaces   = currentStats.races ?? currentVal;
               delete prevGainMap[goalId];
             }
@@ -4441,8 +4544,9 @@ async function getExpRankByUsername(username) {
           if (gain > prevGain) {
             gainDelta = gain - prevGain;
           } else if (gain < prevGain && hasReq && gd.strictMode) {
-            // Strict mode reset — surface this with a negative indicator
-            // so the user sees WHY their progress dropped.
+            // Strict-mode reset — surface the drop with a negative indicator
+            // so the user sees why their progress fell. (Improvement goals are
+            // monotonic, so they never take this branch.)
             gainDelta = gain - prevGain; // negative
           }
         }
@@ -4685,6 +4789,44 @@ async function getExpRankByUsername(username) {
     return p;
   }
 
+  // Full race history for a quote (newest-first), via
+  // /v1/users/{username}/races?quoteId=… , paged at perPage 500. Used to seed
+  // AVERAGE-track goals: all-time goals fold it into {sum,count}; rolling
+  // goals keep the last n values. Returns [] if the user never raced the quote.
+  // Fetching the whole history (rather than just the last n) lets one request
+  // serve both all-time and rolling goals on the same quote; per-quote dedupe.
+  const userQuoteRacesInFlight = new Map(); // quoteId → Promise<race[]>
+  async function fetchUserQuoteRaces(quoteId) {
+    const { username } = getAuth();
+    if (!username) return [];
+    const base = `https://api.typegg.io/v1/users/${encodeURIComponent(username)}/races?quoteId=${encodeURIComponent(quoteId)}`;
+    const out = [];
+    let page = 1, totalPages = 1;
+    do {
+      const r = await fetch(`${base}&page=${page}&perPage=500`, { headers: authHeaders() });
+      if (r.status === 404) return [];
+      if (!r.ok) throw new Error(`user-quote-races ${quoteId} → ${r.status}`);
+      const d = await r.json();
+      if (Array.isArray(d?.races)) out.push(...d.races);
+      totalPages = d?.totalPages || 1;
+      page++;
+    } while (page <= totalPages);
+    return out; // newest-first
+  }
+  function getUserQuoteRaces(quoteId) {
+    if (userQuoteRacesInFlight.has(quoteId)) return userQuoteRacesInFlight.get(quoteId);
+    const p = fetchUserQuoteRaces(quoteId).finally(() => userQuoteRacesInFlight.delete(quoteId));
+    userQuoteRacesInFlight.set(quoteId, p);
+    return p;
+  }
+
+  // Has this improvement goal already captured a baseline for this quote?
+  // Best track stores it in quoteBests; average track in quoteAvgs.
+  function goalHasQuoteSeed(g, quoteId) {
+    const map = (g.improvementTrack === "average") ? g.quoteAvgs : g.quoteBests;
+    return !!(map && quoteId in map);
+  }
+
   // Seed the current quote's baseline into every improvement goal that
   // doesn't already have it. Runs in whichever tab is racing (the only one
   // that can read the live quoteId). The quickplay link can render a beat
@@ -4710,45 +4852,81 @@ async function getExpRankByUsername(username) {
     }
     if (!quoteId) return; // couldn't detect — this race won't count (pure S1)
 
-    // Anything still missing a baseline for this quote? (Already-seeded
-    // quotes are left untouched — only the evaluator ratchets them.)
-    const needsSeed = goalData.races.some(
-      g => goalIsImprovement(g) && !(g.quoteBests && quoteId in g.quoteBests)
+    // Goals still missing a baseline for this quote. (Already-seeded quotes
+    // are left untouched — only the evaluator updates them.)
+    const missing = goalData.races.filter(
+      g => goalIsImprovement(g) && !goalHasQuoteSeed(g, quoteId)
     );
-    if (!needsSeed) return;
+    if (missing.length === 0) return;
 
-    let best;
-    try { best = await getUserQuoteBest(quoteId); } // { wpm, pp } | null
-    catch (err) { console.warn("[Goal Tracker] improvement seed failed:", err); return; }
+    const needBest = missing.some(g => g.improvementTrack !== "average");
+    const needAvg  = missing.some(g => g.improvementTrack === "average");
+
+    let best, races;
+    try {
+      [best, races] = await Promise.all([
+        needBest ? getUserQuoteBest(quoteId)  : Promise.resolve(undefined), // {wpm,pp}|null
+        needAvg  ? getUserQuoteRaces(quoteId) : Promise.resolve(undefined), // race[] (newest-first)
+      ]);
+    } catch (err) {
+      console.warn("[Goal Tracker] improvement seed failed:", err);
+      return;
+    }
 
     let changed = false;
     const arr = goalData.races;
     for (let i = 0; i < arr.length; i++) {
       const g = arr[i];
       if (!goalIsImprovement(g)) continue;
-      const qb = g.quoteBests || {};
-      if (quoteId in qb) continue;
+      if (goalHasQuoteSeed(g, quoteId)) continue;
+      const metric = g.improvementMetric || "wpm";
 
-      let baseline;
-      if (best === null) {
-        // Never raced this quote before → no prior best to measure against.
-        if (g.countFirstTime) {
-          baseline = 0; // count this first race in full (gain from scratch)
+      if (g.improvementTrack !== "average") {
+        // ── Best track ──
+        let baseline;
+        if (best == null) {
+          // Never raced this quote → no prior best.
+          if (g.countFirstTime) baseline = 0;       // count first race from scratch
+          else continue;                            // don't seed; re-check next time
         } else {
-          // Default: don't plant a baseline. The first race then can't be
-          // counted (evaluator skips quotes absent from quoteBests), and
-          // since the quote stays unseeded we re-check it next time — once a
-          // best exists, subsequent races are measured against it.
-          continue;
+          baseline = Number(best[metric]);
+          if (!isFinite(baseline)) baseline = 0;
         }
+        arr[i] = { ...g, quoteBests: { ...(g.quoteBests || {}), [quoteId]: baseline } };
+        changed = true;
       } else {
-        const metric = g.improvementMetric || "wpm";
-        baseline = Number(best[metric]);
-        if (!isFinite(baseline)) baseline = 0;
+        // ── Average track ── seed the rolling-window state from prior history.
+        // The ongoing window is the most-recent W race values, but the BASELINE
+        // is the PEAK rolling-W average ever seen on this quote (the best any
+        // W-window has averaged), computed over the full history. So every
+        // (re)seed — including each period reset of a recurring goal — measures
+        // improvement above your best-ever sustained level, not your recent
+        // level. That ratchets up across periods (history grows to include the
+        // peaks you just set) and removes the "dip then re-earn" loophole.
+        // Only races matching the goal's filter (all/solo/quickplay) count,
+        // matching the evaluator. < W matching races → warm up (baseline null).
+        const W = Math.max(2, g.improvementAvgWindow || 5);
+        const chrono = (Array.isArray(races) ? races : [])
+          .filter(r => raceMatchesFilter(r, g.filter))
+          .map(r => Number(r[metric]))
+          .filter(Number.isFinite)
+          .reverse(); // API is newest-first → flip to oldest→newest
+        let state;
+        if (chrono.length >= W) {
+          let sum = 0;
+          for (let k = 0; k < W; k++) sum += chrono[k];
+          let peakAvg = sum / W;                       // best W-window so far
+          for (let k = W; k < chrono.length; k++) {
+            sum += chrono[k] - chrono[k - W];           // slide the window
+            if (sum / W > peakAvg) peakAvg = sum / W;
+          }
+          state = { window: chrono.slice(chrono.length - W), baseline: peakAvg, peak: 0 };
+        } else {
+          state = { window: chrono.slice(), baseline: null, peak: 0 }; // warming up
+        }
+        arr[i] = { ...g, quoteAvgs: { ...(g.quoteAvgs || {}), [quoteId]: state } };
+        changed = true;
       }
-
-      arr[i] = { ...g, quoteBests: { ...qb, [quoteId]: baseline } };
-      changed = true;
     }
     if (changed) saveGoals("races");
   }
@@ -5459,31 +5637,72 @@ async function getExpRankByUsername(username) {
         continue; // avg goals don't run the gated-goal logic below
       }
 
-      // ── Improvement branch (S1 cumulative WPM gain) ───────────────
-      // Each finished race's WPM is compared against the per-quote best
-      // captured BEFORE that race — seeded at quote-start into quoteBests
-      // by seedImprovementForCurrentQuote(). Positive (wpm − prevBest)
-      // deltas accumulate into accumulatedGain, and the stored best then
-      // ratchets up to the new PB. Keyed off the FINISHED race's quoteId
-      // (the ground truth from /races), so a quote we never seeded in time
-      // simply isn't counted — we never derive a baseline from post-race
-      // data, which keeps this strictly S1 (no S2 fallback). It seeds
-      // normally at its next quote-start. lastEvalRaces still advances so
-      // the unmeasured race isn't reprocessed.
+      // ── Improvement branch (S1 cumulative gain) ───────────────────
+      // Keyed off the FINISHED race's quoteId (ground truth from /races) and
+      // the per-quote state seeded BEFORE the race at quote-start. A quote
+      // never seeded in time simply isn't counted — we never derive state from
+      // post-race data, keeping this strictly S1. lastEvalRaces still advances
+      // so an unmeasured race isn't reprocessed. Both tracks are monotonic:
+      //   • Best track: delta = max(0, val − prevBest); ratchet the best up.
+      //   • Average track: a rolling window of the last W races. The window's
+      //     average locks as the baseline once it first reaches W races (warm-
+      //     up; prior history counts). Thereafter gain = the PEAK lift of the
+      //     rolling average above that baseline. A below-baseline race lowers
+      //     the current average but never reduces the banked peak → it
+      //     contributes 0, never negative (so there's no not-submit incentive).
       if (goalIsImprovement(gd)) {
         const metric = gd.improvementMetric || "wpm";   // "wpm" | "pp"
-        const quoteBests = { ...(gd.quoteBests || {}) };
         let accumulatedGain = gd.accumulatedGain ?? 0;
         let impChanged = false;
 
+        if (gd.improvementTrack === "average") {
+          const W = Math.max(2, gd.improvementAvgWindow || 5);
+          const quoteAvgs = { ...(gd.quoteAvgs || {}) };
+
+          for (const race of chronological) {
+            if (!raceMatchesFilter(race, gd.filter)) continue;
+            const val = Number(race[metric]);
+            if (!isFinite(val)) continue;
+            const qid = race.quoteId;
+            if (!qid) continue;
+            const st = quoteAvgs[qid];
+            if (!st) continue;                  // not seeded → unmeasurable (S1)
+
+            const w = Array.isArray(st.window) ? st.window.slice() : [];
+            w.push(val);
+            while (w.length > W) w.shift();
+            const avg = w.reduce((a, b) => a + b, 0) / w.length;
+
+            let baseline = (st.baseline == null) ? null : st.baseline;
+            let peak = st.peak ?? 0;
+            if (baseline == null) {
+              // Warming up. Lock the baseline the moment the window is full;
+              // that race itself contributes nothing (it defines the baseline).
+              if (w.length >= W) { baseline = avg; peak = 0; }
+            } else {
+              const lift = avg - baseline;
+              if (lift > peak) { accumulatedGain += (lift - peak); peak = lift; }
+            }
+            quoteAvgs[qid] = { window: w, baseline, peak };
+            impChanged = true;                  // window/state advanced
+          }
+
+          if (impChanged || lastEval !== racesSnapshot) {
+            goals[i] = { ...gd, quoteAvgs, accumulatedGain, lastEvalRaces: racesSnapshot };
+            changed = true;
+          }
+          continue;
+        }
+
+        // Best track (default)
+        const quoteBests = { ...(gd.quoteBests || {}) };
         for (const race of chronological) {
-          // Filter (all/solo/quickplay) — same semantics as avg/gated goals.
           if (!raceMatchesFilter(race, gd.filter)) continue;
           const val = Number(race[metric]);
           if (!isFinite(val)) continue;
           const qid = race.quoteId;
-          if (!qid) continue;                  // can't attribute → skip
-          if (!(qid in quoteBests)) continue;  // no pre-race baseline → unmeasurable
+          if (!qid) continue;
+          if (!(qid in quoteBests)) continue; // no pre-race baseline → unmeasurable
           const prev = quoteBests[qid];
           if (val > prev) {
             accumulatedGain += (val - prev);
