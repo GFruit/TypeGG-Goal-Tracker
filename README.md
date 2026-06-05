@@ -1,107 +1,164 @@
 # TypeGG Goal Tracker
 
-Create personalized goals to track your typing progress on [TypeGG](https://typegg.io/) in real time. **TypeGG Goal Tracker** is a minimalistic, customizable browser extension that helps you stay motivated and improve your typing speed.
+A browser extension that adds a live goal-tracking widget to [TypeGG](https://typegg.io). Set goals for your typing — EXP, PP, races, quotes, rolling averages, improvement, time, characters — and the widget keeps score in real time as you race. Nothing to log by hand; finish a quote and your goals update.
 
-Goals update live as you race and are shown in a compact panel right on the TypeGG page.
+> Disclaimer:
+This is an unofficial community-made browser extension for "TypeGG" (typegg.io), a brand and platform operated by TYPEGG LTD. This extension is not affiliated with, endorsed by, sponsored by, or officially associated with "TypeGG" or TYPEGG LTD.
 
-## Goal Types
+---
 
-| Type | Tracks |
-| --- | --- |
+## Table of contents
+
+- [Features](#features)
+  - [Stats you can track](#stats-you-can-track)
+  - [Goal modes](#goal-modes)
+  - [Race goals: filters, requirements & modes](#race-goals-filters-requirements--modes)
+  - [Recurring goals & streaks](#recurring-goals--streaks)
+  - [Widget layout](#widget-layout)
+  - [Live feedback](#live-feedback)
+  - [Backup & restore](#backup--restore)
+- [Example goals](#example-goals)
+- [Installation](#installation)
+- [How it works](#how-it-works)
+- [Privacy & data](#privacy--data)
+- [Browser support](#browser-support)
+- [Contributing](#contributing)
+
+---
+
+## Features
+
+### Stats you can track
+
+Six core TypeGG stats:
+
+| Stat | Description |
+|------|-------------|
 | **EXP** | Experience points |
-| **PP** | Performance points |
+| **PP** | Performance points (skill rating) |
 | **Races** | Races completed |
-| **Quotes** | Unique quotes (texts) typed |
-| **Time** | Time spent typing |
+| **Quotes** | Quotes typed |
+| **Time** | Total time spent typing |
 | **Chars** | Characters typed |
 
-## Goal Modes
+### Goal modes
 
-The extension supports **6 goal modes**:
+Each stat can be framed as a different *kind* of goal:
 
-- **Gain** — track how much you gain over time *(every type)*
-- **Target** — track progress toward an absolute target *(every type)*
-- **Rank** — reach a certain rank on the EXP / PP leaderboards *(EXP & PP only)*
-- **Player** — reach the EXP / PP of a specific player *(EXP & PP only)*
-- **Average** — reach a target average across your last *n* races *(Races only)*
-- **Improvement** — improve your personal bests, quote by quote *(Races only)*
+- **Gain** — counts upward from a baseline snapshotted when the goal is created. *"Gain 1,000 EXP."* Available for every stat.
+- **Target** — aim at an absolute total rather than a delta; the modal warns if you pick a value you've already passed. *"Reach 5,000 PP."* Available for EXP, PP, Races, Quotes, Chars.
+- **Rank** *(PP & EXP)* — target a leaderboard position. The extension fetches the PP/EXP of whoever currently holds that rank and uses it as the target. A **Next Rank** toggle aims at the next position above you and auto-re-targets the moment you overtake someone.
+- **Player** *(PP & EXP)* — target another user's PP/EXP by username and race to catch them.
+- **Average** *(Races)* — a rolling average over your last *N* races for one metric (WPM, accuracy, or PP). Tracks current average, best (peak) average, and how full the window is, against a target average. Optional unique-quote constraint.
+- **Improvement** *(Races)* — cumulative growth. For each quote, compares your result to your prior best (or rolling average) on that quote and sums the positive deltas. Choose WPM or PP, track against **best** (ratchets PBs) or **average** (raises your typical level), and optionally count first-ever attempts.
+- **Max quotes** *(Quotes)* — one tap auto-fills the total number of quotes on TypeGG (**all**, **ranked**, or **unranked**) as the target, for completionist goals.
 
-### Rank Mode
-Set a goal of reaching a certain rank on the EXP / PP leaderboards. The tracker tells you how much EXP / PP you still need to gain, and the target updates automatically since the EXP / PP required for a rank can change at any time.
+### Race goals: filters, requirements & modes
 
-- **Next Rank** — create the goal with this button enabled to target the next rank above you. When you reach it, a new goal is automatically created for the following rank.
+Race goals are the most configurable:
 
-### Player Mode
-Set a goal of reaching the EXP / PP of a specific player. The target updates automatically as that player's EXP / PP changes.
+- **Filters** — restrict a goal to **All**, **Solo**, or **Quickplay** games.
+- **Requirements** — gate which races count by setting minimums for any combination of:
+  - Skill axes: **WPM**, **Accuracy**, **PP**
+  - Quote axes: **Length**, **Difficulty**
 
-### Average Mode
-Set a goal for reaching a certain average **WPM**, **Accuracy** or **PP** across your last *n* races. You need to complete at least *n* races before the goal can be completed.
+  Only races clearing *every* active threshold count toward the goal.
+- **Strict mode (⚡)** — a single race that misses the requirements resets the goal to zero. For holding a standard, not just touching it.
+- **Unique-quote mode (✨)** — each qualifying race must be on a quote not already counted this period, so you can't pad progress by repeating one quote.
 
-- **Unique-quote toggle** — require every race in the rolling window to be on a different quote.
+### Recurring goals & streaks
 
-### Improvement Mode
-Set a goal for improving your personal bests, quote by quote. It adds up how much you beat your previous best on each quote — for example, if your PB on a quote was 100 WPM and you hit 120, that counts as **+20** toward your goal.
+Any goal can repeat **Daily**, **Weekly**, or **Monthly**:
 
-- Track **WPM gain** or **PP gain**.
-- By default, only quotes you've raced before count, since improvement needs a previous best to measure against. An optional toggle also counts the first time you ever type a quote.
+- Configure the reset time per cadence — hour for daily; weekday + time for weekly; day-of-month + time for monthly (with a fallback to the last day in shorter months).
+- A live **countdown** shows time until the next reset.
+- A **🔥 streak** counter tracks consecutive completed periods. Switchable to a **total** lifetime-completions counter, or **off**.
+- Editing the reset schedule preserves the progress already made in the current period — it re-aligns the period start without discarding your baseline.
 
-## Requirements (Races + Gain mode)
+### Widget layout
 
-Add requirements so that only races that qualify count toward your goal:
+- Starts as a single widget pinned to the corner.
+- **Drag to reorder** goals within a widget.
+- **Drag a goal out** to spawn a detached widget anywhere on screen.
+- **Stack** goals by dropping one onto another widget.
+- FLIP-based animations for smooth reordering; layout is persisted between sessions; the main widget is resizable.
 
-- **Skill thresholds** — minimum WPM, Accuracy, PP
-- **Quote thresholds** — minimum length and difficulty
-- **Strict mode** — progress resets to zero whenever a race misses the requirements
-- **Unique-quote mode** — each quote only counts once
+### Live feedback
 
-## Filters (Races)
+- Quote-finish detection updates goals immediately, no refresh needed.
+- Each goal card shows a progress bar, current-vs-target figures, and a ✓ when complete.
+- A green **+X** flashes on each qualifying race; a red **−X ⚡** flashes on a strict-mode reset.
+- Average goals get a dedicated three-line card: best, current rolling average, and threshold + window progress.
 
-Count **all** races, only **Quickplay** races, or only **Solo** races.
+### Backup & restore
 
-## Recurrence
+Export goals, widget layout, and settings to a single versioned JSON file, and import it later — useful when switching browsers or machines.
 
-Goals can repeat **daily**, **weekly** or **monthly**, with a streak display that tracks how many periods in a row you've hit the goal.
+---
 
-Use the built-in presets, or set your own custom goals.
+## Example goals
 
-## Example Goals
+| Goal | Configuration |
+|------|---------------|
+| Type 50,000 EXP this week | EXP · Gain · Weekly |
+| Reach 5,000 PP | PP · Target |
+| Climb to rank #100 | PP · Rank |
+| Catch up to a friend's EXP | EXP · Player |
+| Run 100 races today | Races · Gain · Daily |
+| 25 races at 120+ WPM & 98%+ accuracy, strict | Races · Gain · Requirements · Strict ⚡ |
+| 50 quickplay races on 50 different quotes | Races · Quickplay · Unique ✨ |
+| Type every ranked quote on TypeGG | Quotes · Max ranked |
+| Hold a 130 WPM average over your last 25 races | Races · Average |
+| 99% accuracy average over 50 unique-quote races | Races · Average · Unique ✨ |
+| Gain 500 WPM of improvement across your PBs | Races · Improvement · Best |
+| Raise average WPM by 250 over a 10-race window | Races · Improvement · Average |
+| Type for one hour every day | Time · Daily |
+| Type one million characters | Chars · Target |
+| 10 races on 300+ char quotes at difficulty 5+ | Races · Gain · Length & Difficulty requirements |
 
-| Goal | Type | Mode | Settings |
-| --- | --- | --- | --- |
-| Gain 1000 EXP per day | EXP | Gain | Daily · Amount 1000 |
-| Reach a target PP of 15'000 | PP | Target | Amount 15'000 |
-| Complete 10 races per day | Races | Gain | Daily · Amount 10 |
-| Reach the next rank | PP | Rank | "Next Rank" |
-| Reach rank #50 | PP | Rank | Target Rank 50 |
-| Reach the PP of player "Fruit" | PP | Player | Target Player Fruit |
-| Type for 30 minutes per day | Time | Gain | Daily · Amount 30 |
-| 100 WPM average over your last 50 races | Races | Average | WPM · Window 50 · Target 100 |
-| 50 races at 80+ WPM and 95%+ accuracy | Races | Gain | WPM ≥ 80, Acc ≥ 95 · Amount 50 |
-| Improve your WPM by 500 across your quotes | Races | Improvement | WPM · Target 500 |
-| Type 50'000 characters per week | Chars | Gain | Weekly · Amount 50'000 |
+---
 
 ## Installation
 
-**From the stores:**
+> Replace the placeholders below with your actual store links / repo details.
 
-- **Chrome** — [Chrome Web Store](https://chromewebstore.google.com/detail/typegg-goal-tracker/bemdlbiilfkdbaoiepjbknhinpkiicaa?hl=en)
-- **Edge** — [Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/typegg-goal-tracker/ijeddnikoigpmleiadnkahkfflggjjhl)
-- **Firefox** — [Firefox Add-ons](https://addons.mozilla.org/firefox/addon/ADDON_SLUG/)
+**From the store**
 
-> Chrome, Edge, and Firefox are three separate stores with separate URLs — replace the placeholders above with your real listing links once published.
+- Chrome / Edge: *(Chrome Web Store link)*
+- Firefox: *(Add-ons link)*
 
-**Load it unpacked (for development):**
+**From source (developer / unpacked)**
 
-1. Download or clone this repository.
-2. **Chrome / Edge:** open `chrome://extensions` (or `edge://extensions`), enable *Developer mode*, click *Load unpacked*, and select the extension folder.
-3. **Firefox:** open `about:debugging` → *This Firefox* → *Load Temporary Add-on…*, and select the `manifest.json` file.
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/<you>/typegg-goal-tracker.git
+   ```
+2. **Chromium (Chrome, Edge, Brave):** open `chrome://extensions`, enable **Developer mode**, click **Load unpacked**, and select the project folder.
+3. **Firefox:** open `about:debugging#/runtime/this-firefox`, click **Load Temporary Add-on**, and select the `manifest.json`.
+4. Open [typegg.io](https://typegg.io) — the goal widget appears automatically.
 
-## Notes
+---
 
-- Goals are stored in `localStorage` and stay in sync across multiple open tabs.
-- You need a TypeGG account for the extension to work properly.
-- **Privacy:** the extension uses your existing TypeGG login session to read your own account data from TypeGG's API (the same data the site already shows you) and stores your goals locally in your browser. No data is ever sent to the developer or any third party.
+## How it works
 
-## Disclaimer
+The extension is a single content script injected on TypeGG that builds and manages the widget. The notable pieces:
 
-This is an unofficial community-made browser extension for "TypeGG" (typegg.io), a brand and platform operated by TYPEGG LTD. This extension is not affiliated with, endorsed by, sponsored by, or officially associated with "TypeGG" or TYPEGG LTD.
+- **Auth reuse.** It reads TypeGG's own session token from `localStorage` (`pocketbase_auth`) to call the public TypeGG API. There's no separate login.
+- **Quote-finish detection.** A `MutationObserver` watches the typing input's `disabled` attribute for the enabled→disabled transition that marks a finished quote, backed up by polling the live quote ID to catch skips and the first quote of a session. Each finish triggers a goal re-evaluation.
+- **Cross-tab coordination.** With multiple TypeGG tabs open, exactly one becomes the "leader" via the [Web Locks API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Locks_API) and performs all API fetching. Followers receive updates over a `BroadcastChannel` and re-render, with a `localStorage` stats cache (and `storage` events) as a fallback so late-joining tabs hydrate immediately. Fetching is visibility-aware: it keeps polling while *any* tab is visible. If the Web Locks API is unavailable (or errors, as it can inside Firefox content scripts), each tab falls back to fetching for itself.
+- **Evaluation paths.** Pure stat goals (EXP, PP, time, etc.) use a lightweight current-minus-baseline delta. Goals that need per-race detail — anything with requirements, unique-quote mode, rolling averages, or improvement tracking — pull the recent race list (and, where length/difficulty requirements are set, the relevant quote records) and evaluate race-by-race.
+- **State.** Goals, widget layout (groups), recurrence settings, and display settings are all stored in `localStorage` and kept in sync across tabs.
+
+---
+
+## Privacy & data
+
+- All goal data, layout, and settings live in your browser's `localStorage`. Nothing is sent to any third-party server.
+- API requests go only to TypeGG, using your existing TypeGG session, to read the stats needed to evaluate your goals.
+- No analytics, no tracking, no accounts.
+
+---
+
+## Browser support
+
+Chromium-based browsers (Chrome, Edge, Brave) and Firefox. The extension includes specific handling for Firefox content-script quirks around the Web Locks API and content-script load timing.
