@@ -2,9 +2,6 @@
 
 A browser extension that adds a live goal-tracking widget to [TypeGG](https://typegg.io). Set goals for your typing — EXP, PP, races, quotes, rolling averages, improvement, time, characters — and the widget keeps score in real time as you race. Nothing to log by hand; finish a quote and your goals update.
 
-> Disclaimer:
-This is an unofficial community-made browser extension for "TypeGG" (typegg.io), a brand and platform operated by TYPEGG LTD. This extension is not affiliated with, endorsed by, sponsored by, or officially associated with "TypeGG" or TYPEGG LTD.
-
 ---
 
 ## Table of contents
@@ -162,3 +159,7 @@ The extension is a single content script injected on TypeGG that builds and mana
 ## Browser support
 
 Chromium-based browsers (Chrome, Edge, Brave) and Firefox. The extension includes specific handling for Firefox content-script quirks around the Web Locks API and content-script load timing.
+
+## Disclaimer
+
+This is an unofficial community-made browser extension for "TypeGG" (typegg.io), a brand and platform operated by TYPEGG LTD. This extension is not affiliated with, endorsed by, sponsored by, or officially associated with "TypeGG" or TYPEGG LTD.
