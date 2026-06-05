@@ -119,9 +119,9 @@ Export goals, widget layout, and settings to a single versioned JSON file, and i
 
 **From the store**
 
-- Chrome: [https://chromewebstore.google.com/detail/typegg-goal-tracker/bemdlbiilfkdbaoiepjbknhinpkiicaa]
-- Edge: [https://microsoftedge.microsoft.com/addons/detail/typegg-goal-tracker/ijeddnikoigpmleiadnkahkfflggjjhl]
-- Firefox: [https://addons.mozilla.org/en-US/firefox/addon/typegg-goal-tracker/]
+- Chrome: https://chromewebstore.google.com/detail/typegg-goal-tracker/bemdlbiilfkdbaoiepjbknhinpkiicaa
+- Edge: https://microsoftedge.microsoft.com/addons/detail/typegg-goal-tracker/ijeddnikoigpmleiadnkahkfflggjjhl
+- Firefox: https://addons.mozilla.org/en-US/firefox/addon/typegg-goal-tracker/
 
 **From source (developer / unpacked)**
 
