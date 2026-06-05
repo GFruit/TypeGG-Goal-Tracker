@@ -632,6 +632,18 @@
   margin-bottom: 0 !important;
 }
 
+/* Row of three "max" preset buttons (ranked / unranked / all) for quotes
+   target goals. Lives inside .gt-target-row and grows to fill the space to
+   the left of the custom input (which keeps its fixed width on the right).
+   Buttons inherit flex:1 from .gt-mode-btn so they split evenly. */
+#gt-max-quotes-row {
+  display: flex;
+  gap: 5px;
+  flex: 1;
+  min-width: 0;
+}
+#gt-max-quotes-row .gt-mode-btn { white-space: nowrap; padding-left: 4px; padding-right: 4px; }
+
 #gt-next-rank-btn {
   width: auto; /* Overrides the previous 100% width */
   padding: 5px 12px;

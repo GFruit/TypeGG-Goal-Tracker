@@ -1,7 +1,11 @@
-window.addEventListener("load", () => {
+function gtMain() {
+
+  // Defensive: if our widget somehow already exists (double injection),
+  // don't build a second one.
+  if (document.getElementById("goal-tracker")) return;
 
   // ── Cached stats (for target-mode hint in modal) ───────────────
-  let currentStats = { exp: null, pp: null, races: null, quotes: null, playtime: null, rank: null, expRank: JSON.parse(localStorage.getItem("gt-exp-rank"))?.rank ?? null };
+  let currentStats = { exp: null, pp: null, races: null, quotes: null, quotesUnranked: null, playtime: null, rank: null, expRank: JSON.parse(localStorage.getItem("gt-exp-rank"))?.rank ?? null };
 
   // ── Gain delta tracking (for +X pop-up indicators) ─────────────
   // Stores the last known gain value per goal ID so renderAllGoals()
@@ -1190,6 +1194,11 @@ window.addEventListener("load", () => {
       <div id="gt-amount-row">
         <div class="gt-section-label" id="gt-amount-label">Amount</div>
         <div class="gt-target-row">
+          <div id="gt-max-quotes-row" style="display:none;">
+            <button id="gt-max-all-btn"      class="gt-mode-btn">⚡ Max all</button>
+            <button id="gt-max-ranked-btn"   class="gt-mode-btn">⚡ Max ranked</button>
+            <button id="gt-max-unranked-btn" class="gt-mode-btn">⚡ Max unranked</button>
+          </div>
           <div id="gt-next-rank-row" style="display:none; margin-bottom: 6px;">
             <button id="gt-next-rank-btn" class="gt-mode-btn" style="width:100%;">⚡ Next Rank</button>
           </div>
@@ -2305,6 +2314,57 @@ async function getExpRankByUsername(username) {
     }
   }
 
+  // ── Total unranked quotes lookup ──────────────────────────────────
+  async function getTypeGGTotalUnrankedQuotes() {
+    try {
+      const res = await fetch('https://api.typegg.io/v1/quotes?perPage=1&status=unranked', {
+        headers: { Accept: 'application/json' }
+      });
+
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+      const data = await res.json();
+      return data.totalCount;
+    } catch (e) {
+      console.error('Error fetching total unranked quotes:', e.message);
+      return null;
+    }
+  }
+
+  // ── Per-status count of quotes a user has typed ───────────────────
+  // status: "ranked" | "unranked". Returns the totalCount of the
+  // user's distinct quotes typed in that ranking bucket. The ranked
+  // count is also surfaced as the `quotesTyped` stat on the user
+  // object — but there's no equivalent stat for unranked, so this
+  // dedicated endpoint is the only source for it.
+  async function getUserQuotesTyped(status) {
+    const { username } = getAuth();
+    const name = username ?? "fruit";
+    const res = await fetch(
+      `https://api.typegg.io/v1/users/${encodeURIComponent(name)}/quotes?status=${status}&perPage=1`,
+      { headers: { Accept: 'application/json', ...authHeaders() } }
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    return data.totalCount;
+  }
+
+  // ── Does any current quotes goal need the unranked-typed count? ───
+  // Used to gate the extra per-poll fetch: only ranked goals exist for
+  // most users, and ranked is fully covered by the `quotesTyped` stat,
+  // so we skip the unranked endpoint entirely unless an unranked/all
+  // goal is actually present.
+  function quotesNeedUnrankedData() {
+    const goals = goalData?.quotes || [];
+    return goals.some(g => g.maxQuotes && (g.maxQuotesKind === 'unranked' || g.maxQuotesKind === 'all'));
+  }
+
+  // Map a goal's stored kind to a canonical value (legacy goals saved
+  // before kinds existed carry maxQuotes:true with no kind → "ranked").
+  function maxQuotesKindOf(gd) {
+    return gd?.maxQuotesKind ?? 'ranked';
+  }
+
   // ── Goal config ────────────────────────────────────────────────
   const GOAL_CONFIG = {
     exp: {
@@ -2443,13 +2503,21 @@ async function getExpRankByUsername(username) {
   const nextRankRow        = document.getElementById("gt-next-rank-row");
   const nextRankToggleBtn  = document.getElementById("gt-next-rank-btn");
 
+  const maxQuotesRow       = document.getElementById("gt-max-quotes-row");
+  const maxAllBtn          = document.getElementById("gt-max-all-btn");
+  const maxRankedBtn       = document.getElementById("gt-max-ranked-btn");
+  const maxUnrankedBtn     = document.getElementById("gt-max-unranked-btn");
+  const maxQuotesBtns = { all: maxAllBtn, ranked: maxRankedBtn, unranked: maxUnrankedBtn };
+
   let playerFetchedValue = null;
   let playerFetchedName = null;
   let playerDebounce = null;
 
   // max quotes mode state
-  let maxQuotesMode = false; // "max" toggle for quotes
-  let maxQuotesFetched = null; // total ranked quotes count
+  let maxQuotesMode = false; // "max" toggle for quotes (any kind active)
+  let maxQuotesKind = null;  // "ranked" | "unranked" | "all" when active
+  let maxQuotesFetched = null; // total quotes count for the selected kind
+  let maxQuotesBaseline = null; // user's currently-typed count for the selected kind (becomes the goal baseline)
 
   function formatPreset(n) {
     if (n >= 1000) return (n/1000)%1===0 ? `${n/1000}k` : `${(n/1000).toFixed(1)}k`;
@@ -2741,6 +2809,10 @@ async function getExpRankByUsername(username) {
   }
 
   function validateConfirm() {
+    // Max-quotes kinds drive confirmBtn.disabled directly from their async
+    // count fetch (see renderPresets). Don't let the generic target-value
+    // checks below re-disable it — selectedValue is intentionally null here.
+    if (selectedType === "quotes" && selectedMode === "target" && maxQuotesMode && maxQuotesKind) return;
     if (selectedMode === "rank") {
       // If Next Rank is toggled, allow setting immediately unless already #1
       if (nextRankMode) {
@@ -2806,6 +2878,7 @@ async function getExpRankByUsername(username) {
       customInput.style.display = "none";
       presetsEl.innerHTML = "";
       nextRankRow.style.display = "none";
+      maxQuotesRow.style.display = "none";
       modeHint.style.display = "none";
       return;
     }
@@ -2815,6 +2888,11 @@ async function getExpRankByUsername(username) {
     customInput.style.display = "";
     customInput.removeAttribute("max");
     customInput.removeAttribute("step");
+    // Hidden by default; only the quotes+target branch turns it on.
+    maxQuotesRow.style.display = "none";
+    // Presets visible by default; the quotes+target branch hides them (they'd
+    // otherwise claim flex space next to the max-quotes button row).
+    presetsEl.style.display = "";
 
     if (selectedMode === "improvement") {
       // ── Improvement mode (races only) ─────────────────────────
@@ -2911,48 +2989,90 @@ async function getExpRankByUsername(username) {
       modeHint.style.display = "block";
     } else if (isTargetMode && selectedType === "quotes") {
       // ── Max quotes mode (quotes + target) ──────────────────
-      customInput.style.display = "";
+      // Three "max" presets live in their own button row (gt-max-quotes-row):
+      // ranked-only, unranked-only, or all (ranked + unranked). The legacy
+      // single "Max" button was ranked-only; "Max ranked" preserves it.
       customInput.type          = "number";
       amountLabel.textContent   = "Target total";
       customInput.placeholder   = "Custom";
+      customInput.style.display = "";   // stays visible alongside the max buttons
       presetsEl.innerHTML = "";
-      
-      nextRankRow.style.display = "block";
-      nextRankToggleBtn.textContent = "⚡ Max";
+      presetsEl.style.display = "none"; // free the row's flex space for the buttons
 
-      if (maxQuotesMode) {
-        // ── Max quotes sub-mode ────────────────────────────────
-        customInput.style.display = "none";
-        nextRankToggleBtn.classList.add("active");
-        
-        modeHint.textContent = "Loading total ranked quotes…";
-        modeHint.className = "gt-mode-hint";
+      nextRankRow.style.display  = "none";          // rank-only button — not used here
+      maxQuotesRow.style.display = "flex";
+
+      // Reflect the active kind on the buttons.
+      for (const [kind, btn] of Object.entries(maxQuotesBtns)) {
+        btn.classList.toggle("active", maxQuotesMode && maxQuotesKind === kind);
+      }
+
+      if (maxQuotesMode && maxQuotesKind) {
+        // ── A max kind is selected ─────────────────────────────
+        const kind = maxQuotesKind;            // capture for the async guard
+
+        // Input stays visible (the click handler clears any prior value);
+        // typing into it deactivates the max kind — see the input handler.
+        maxQuotesFetched = null;
+        maxQuotesBaseline = null;
+
+        modeHint.textContent = "Loading quote counts…";
+        modeHint.className   = "gt-mode-hint";
         modeHint.style.display = "block";
-        
-        getTypeGGTotalQuotes().then(total => {
-          if (total != null) {
-            maxQuotesFetched = total;
-            const cur = currentStats.quotes;
-            
-            if (cur != null && total <= cur) {
-              modeHint.textContent = `⚠ You've already typed all ${total.toLocaleString()} ranked quotes!`;
-              modeHint.className = "gt-mode-hint gt-mode-hint-error";
-              confirmBtn.disabled = true;
-            } else {
-              modeHint.textContent = `Max: ${total.toLocaleString()} ranked quotes on TypeGG`;
-              modeHint.className = "gt-mode-hint";
-              confirmBtn.disabled = false;
-            }
-          } else {
+        confirmBtn.disabled  = true;
+
+        // Resolve both the TOTAL on-site count and the user's already-TYPED
+        // count for the selected kind, in parallel. Ranked typed comes from
+        // the cached quotesTyped stat; unranked typed needs its own endpoint.
+        const needRanked   = kind === "ranked" || kind === "all";
+        const needUnranked = kind === "unranked" || kind === "all";
+
+        Promise.all([
+          needRanked   ? getTypeGGTotalQuotes()         : Promise.resolve(0),
+          needUnranked ? getTypeGGTotalUnrankedQuotes() : Promise.resolve(0),
+          needUnranked ? getUserQuotesTyped("unranked").catch(() => null) : Promise.resolve(0),
+        ]).then(([totalRanked, totalUnranked, typedUnranked]) => {
+          // Bail if the user switched kind / closed the modal mid-flight.
+          if (!maxQuotesMode || maxQuotesKind !== kind) return;
+
+          const totalsOk =
+            (!needRanked   || totalRanked   != null) &&
+            (!needUnranked || (totalUnranked != null && typedUnranked != null));
+          if (!totalsOk) {
             modeHint.textContent = "⚠ Failed to load quote count";
-            modeHint.className = "gt-mode-hint gt-mode-hint-error";
-            confirmBtn.disabled = true;
+            modeHint.className   = "gt-mode-hint gt-mode-hint-error";
+            confirmBtn.disabled  = true;
+            return;
+          }
+
+          const typedRanked = currentStats.quotes; // may be null until stats load
+          let total, typed, noun;
+          if (kind === "ranked") {
+            total = totalRanked;   typed = typedRanked;                     noun = "ranked quotes";
+          } else if (kind === "unranked") {
+            total = totalUnranked; typed = typedUnranked;                   noun = "unranked quotes";
+          } else {
+            total = totalRanked + totalUnranked;
+            typed = (typedRanked != null) ? typedRanked + typedUnranked : null;
+            noun  = "quotes (ranked + unranked)";
+          }
+
+          maxQuotesFetched  = total;
+          maxQuotesBaseline = typed;
+
+          if (typed != null && total <= typed) {
+            modeHint.textContent = `⚠ You've already typed all ${total.toLocaleString()} ${noun}!`;
+            modeHint.className   = "gt-mode-hint gt-mode-hint-error";
+            confirmBtn.disabled  = true;
+          } else {
+            modeHint.textContent = `Max: ${total.toLocaleString()} ${noun} on TypeGG`;
+            modeHint.className   = "gt-mode-hint";
+            confirmBtn.disabled  = false;
           }
         });
       } else {
         // ── Manual input for target quotes ────────────────────
         customInput.style.display = "";
-        nextRankToggleBtn.classList.remove("active");
         updateModeHint();
       }
     } else {
@@ -2984,6 +3104,17 @@ async function getExpRankByUsername(username) {
 
   customInput.addEventListener("input", () => {
     presetsEl.querySelectorAll(".gt-preset-chip").forEach(c => c.classList.remove("selected"));
+
+    // Quotes + target: typing a manual value opts out of any active "max"
+    // kind (mirrors the Next Rank behaviour). Clearing the field again does
+    // NOT re-select a kind — the user must click a max button to do that.
+    if (selectedType === "quotes" && selectedMode === "target" && maxQuotesMode && customInput.value !== "") {
+      maxQuotesMode     = false;
+      maxQuotesKind     = null;
+      maxQuotesFetched  = null;
+      maxQuotesBaseline = null;
+      for (const btn of Object.values(maxQuotesBtns)) btn.classList.remove("active");
+    }
 
     if (selectedMode === "rank") {
       // If Next Rank was toggled and the user is now typing a specific rank,
@@ -3082,14 +3213,27 @@ async function getExpRankByUsername(username) {
       rankFetchedRank = null;
       customInput.value = "";
       renderPresets();
-    } else if (selectedMode === "target" && selectedType === "quotes") {
-      // Handle max quotes toggle for Quotes
-      maxQuotesMode = !maxQuotesMode;
-      maxQuotesFetched = null;
-      customInput.value = "";
-      renderPresets();
     }
   });
+
+  // Max-quotes kind buttons (quotes + target mode). Clicking a kind selects
+  // it; clicking the already-active kind toggles back to manual entry.
+  for (const [kind, btn] of Object.entries(maxQuotesBtns)) {
+    btn.addEventListener("click", () => {
+      if (selectedMode !== "target" || selectedType !== "quotes") return;
+      if (maxQuotesMode && maxQuotesKind === kind) {
+        maxQuotesMode = false;
+        maxQuotesKind = null;
+      } else {
+        maxQuotesMode = true;
+        maxQuotesKind = kind;
+      }
+      maxQuotesFetched  = null;
+      maxQuotesBaseline = null;
+      customInput.value = "";
+      renderPresets();
+    });
+  }
 
   typeBtns.forEach(btn => btn.addEventListener("click", () => {
     typeBtns.forEach(b => b.classList.remove("active")); btn.classList.add("active");
@@ -3421,7 +3565,7 @@ async function getExpRankByUsername(username) {
     filterBtns.forEach(b => b.classList.toggle("active", b.dataset.filter === "all"));
     selectedType = "exp"; selectedRec = "none"; selectedMode = "gain"; selectedFilter = "all";
     rankFetchedPp = null; rankFetchedRank = null; nextRankMode = false;
-    maxQuotesMode = false; maxQuotesFetched = null;
+    maxQuotesMode = false; maxQuotesKind = null; maxQuotesFetched = null; maxQuotesBaseline = null;
     resetRequirementsUI();
     resetAverageUI();
     resetImprovementUI();
@@ -3430,6 +3574,7 @@ async function getExpRankByUsername(username) {
     avgBtn.style.display = (selectedType === "races") ? "" : "none";
     improvementBtn.style.display = (selectedType === "races") ? "" : "none";
     nextRankRow.style.display = "none";
+    maxQuotesRow.style.display = "none";
     filterRow.style.display = "none"; // hide filter row initially (only show for races)
     reqRow.style.display = "none";    // hide req row initially (only show for races + gain)
     avgTargetRow.style.display = "none"; // hide avg rows initially (only show for races + average)
@@ -3443,7 +3588,7 @@ async function getExpRankByUsername(username) {
   function closeModal() {
     overlay.classList.remove("open");
     selectedValue = null; rankFetchedPp = null; rankFetchedRank = null; nextRankMode = false;
-    maxQuotesMode = false; maxQuotesFetched = null;
+    maxQuotesMode = false; maxQuotesKind = null; maxQuotesFetched = null; maxQuotesBaseline = null;
     resetRequirementsUI();
     resetAverageUI();
     resetImprovementUI();
@@ -3617,6 +3762,8 @@ async function getExpRankByUsername(username) {
 
       let gainTarget;
       let isMaxQuotes = false;
+      let maxQuotesBaselineOverride = null; // kind-appropriate typed count for unranked/all
+      let maxQuotesKindForGoal = null;      // captured kind written onto the goal
       
       if (selectedMode === "rank") {
         if (rankFetchedRank == null) return;
@@ -3648,11 +3795,34 @@ async function getExpRankByUsername(username) {
       if (selectedValue == null || selectedValue <= 0) return;
       gainTarget = selectedValue;
     } else if (selectedMode === "target" && cfg.supportsTarget) {
-        if (selectedType === "quotes" && maxQuotesMode) {
-          // Max quotes mode
-          if (maxQuotesFetched == null) return;
-          gainTarget = maxQuotesFetched - currentVal;
-          if (gainTarget <= 0) gainTarget = 0;
+        if (selectedType === "quotes" && maxQuotesMode && maxQuotesKind) {
+          // ── Max quotes mode (ranked / unranked / all) ──────────
+          if (maxQuotesFetched == null) return;   // total count failed to load
+          const kind = maxQuotesKind;
+
+          // Baseline = how many of this kind the user has ALREADY typed.
+          //   ranked   → quotesTyped (currentVal, freshly fetched above)
+          //   unranked → dedicated endpoint
+          //   all      → ranked + unranked
+          const typedRanked = currentVal;         // == data.stats.quotesTyped
+          let typedUnranked = 0;
+          if (kind === "unranked" || kind === "all") {
+            try { typedUnranked = await getUserQuotesTyped("unranked"); }
+            catch { typedUnranked = null; }
+            if (typedUnranked == null) return;     // can't establish a baseline
+            // Seed the live cache so the first render shows correct progress
+            // before the next stats poll fetches it.
+            currentStats.quotesUnranked = typedUnranked;
+          }
+
+          let baseline;
+          if (kind === "ranked")        baseline = typedRanked;
+          else if (kind === "unranked") baseline = typedUnranked;
+          else                          baseline = typedRanked + typedUnranked;
+
+          maxQuotesBaselineOverride = baseline;
+          maxQuotesKindForGoal      = kind;
+          gainTarget = Math.max(0, maxQuotesFetched - baseline);
           isMaxQuotes = true;
         } else {
           // Regular target mode
@@ -3729,9 +3899,10 @@ async function getExpRankByUsername(username) {
         nextRank: (selectedMode === "rank" && nextRankMode) || undefined,
         targetUsername: selectedMode === "player" ? playerFetchedName : undefined,
         maxQuotes: isMaxQuotes || undefined,
+        maxQuotesKind: maxQuotesKindForGoal || undefined,
         filter: selectedType === "races" ? selectedFilter : undefined,
         targetLoaded: selectedMode === "rank" ? false : true, // false for rank goals — target is loaded async by updateRankGoals/updateExpRankGoals
-        [cfg.baselineKey]: currentVal,
+        [cfg.baselineKey]: maxQuotesBaselineOverride != null ? maxQuotesBaselineOverride : currentVal,
         recurrence: selectedRec,
         periodStart: isRecurring ? getCurrentPeriodStart(selectedRec) : null,
         streak: 0,
@@ -4160,7 +4331,11 @@ async function getExpRankByUsername(username) {
       document.getElementById(`${goalId}-label`).textContent =
         `${cfg.label} (vs ${gd.targetUsername})`;
     } else if (gd.maxQuotes) {
-      document.getElementById(`${goalId}-label`).textContent = `${cfg.label} → max quotes`;
+      const kind = maxQuotesKindOf(gd);
+      const suffix = kind === "unranked" ? "max unranked"
+                   : kind === "all"      ? "max all"
+                   :                       "max ranked";
+      document.getElementById(`${goalId}-label`).textContent = `${cfg.label} → ${suffix}`;
     } else if (type === "races" && goalIsImprovement(gd)) {
       const metricLbl = (gd.improvementMetric === "pp") ? "PP" : "WPM";
       const filterStr = (gd.filter && gd.filter !== "all") ? ` (${gd.filter})` : "";
@@ -4272,7 +4447,18 @@ async function getExpRankByUsername(username) {
 
   // ── Fetch user data (pure fetch, no side effects) ────────────
   async function fetchUserData() {
-    const response = await fetch(userEndpoint(), { headers: authHeaders() });
+    // Only hit the unranked-quotes endpoint when an unranked/all goal
+    // actually needs it — ranked goals are fully covered by quotesTyped.
+    const needUnranked = quotesNeedUnrankedData();
+    const [response, unrankedTyped] = await Promise.all([
+      fetch(userEndpoint(), { headers: authHeaders() }),
+      needUnranked
+        ? getUserQuotesTyped("unranked").catch(e => {
+            console.error("Unranked-typed fetch failed:", e.message);
+            return undefined; // leave currentStats.quotesUnranked untouched on failure
+          })
+        : Promise.resolve(undefined),
+    ]);
     if (!response.ok) throw new Error(`User fetch failed: ${response.status}`);
     const data = await response.json();
     return {
@@ -4280,6 +4466,7 @@ async function getExpRankByUsername(username) {
       pp:             data.stats?.totalPp,
       races:          data.stats?.races,
       quotes:         data.stats?.quotesTyped,
+      quotesUnranked: unrankedTyped,
       playtime:       data.stats?.playTime,
       rank:           data.globalRank ?? null,
       chars:          data.stats?.completionCharactersTyped,
@@ -4310,6 +4497,10 @@ async function getExpRankByUsername(username) {
     currentStats.pp             = data.pp;
     currentStats.races          = data.races;
     currentStats.quotes         = data.quotes;
+    // Only overwrite when this fetch actually retrieved an unranked count
+    // (undefined = the fetch was skipped or failed — keep the prior value,
+    // which may have been seeded at goal-creation time).
+    if (data.quotesUnranked !== undefined) currentStats.quotesUnranked = data.quotesUnranked;
     currentStats.playtime       = data.playtime;
     currentStats.rank           = data.rank;
     currentStats.chars          = data.chars;
@@ -4388,6 +4579,24 @@ async function getExpRankByUsername(username) {
           currentVal = statValues[type];
         }
 
+        // For max-quotes goals, the "current" value depends on which quote
+        // bucket the goal tracks. Ranked is the live quotesTyped stat;
+        // unranked comes from currentStats.quotesUnranked; all is the sum.
+        // (null until the unranked count has been fetched at least once —
+        // the goal then just skips this tick via the guard below.)
+        if (type === "quotes" && gd.maxQuotes) {
+          const kind = maxQuotesKindOf(gd);
+          if (kind === "unranked") {
+            currentVal = currentStats.quotesUnranked;
+          } else if (kind === "all") {
+            currentVal = (currentStats.quotes != null && currentStats.quotesUnranked != null)
+              ? currentStats.quotes + currentStats.quotesUnranked
+              : null;
+          } else {
+            currentVal = currentStats.quotes; // ranked (and legacy)
+          }
+        }
+
         // Skip if stat unavailable for this specific goal
         if (currentVal == null) continue;
 
@@ -4420,23 +4629,20 @@ async function getExpRankByUsername(username) {
           if (!isFloating) targetContent.appendChild(section);
         }
 
-        // Ensure correct position within the widget based on group.goalIds.
-        // Skipped entirely during a drag: the drag system owns DOM order
-        // while active (moving the placeholder, running FLIP animations).
-        // If renderAllGoals fought it, siblings could jump mid-animation.
-        // Drag's own commit at mouseup leaves the DOM consistent with
-        // groupData, so this code has nothing to fix once the drag ends.
-        if (!dragInProgress) {
-          const desiredIndex = groupData[gid].goalIds.indexOf(goalId);
-          const siblings = Array.from(targetContent.children).filter(c =>
-            !c.classList.contains("gt-goal-placeholder")
-          );
-          const currentIndex = siblings.indexOf(section);
-          if (currentIndex !== desiredIndex && desiredIndex >= 0) {
-            if (desiredIndex >= siblings.length) targetContent.appendChild(section);
-            else                                 targetContent.insertBefore(section, siblings[desiredIndex]);
-          }
-        }
+        // NOTE: DOM ordering within the widget is NOT done here anymore.
+        // It used to be a per-goal insertBefore() driven by this goal's
+        // index in group.goalIds — but that index is into the FULL goalIds
+        // array, while the live sibling list only contains the sections
+        // created SO FAR. On a fresh page load, goals stream in over several
+        // seconds as their async data resolves (rank @3s, exp-rank @6s,
+        // max-quotes @12s, race-reqs @15s — see startLeaderIntervals). While
+        // only a subset of sections exist, a global goalIds index maps to the
+        // wrong slot in the partial sibling list, so late-arriving goals land
+        // in the wrong position — visible as goals briefly swapping places
+        // until every section finally exists. Ordering is now done in a single
+        // whole-list pass (reconcileGoalOrder, called once below) that sorts
+        // all PRESENT sections by their goalIds position at once — correct for
+        // any subset, regardless of which goals have loaded yet.
 
         const isRecurring = !!(gd.recurrence && gd.recurrence !== "none");
         const hasReq = type === "races" && goalIsGated(gd);
@@ -4499,6 +4705,15 @@ async function getExpRankByUsername(username) {
               gd.quoteAvgs       = {};
               gd.lastEvalRaces   = currentStats.races ?? currentVal;
               delete prevGainMap[goalId];
+              // The wipe above leaves the quote the user is currently on
+              // unseeded for the new period. Without a fresh seed, the first
+              // finished race of the new period would be dropped (unseeded)
+              // and lastEvalRaces would skip past it. Re-seed the live quote
+              // now (fire-and-forget); onQuoteStarted refreshes lastSeedPromise
+              // so the finish-eval can await it. No-ops if not on a quote /
+              // not the racing tab (live id null).
+              const liveQid = getCurrentQuoteIdLive();
+              if (liveQid) onQuoteStarted(liveQid);
             }
             goals[i] = gd;
             saveGoals(type);
@@ -4563,6 +4778,12 @@ async function getExpRankByUsername(username) {
         updateGoalSection(goalId, type, cfg, gd, gain, isRecurring, gainDelta);
       }
     }
+    // Sort every widget's goal sections into group.goalIds order in one
+    // pass, now that all sections for this render have been created/updated.
+    // This replaces the old per-goal insertBefore() and is robust while
+    // goals are still streaming in during page load (see note in the loop).
+    reconcileGoalOrder();
+
     // Re-evaluate which widgets currently host an avg goal and toggle
     // the .gt-widget-has-avg class accordingly. Cheap (loops over a
     // handful of groups), and putting it in renderAllGoals means every
@@ -4570,6 +4791,43 @@ async function getExpRankByUsername(username) {
     // groups, period rollover — also updates the min-width gating
     // without each call site needing to remember to do it explicitly.
     updateAllWidgetAvgClasses();
+  }
+
+  // ── Whole-list DOM order reconciliation ──────────────────────
+  // Order goal sections within each widget to match group.goalIds. Done as
+  // a single sort over the sections that ACTUALLY EXIST in each container
+  // (rather than per-goal insertBefore using a full-array index), so it is
+  // correct no matter which subset of goals has loaded yet — that subset
+  // independence is what kills the transient swap-on-refresh. Skipped during
+  // a drag: the drag system owns DOM order while active (placeholder moves,
+  // FLIP animations), and its mouseup commit already leaves the DOM matching
+  // groupData, so there's nothing to fix once the drag ends.
+  function reconcileGoalOrder() {
+    if (dragInProgress) return;
+    for (const [gid, group] of Object.entries(groupData)) {
+      const content = contentElForGroup(gid);
+      if (!content) continue;
+      const order = group.goalIds;
+      const sections = Array.from(content.children).filter(c =>
+        c.id && c.id.endsWith("-goal-section")
+      );
+      if (sections.length < 2) continue;
+      // Sort by position in goalIds; any id not tracked there sinks to the
+      // end. Array.prototype.sort is stable, so untracked sections keep
+      // their relative order.
+      const sorted = sections.slice().sort((a, b) => {
+        const ai = order.indexOf(a.id.replace("-goal-section", ""));
+        const bi = order.indexOf(b.id.replace("-goal-section", ""));
+        return (ai === -1 ? Infinity : ai) - (bi === -1 ? Infinity : bi);
+      });
+      // Only touch the DOM if the order actually changed, to avoid needless
+      // reflow on every render tick.
+      let differs = false;
+      for (let i = 0; i < sorted.length; i++) {
+        if (sections[i] !== sorted[i]) { differs = true; break; }
+      }
+      if (differs) sorted.forEach(sec => content.appendChild(sec));
+    }
   }
 
   // ── Stats + reset logic (leader only) ────────────────────────
@@ -4619,6 +4877,28 @@ async function getExpRankByUsername(username) {
   let qfPending       = false; // another quote finished while we were retrying
   let qfWorkerRunning = false; // retry chain currently executing
 
+  // ── Pending start-seed tracking ─────────────────────────────
+  // Improvement baselines are seeded asynchronously at quote-START (see
+  // seedImprovementForCurrentQuote). The finish-eval must NOT run before
+  // that seed lands: an unseeded quote makes the evaluator silently drop
+  // the finished race (`if (!st) continue`) while STILL advancing
+  // lastEvalRaces past it — so the race is consumed and its gain is lost,
+  // and a seed that arrives later (e.g. when a new goal forces a re-seed)
+  // re-absorbs the whole climb as a single lump instead of incrementally.
+  // We therefore record the latest start-seed promise and await it (bounded)
+  // before evaluating. The start-seed reads history from BEFORE the in-
+  // progress race, so awaiting it can't double-count the finishing race.
+  let lastSeedPromise = null;
+  const SEED_AWAIT_TIMEOUT_MS = 2500;
+  function awaitPendingSeed(timeoutMs = SEED_AWAIT_TIMEOUT_MS) {
+    if (!lastSeedPromise) return Promise.resolve();
+    const p = lastSeedPromise;
+    return Promise.race([
+      Promise.resolve(p).catch(() => {}), // ignore seed errors; eval proceeds
+      new Promise(r => setTimeout(r, timeoutMs)),
+    ]);
+  }
+
   // Run one retry chain: fetch up to N times, stop when stats change
   async function runQuoteFinishRetryChain() {
     // Snapshot of stats at the moment the quote finished.
@@ -4629,6 +4909,7 @@ async function getExpRankByUsername(username) {
       pp:       currentStats.pp,
       exp:      currentStats.exp,
       quotes:   currentStats.quotes,
+      quotesUnranked: currentStats.quotesUnranked,
       chars:    currentStats.chars,
       playtime: currentStats.playtime,
     };
@@ -4681,6 +4962,14 @@ async function getExpRankByUsername(username) {
       const racesChanged = isLeader && data.races != null && data.races !== prevRaces;
       const anyEvalGoals = (goalData.races || []).some(g => goalNeedsRaceList(g));
       if (racesChanged && anyEvalGoals) {
+        // If any improvement goal is present, make sure the just-finished
+        // quote's pre-race baseline seed (kicked off at quote-start) has
+        // landed first — otherwise the evaluator drops this race as
+        // unseeded and the gain is lost / later lumped. Bounded so a hung
+        // seed fetch can't stall the finish path.
+        if ((goalData.races || []).some(g => goalIsImprovement(g))) {
+          await awaitPendingSeed();
+        }
         try {
           await evaluateRaceRequirementsGuarded({ deferRender: true });
         } catch (err) {
@@ -4697,8 +4986,9 @@ async function getExpRankByUsername(username) {
       const changed =
         data.races    !== snap.races    ||
         data.pp       !== snap.pp       ||
-        data.exp      !== snap.exp      ||
+        data.exp      !== snap.exp       ||
         data.quotes   !== snap.quotes   ||
+        (data.quotesUnranked !== undefined && data.quotesUnranked !== snap.quotesUnranked) ||
         data.chars    !== snap.chars   ||
         data.playtime !== snap.playtime;
       if (changed) {
@@ -4934,7 +5224,9 @@ async function getExpRankByUsername(username) {
   function onQuoteStarted(knownQuoteId) {
     const goals = goalData.races;
     if (!goals || !goals.some(g => goalIsImprovement(g))) return;
-    seedImprovementForCurrentQuote(knownQuoteId);
+    // Hold the promise so the quote-finish path can await this seed before
+    // it evaluates the finished race (prevents the drop-then-lump bug).
+    lastSeedPromise = seedImprovementForCurrentQuote(knownQuoteId);
   }
 
   // ── Input-disabled watcher ──────────────────────────────────
@@ -5855,30 +6147,40 @@ async function getExpRankByUsername(username) {
     try {
       const goals = goalData.quotes;
       if (!goals || goals.length === 0) return;
-      if (currentStats.quotes == null) return;
 
       // ── Skip entirely if no goal actually uses maxQuotes ─────
       if (!goals.some(g => g.maxQuotes)) return;
 
-      // ── Fetch ONCE, outside the loop ─────────────────────────
-      // Previously this was called inside the for-loop, meaning a user
-      // with 5 max-quote goals fired 5 identical requests every tick.
-      const newTotal = await getTypeGGTotalQuotes();
-      if (newTotal == null) return;
+      // Work out which on-site totals we actually need, then fetch each
+      // ONCE (outside the loop) and in parallel.
+      const needRanked   = goals.some(g => g.maxQuotes && maxQuotesKindOf(g) !== "unranked"); // ranked or all
+      const needUnranked = goals.some(g => g.maxQuotes && (maxQuotesKindOf(g) === "unranked" || maxQuotesKindOf(g) === "all"));
 
+      const [totalRanked, totalUnranked] = await Promise.all([
+        needRanked   ? getTypeGGTotalQuotes()         : Promise.resolve(null),
+        needUnranked ? getTypeGGTotalUnrankedQuotes() : Promise.resolve(null),
+      ]);
+
+      let changed = false;
       for (let i = 0; i < goals.length; i++) {
-        let gd = goals[i];
+        const gd = goals[i];
         if (!gd.maxQuotes) continue;
 
-        const newTarget = newTotal - gd.baselineQuotes;
-        const finalTarget = Math.max(0, newTarget);
+        const kind = maxQuotesKindOf(gd);
+        let total;
+        if (kind === "ranked")        total = totalRanked;
+        else if (kind === "unranked") total = totalUnranked;
+        else                          total = (totalRanked != null && totalUnranked != null) ? totalRanked + totalUnranked : null;
+        if (total == null) continue; // its fetch failed this tick — try again later
 
+        const finalTarget = Math.max(0, total - gd.baselineQuotes);
         if (Math.abs(finalTarget - gd.target) > 0.01) {
           gd.target = finalTarget;
           goals[i] = gd;
-          saveGoals("quotes");
+          changed = true;
         }
       }
+      if (changed) saveGoals("quotes");
     } catch (err) {
       console.error("Max quotes update failed:", err);
     }
@@ -6064,20 +6366,63 @@ async function getExpRankByUsername(username) {
   // Uses the Web Locks API to ensure exactly one tab fetches data.
   // The lock callback holds forever; when the tab closes, the lock
   // releases automatically and another tab's pending request wins.
-  if ('locks' in navigator) {
-    navigator.locks.request(LEADER_LOCK_NAME, { mode: 'exclusive' }, async () => {
-      isLeader = true;
-      console.log('[Goal Tracker] became leader tab');
-      startLeaderIntervals();
-      // Hold the lock for the lifetime of this tab
-      await new Promise(() => {});
-    }).catch(err => console.error('[Goal Tracker] leader lock error:', err));
-  } else {
-    // Fallback for old browsers without Web Locks API:
-    // act as leader. Worst case = original behavior (each tab fetches).
-    console.warn('[Goal Tracker] Web Locks API unavailable — falling back to per-tab fetching');
+  //
+  // Firefox note: inside a content script, navigator.locks.request with
+  // an async callback can reject with "Permission denied to access
+  // property 'then'" — the platform can't read .then on the promise our
+  // callback returns across the content-script security boundary. When
+  // that happens (or the API is missing entirely), we fall back to acting
+  // as our own leader so the widget still fetches and renders. Worst case
+  // is the old per-tab behaviour (each tab fetches) — cross-tab dedup is
+  // lost, but the widget always works. becomeLeader() is idempotent so the
+  // callback path and the error-fallback path can't double-start intervals.
+  function becomeLeader(reason) {
+    if (isLeader) return;
     isLeader = true;
+    console.log(`[Goal Tracker] became leader tab${reason ? ` (${reason})` : ""}`);
     startLeaderIntervals();
   }
 
-});
+  if ('locks' in navigator) {
+    try {
+      const req = navigator.locks.request(LEADER_LOCK_NAME, { mode: 'exclusive' }, () => {
+        becomeLeader();
+        // Hold the lock for the lifetime of this tab
+        return new Promise(() => {});
+      });
+      // The returned value may reject asynchronously on Firefox (the .then
+      // Xray error). Guard the .catch call itself in case the return value
+      // isn't a normal promise in some engines.
+      if (req && typeof req.catch === 'function') {
+        req.catch(err => {
+          console.warn('[Goal Tracker] leader lock error — falling back to per-tab fetching:', err);
+          becomeLeader('lock error fallback');
+        });
+      }
+    } catch (err) {
+      // Synchronous throw (also seen on some Firefox builds).
+      console.warn('[Goal Tracker] leader lock threw — falling back to per-tab fetching:', err);
+      becomeLeader('lock throw fallback');
+    }
+  } else {
+    // Old browsers without Web Locks API.
+    console.warn('[Goal Tracker] Web Locks API unavailable — falling back to per-tab fetching');
+    becomeLeader('no Web Locks API');
+  }
+
+}
+
+// ── Bootstrap ──────────────────────────────────────────────────
+// Do NOT rely solely on the "load" event. Content scripts run at
+// document_idle by default, and on Firefox that often fires AFTER the
+// page's load event has already happened — a "load" listener added then
+// never fires, so the whole widget never builds (and no leader-election
+// error appears, because that code never runs either). This is the cause
+// of the widget vanishing on refresh in Firefox while Chromium is fine.
+// Run immediately if the document is already loaded; otherwise wait once.
+(function bootstrap() {
+  let started = false;
+  const start = () => { if (started) return; started = true; gtMain(); };
+  if (document.readyState === "complete") start();
+  else window.addEventListener("load", start, { once: true });
+})();
