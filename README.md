@@ -19,7 +19,7 @@ A browser extension that adds a live goal-tracking widget to [TypeGG](https://ty
 - [How it works](#how-it-works)
 - [Privacy & data](#privacy--data)
 - [Browser support](#browser-support)
-- [Contributing](#contributing)
+- [Disclaimer](#disclaimer)
 
 ---
 
