@@ -456,6 +456,10 @@
   gap: 5px;
   margin-bottom: 12px;
 }
+/* Seven type buttons fit one row at the 520px modal width; wrap is a
+   graceful fallback for zoomed / narrow renders. */
+.gt-type-selector { flex-wrap: wrap; }
+.gt-type-btn { min-width: 52px; }
 
 .gt-type-btn, .gt-mode-btn, .gt-rec-btn, .gt-filter-btn {
   flex: 1; border-radius: 7px;
@@ -471,6 +475,75 @@
 .gt-mode-btn.active { border-color: #10b981; background: #022c22; color: #6ee7b7; }
 .gt-rec-btn.active  { border-color: #8b5cf6; background: #2e1065; color: #c4b5fd; }
 .gt-filter-btn.active { border-color: #f59e0b; background: #451a03; color: #fcd34d; }
+
+/* ── Rival goal card ──────────────────────────────────────────
+   A comparison card: metric badge in the header, a big "you / rival"
+   compare line for the current quote, a wins sub-line, and a full-width
+   challenge button that jumps to a quote the rival currently beats you on. */
+.gt-rival-metric-badge {
+  font-size: 9px;
+  font-weight: 700;
+  color: #93c5fd;
+  background: #1e3a5f;
+  border: 1px solid #3b82f6;
+  border-radius: 3px;
+  padding: 1px 5px;
+  letter-spacing: 0.04em;
+}
+
+/* Value row — same 12px sizing as the standard gain row / average rows. */
+.gt-rival-value-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #e5e7eb;
+  margin: 3px 0 6px;
+}
+/* Wrap holds your value + the rival's value + the inline +X gain pill.
+   inline-block (not flex) so the " / " text keeps its space and the pill
+   flows naturally after the numbers with its usual left margin. */
+.gt-rival-value-wrap { display: inline-block; min-width: 0; }
+/* Your number: white normally, green once you've matched/beaten the rival
+   on this quote (same cue as .gt-avg-best-done). */
+.gt-rival-you { font-weight: 600; color: #e5e7eb; font-variant-numeric: tabular-nums; }
+.gt-rival-you.gt-rival-you-done { color: #4ade80; }
+/* The rival's number reads like a target: grey, never recoloured. */
+.gt-rival-them { color: #9ca3af; font-weight: 400; white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* Status messages (loading / "hasn't raced" / prompt). */
+.gt-rival-msg { font-size: 12px; font-weight: 500; color: #6b7280; }
+
+.gt-rival-wins {
+  font-size: 11px;
+  font-weight: 500;
+  color: #9ca3af;
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 7px;
+}
+
+.gt-rival-next-btn {
+  width: 100%;
+  border-radius: 7px;
+  border: 1.5px solid #3b82f6;
+  background: #1e3a5f;
+  color: #bfdbfe;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s, opacity 0.15s;
+  padding: 6px 0;
+}
+.gt-rival-next-btn:hover:not(:disabled) { background: #1d4ed8; border-color: #2563eb; color: #fff; }
+.gt-rival-next-btn:disabled {
+  border-color: #374151;
+  background: transparent;
+  color: #6b7280;
+  cursor: default;
+  opacity: 0.8;
+}
 
 /* ── Requirements row (race goals + gain mode) ───────────
    Three chip-shaped inputs (WPM / Acc / PP) plus a right-aligned
