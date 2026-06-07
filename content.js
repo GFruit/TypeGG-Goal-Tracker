@@ -2749,7 +2749,14 @@ async function getExpRankByUsername(username) {
   const customInput = document.getElementById("gt-custom-input");
   const typeBtns    = document.querySelectorAll(".gt-type-btn");
   const recBtns     = document.querySelectorAll(".gt-rec-btn");
-  const modeBtns    = document.querySelectorAll(".gt-mode-selector .gt-mode-btn");
+  // Only true mode buttons (those carrying data-mode). The rival "Track"
+  // (scope) group reuses the .gt-mode-selector styling, so a bare
+  // ".gt-mode-selector .gt-mode-btn" query would also grab the scope buttons and
+  // wire the mode-button handler onto them — clicking a scope button would then
+  // set selectedMode to undefined and fall into the "show recurrence row"
+  // branch, surfacing recurrence on a rival goal (which has none). Filtering by
+  // data-mode keeps this to gain/target/rank/player/average/improvement.
+  const modeBtns    = [...document.querySelectorAll(".gt-mode-selector .gt-mode-btn")].filter(b => b.dataset.mode);
   const filterBtns  = document.querySelectorAll(".gt-filter-btn");
   const modeRow     = document.getElementById("gt-mode-row");
   const recRow      = document.getElementById("gt-rec-row");
@@ -3737,7 +3744,7 @@ async function getExpRankByUsername(username) {
       selectedRec = "none";
       recBtns.forEach(b => b.classList.toggle("active", b.dataset.rec === "none"));
       recRow.style.display = "none";
-    } else { recRow.style.display = "block"; }
+    } else { recRow.style.display = (selectedType === "rival") ? "none" : "block"; } // rival never has recurrence
     updateReqRowVisibility();
     updateAvgRowVisibility();
     updateImprovementRowVisibility();
