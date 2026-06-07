@@ -1266,6 +1266,13 @@ function gtMain() {
             <button class="gt-mode-btn"        data-rival-metric="pp"  type="button">PP</button>
           </div>
         </div>
+        <div class="gt-section-label">Track</div>
+        <div class="gt-mode-selector gt-rival-scope-group">
+          <button class="gt-mode-btn active" data-rival-scope="all"      type="button">All</button>
+          <button class="gt-mode-btn"        data-rival-scope="ranked"   type="button">Ranked</button>
+          <button class="gt-mode-btn"        data-rival-scope="unranked" type="button">Unranked</button>
+        </div>
+        <div class="gt-mode-hint" id="gt-rival-scope-modal-hint" style="display:block;"></div>
       </div>
       <div id="gt-req-row" style="display:none;">
         <div class="gt-section-label">Requirements</div>
@@ -1684,17 +1691,67 @@ function gtMain() {
   }
 
   // ── Rival tab ─────────────────────────────────────────────────
-  // Settings that apply globally to every rival goal. Currently just the
-  // destination of the "⚔ Next vs …" button.
+  // Settings that apply globally to every rival goal: which quotes are tracked
+  // (all / ranked / unranked) and where the "⚔ Next vs …" button navigates.
+  const RIVAL_SCOPE_OPTIONS = [
+    { value: "all",      label: "All",      hint: "Counts every quote your rival has typed — ranked and unranked." },
+    { value: "ranked",   label: "Ranked",   hint: "Counts only your rival's ranked quotes." },
+    { value: "unranked", label: "Unranked", hint: "Counts only your rival's unranked quotes." },
+  ];
   const RIVAL_NEXT_LINK_OPTIONS = [
     { value: false, label: "Quote only",  hint: "Opens the quote on its own: typegg.io/solo/<quote>" },
     { value: true,  label: "Versus rival", hint: "Opens a head-to-head against the rival on that quote: typegg.io/solo/<quote>/vs/<rival>" },
   ];
+  const RIVAL_NEXT_SORT_OPTIONS = [
+    { value: "random",  label: "Random",   hint: "Picks a random quote where the rival beats you." },
+    { value: "closest", label: "Closest",  hint: "Smallest gap first — the quote you're nearest to beating; each click steps to the next-closest, then wraps around." },
+    { value: "biggest", label: "Biggest",  hint: "Largest gap first — where you're furthest behind; each click steps to the next-biggest, then wraps around." },
+  ];
+  const RIVAL_COUNT_OPTIONS = [
+    { value: false, label: "Rival's quotes", hint: "Counts every quote the rival has typed, and the “⚔ Next vs …” button can send you to any of them — including quotes you haven't raced yet, so you can chase all their scores." },
+    { value: true,  label: "Shared only",    hint: "Counts only quotes you've both raced, and “⚔ Next vs …” stays on those — a strict head-to-head on common ground." },
+  ];
 
   function renderRivalTab(contentEl, draft) {
-    const current = draft.rivalSettings.nextUsesVsLink;
+    const curScope = RIVAL_SCOPE_VALUES.includes(draft.rivalSettings.scope) ? draft.rivalSettings.scope : "all";
+    const curSort  = RIVAL_NEXT_SORT_VALUES.includes(draft.rivalSettings.nextSort) ? draft.rivalSettings.nextSort : "random";
+    const curCount = !!draft.rivalSettings.requireBoth;
+    const current  = draft.rivalSettings.nextUsesVsLink;
     contentEl.innerHTML = `
-      <div class="gt-section-label">“⚔ Next vs …” button opens</div>
+      <div class="gt-section-label">Track which of the rival's quotes</div>
+      <div class="gt-mode-selector" id="gt-rival-scope-selector">
+        ${RIVAL_SCOPE_OPTIONS.map(o =>
+          `<button class="gt-mode-btn${o.value === curScope ? " active" : ""}" data-rival-scope="${o.value}">${o.label}</button>`
+        ).join("")}
+      </div>
+      <div class="gt-mode-hint" id="gt-rival-scope-hint" style="display:block;">${
+        RIVAL_SCOPE_OPTIONS.find(o => o.value === curScope)?.hint ?? ""
+      }</div>
+      <div class="gt-mode-hint" style="display:block; margin-top:8px; opacity:0.75;">Sets the wins total and the “⚔ Next vs …” pool for every rival goal.</div>
+
+      <div class="gt-section-label" style="margin-top:16px;">Quotes to beat</div>
+      <div class="gt-mode-selector" id="gt-rival-count-selector">
+        ${RIVAL_COUNT_OPTIONS.map(o =>
+          `<button class="gt-mode-btn${o.value === curCount ? " active" : ""}" data-rival-count="${o.value}">${o.label}</button>`
+        ).join("")}
+      </div>
+      <div class="gt-mode-hint" id="gt-rival-count-hint" style="display:block;">${
+        RIVAL_COUNT_OPTIONS.find(o => o.value === curCount)?.hint ?? ""
+      }</div>
+      <div class="gt-mode-hint" style="display:block; margin-top:8px; opacity:0.75;">Sets the wins total and which quotes “⚔ Next vs …” can send you to.</div>
+
+      <div class="gt-section-label" style="margin-top:16px;">“⚔ Next vs …” button picks</div>
+      <div class="gt-mode-selector" id="gt-rival-nextsort-selector">
+        ${RIVAL_NEXT_SORT_OPTIONS.map(o =>
+          `<button class="gt-mode-btn${o.value === curSort ? " active" : ""}" data-next-sort="${o.value}">${o.label}</button>`
+        ).join("")}
+      </div>
+      <div class="gt-mode-hint" id="gt-rival-nextsort-hint" style="display:block;">${
+        RIVAL_NEXT_SORT_OPTIONS.find(o => o.value === curSort)?.hint ?? ""
+      }</div>
+      <div class="gt-mode-hint" style="display:block; margin-top:8px; opacity:0.75;">Gap is measured on each goal's own metric (WPM or PP).</div>
+
+      <div class="gt-section-label" style="margin-top:16px;">“⚔ Next vs …” button opens</div>
       <div class="gt-mode-selector" id="gt-rival-nextlink-selector">
         ${RIVAL_NEXT_LINK_OPTIONS.map(o =>
           `<button class="gt-mode-btn${o.value === current ? " active" : ""}" data-next-vs="${o.value}">${o.label}</button>`
@@ -1705,6 +1762,39 @@ function gtMain() {
       }</div>
       <div class="gt-mode-hint" style="display:block; margin-top:8px; opacity:0.75;">Applies to the “⚔ Next vs …” button on every rival goal.</div>
     `;
+
+    const scopeHintEl = contentEl.querySelector("#gt-rival-scope-hint");
+    contentEl.querySelectorAll("[data-rival-scope]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const val = btn.dataset.rivalScope;
+        draft.rivalSettings.scope = val;
+        contentEl.querySelectorAll("[data-rival-scope]").forEach(b => b.classList.toggle("active", b === btn));
+        if (scopeHintEl) scopeHintEl.textContent = RIVAL_SCOPE_OPTIONS.find(o => o.value === val)?.hint ?? "";
+        applySettingsDraft();
+      });
+    });
+
+    const countHintEl = contentEl.querySelector("#gt-rival-count-hint");
+    contentEl.querySelectorAll("[data-rival-count]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const val = btn.dataset.rivalCount === "true";
+        draft.rivalSettings.requireBoth = val;
+        contentEl.querySelectorAll("[data-rival-count]").forEach(b => b.classList.toggle("active", b === btn));
+        if (countHintEl) countHintEl.textContent = RIVAL_COUNT_OPTIONS.find(o => o.value === val)?.hint ?? "";
+        applySettingsDraft();
+      });
+    });
+
+    const sortHintEl = contentEl.querySelector("#gt-rival-nextsort-hint");
+    contentEl.querySelectorAll("[data-next-sort]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const val = btn.dataset.nextSort;
+        draft.rivalSettings.nextSort = val;
+        contentEl.querySelectorAll("[data-next-sort]").forEach(b => b.classList.toggle("active", b === btn));
+        if (sortHintEl) sortHintEl.textContent = RIVAL_NEXT_SORT_OPTIONS.find(o => o.value === val)?.hint ?? "";
+        applySettingsDraft();
+      });
+    });
 
     const hintEl = contentEl.querySelector("#gt-rival-nextlink-hint");
     contentEl.querySelectorAll("[data-next-vs]").forEach(btn => {
@@ -1719,10 +1809,26 @@ function gtMain() {
   }
 
   function commitRivalTab(draft) {
-    if (draft.rivalSettings.nextUsesVsLink === rivalSettings.nextUsesVsLink) return; // no change
+    const linkChanged  = draft.rivalSettings.nextUsesVsLink !== rivalSettings.nextUsesVsLink;
+    const scopeChanged = draft.rivalSettings.scope        !== rivalSettings.scope;
+    const sortChanged  = draft.rivalSettings.nextSort     !== rivalSettings.nextSort;
+    const countChanged = draft.rivalSettings.requireBoth  !== rivalSettings.requireBoth;
+    if (!linkChanged && !scopeChanged && !sortChanged && !countChanged) return; // no change
     rivalSettings = { ...draft.rivalSettings };
     saveRivalSettings();
-    // No re-render: the setting is read live at click time in onRivalNextClicked.
+    if (scopeChanged) {
+      // Scope drives the standings (wins/total) and the Next-vs pool, and may
+      // newly require the unranked stream — re-render and (leader) reconcile.
+      renderAllGoals();
+      if (isLeader) ensureRivalSync();
+    } else if (countChanged) {
+      // requireBoth only changes the wins denominator — re-render the cards
+      // (no refetch, no new stream).
+      renderAllGoals();
+    }
+    // nextUsesVsLink and nextSort are both read live at click time in
+    // onRivalNextClicked, so they need no re-render. (Switching nextSort starts
+    // a fresh cursor cycle automatically — see the sort-mismatch reset there.)
   }
 
   // ── Backup tab (import / export) ──────────────────────────────
@@ -1823,6 +1929,9 @@ function gtMain() {
     // Rebuild
     renderGroupWidgets();
     renderAllGoals();
+    // An imported scope may newly require the unranked stream; the leader
+    // reconciles now rather than waiting for the next poll tick.
+    if (isLeader) ensureRivalSync();
   }
 
   // Export by writing to the system clipboard. writeText() requires a
@@ -2159,7 +2268,16 @@ function gtMain() {
   const RIVAL_SETTINGS_KEY = "gt-rival-settings";
   // nextUsesVsLink: when true, the "⚔ Next vs …" button navigates to
   // typegg.io/solo/<quote>/vs/<rival> instead of typegg.io/solo/<quote>.
-  const DEFAULT_RIVAL_SETTINGS = { nextUsesVsLink: false };
+  // scope: which of the rival's quotes count toward every rival goal —
+  // "all" (ranked + unranked), "ranked", or "unranked".
+  // nextSort: order the "⚔ Next vs …" button steps through the pool —
+  // "random", "closest" (smallest gap first), or "biggest" (largest first).
+  // requireBoth: when true, the wins total only counts quotes you've *both*
+  // raced (a head-to-head on shared quotes); when false it counts every quote
+  // the rival has typed (quotes you haven't raced count as a loss).
+  const RIVAL_SCOPE_VALUES = ["all", "ranked", "unranked"];
+  const RIVAL_NEXT_SORT_VALUES = ["random", "closest", "biggest"];
+  const DEFAULT_RIVAL_SETTINGS = { nextUsesVsLink: false, scope: "all", nextSort: "random", requireBoth: false };
 
   function loadRivalSettings() {
     try {
@@ -2169,6 +2287,15 @@ function gtMain() {
         nextUsesVsLink: typeof saved.nextUsesVsLink === "boolean"
           ? saved.nextUsesVsLink
           : DEFAULT_RIVAL_SETTINGS.nextUsesVsLink,
+        scope: RIVAL_SCOPE_VALUES.includes(saved.scope)
+          ? saved.scope
+          : DEFAULT_RIVAL_SETTINGS.scope,
+        nextSort: RIVAL_NEXT_SORT_VALUES.includes(saved.nextSort)
+          ? saved.nextSort
+          : DEFAULT_RIVAL_SETTINGS.nextSort,
+        requireBoth: typeof saved.requireBoth === "boolean"
+          ? saved.requireBoth
+          : DEFAULT_RIVAL_SETTINGS.requireBoth,
       };
     } catch {
       return { ...DEFAULT_RIVAL_SETTINGS };
@@ -2723,10 +2850,16 @@ async function getExpRankByUsername(username) {
   // Rival-mode controls (type=rival).
   const rivalMetricRow  = document.getElementById("gt-rival-metric-row");
   const rivalMetricBtns = document.querySelectorAll(".gt-rival-metric-group .gt-mode-btn");
+  const rivalScopeBtns  = document.querySelectorAll(".gt-rival-scope-group .gt-mode-btn");
+  const rivalScopeHintEl = document.getElementById("gt-rival-scope-modal-hint");
   // selectedRivalMetric ∈ {"wpm","pp"} — which stat is compared (default wpm).
+  // selectedRivalScope ∈ {"all","ranked","unranked"} — which of the rival's
+  // quotes count. It's a global preference (mirrored in Settings → Rival), so
+  // the modal seeds it from the current setting and writes it back on add.
   // rivalFetchedName: the validated rival username (null until a valid user is
   // confirmed via the username input). rivalDebounce: input debounce timer.
   let selectedRivalMetric = "wpm";
+  let selectedRivalScope  = "all";
   let rivalFetchedName    = null;
   let rivalDebounce       = null;
 
@@ -3543,6 +3676,13 @@ async function getExpRankByUsername(username) {
     // race-only rows. The rival username is entered in the reused Amount-row
     // input (set up by renderPresets).
     rivalMetricRow.style.display = isRival ? "block" : "none";
+    if (isRival) {
+      // Seed the scope buttons from the current global preference.
+      selectedRivalScope = rivalScope();
+      rivalScopeBtns.forEach(b => b.classList.toggle("active", b.dataset.rivalScope === selectedRivalScope));
+      if (rivalScopeHintEl) rivalScopeHintEl.textContent =
+        RIVAL_SCOPE_OPTIONS.find(o => o.value === selectedRivalScope)?.hint ?? "";
+    }
 
     // Show filter row only for races
     filterRow.style.display = (selectedType === "races") ? "block" : "none";
@@ -3621,6 +3761,16 @@ async function getExpRankByUsername(username) {
     rivalMetricBtns.forEach(b => b.classList.remove("active")); btn.classList.add("active");
     selectedRivalMetric = btn.dataset.rivalMetric;
     validateConfirm();
+  }));
+
+  // Rival scope (all / ranked / unranked): which of the rival's quotes count.
+  // Seeded from the global setting when the rival type is shown; applied back
+  // to the global setting when the goal is added.
+  rivalScopeBtns.forEach(btn => btn.addEventListener("click", () => {
+    rivalScopeBtns.forEach(b => b.classList.remove("active")); btn.classList.add("active");
+    selectedRivalScope = btn.dataset.rivalScope;
+    if (rivalScopeHintEl) rivalScopeHintEl.textContent =
+      RIVAL_SCOPE_OPTIONS.find(o => o.value === selectedRivalScope)?.hint ?? "";
   }));
 
   // ── Requirements inputs / strict toggle ─────────────────────────
@@ -3880,9 +4030,13 @@ async function getExpRankByUsername(username) {
     selectedType = "exp"; selectedRec = "none"; selectedMode = "gain"; selectedFilter = "all";
     rankFetchedPp = null; rankFetchedRank = null; nextRankMode = false;
     maxQuotesMode = false; maxQuotesKind = null; maxQuotesFetched = null; maxQuotesBaseline = null;
-    // Rival defaults: metric=wpm, no resolved username yet.
+    // Rival defaults: metric=wpm, scope from the global setting, no resolved username yet.
     selectedRivalMetric = "wpm"; rivalFetchedName = null; clearTimeout(rivalDebounce);
     rivalMetricBtns.forEach(b => b.classList.toggle("active", b.dataset.rivalMetric === "wpm"));
+    selectedRivalScope = rivalScope();
+    rivalScopeBtns.forEach(b => b.classList.toggle("active", b.dataset.rivalScope === selectedRivalScope));
+    if (rivalScopeHintEl) rivalScopeHintEl.textContent =
+      RIVAL_SCOPE_OPTIONS.find(o => o.value === selectedRivalScope)?.hint ?? "";
     rivalMetricRow.style.display = "none";
     resetRequirementsUI();
     resetAverageUI();
@@ -4074,6 +4228,13 @@ async function getExpRankByUsername(username) {
     // comparison machinery (further down) does the rest.
     if (selectedType === "rival") {
       if (rivalFetchedName == null) return;
+      // Scope is a shared/global preference (also in Settings → Rival). Apply
+      // the modal's choice now; saveRivalSettings broadcasts to other tabs and
+      // the ensureRivalSync below will start the unranked stream if needed.
+      if (RIVAL_SCOPE_VALUES.includes(selectedRivalScope) && selectedRivalScope !== rivalSettings.scope) {
+        rivalSettings = { ...rivalSettings, scope: selectedRivalScope };
+        saveRivalSettings();
+      }
       const goalId = generateGoalId("rival");
       const newGoal = {
         id: goalId,
@@ -5756,8 +5917,18 @@ async function getExpRankByUsername(username) {
   let rivalStoreEpoch = 0;
   const rivalStandingsCache = new Map(); // goalId → { epoch, metric, result }
 
+  // Each store now has TWO fetch streams: `fetch` builds the RANKED quotes and
+  // `fetchU` builds the UNRANKED ones (the API's /users/<name>/quotes endpoint
+  // takes a `status=ranked|unranked|any` filter; its default is ranked, which
+  // is what the single original stream fetched). The unranked stream only runs
+  // when the active scope needs it (see rivalNeedsUnranked). Its phase is
+  // "none" until first started. Quote entries carry an `r` flag (true=ranked,
+  // false=unranked) so standings can be filtered per scope without refetching;
+  // a missing `r` is treated as ranked (legacy stores were ranked-only).
+  function freshRivalFetch()  { return { phase: "bulk", nextPage: 1, totalPages: null }; }
+  function freshRivalFetchU() { return { phase: "none", nextPage: 1, totalPages: null }; }
   function freshRivalStore() {
-    return { quotes: {}, fetch: { phase: "bulk", nextPage: 1, totalPages: null } };
+    return { quotes: {}, fetch: freshRivalFetch(), fetchU: freshRivalFetchU() };
   }
   function loadRivalStore(name) {
     const key = rivalStoreKey(name);
@@ -5767,7 +5938,8 @@ async function getExpRankByUsername(username) {
     if (!store || typeof store !== "object" || typeof store.quotes !== "object") {
       store = freshRivalStore();
     }
-    if (!store.fetch) store.fetch = { phase: "bulk", nextPage: 1, totalPages: null };
+    if (!store.fetch)  store.fetch  = freshRivalFetch();
+    if (!store.fetchU) store.fetchU = freshRivalFetchU();
     rivalStores.set(key, store);
     return store;
   }
@@ -5787,25 +5959,73 @@ async function getExpRankByUsername(username) {
     try {
       const parsed = JSON.parse(localStorage.getItem(key) || "null");
       if (parsed && typeof parsed.quotes === "object") {
-        if (!parsed.fetch) parsed.fetch = { phase: "bulk", nextPage: 1, totalPages: null };
+        if (!parsed.fetch)  parsed.fetch  = freshRivalFetch();
+        if (!parsed.fetchU) parsed.fetchU = freshRivalFetchU();
         rivalStores.set(key, parsed);
         rivalStoreEpoch++; // invalidate standings cache
       }
     } catch {}
   }
+  // ── Scope (all / ranked / unranked) ──────────────────────────
+  // A single global preference (Settings → Rival, also surfaced in the add-goal
+  // modal) decides which of the rival's quotes count toward every rival goal.
+  function rivalScope() {
+    const s = rivalSettings.scope;
+    return (s === "ranked" || s === "unranked" || s === "all") ? s : "all";
+  }
+  // Whether a rival quote falls inside the active scope. A missing `r` flag is
+  // legacy data, which was ranked-only, so it counts as ranked.
+  function rivalQuoteInScope(entry, scope) {
+    if (scope === "ranked")   return entry.r !== false;
+    if (scope === "unranked") return entry.r === false;
+    return true; // all
+  }
+  // The unranked stream is only fetched when some scope needs it. Scope is
+  // global, so this is all-or-nothing across every managed store (self + each
+  // rival) — mirrors the quotes-goal `quotesNeedUnrankedData()` gate so a
+  // ranked-only setup never pays for the extra stream.
+  function rivalNeedsUnranked() {
+    if (rivalScope() === "ranked") return false;
+    return (goalData.rival || []).length > 0;
+  }
+  function rivalRankedDone(store)   { return !!(store && store.fetch  && store.fetch.phase  === "done"); }
+  function rivalUnrankedDone(store) { return !!(store && store.fetchU && store.fetchU.phase === "done"); }
+  // How many stored quotes belong to one stream's bucket (ranked = r !== false,
+  // unranked = r === false; a missing `r` counts as ranked). Compared against
+  // the rival's API count to detect a drifted store in the incremental refresh.
+  function rivalStoreBucketCount(store, unranked) {
+    const q = store.quotes; let n = 0;
+    for (const id in q) { const u = q[id].r === false; if (unranked ? u : !u) n++; }
+    return n;
+  }
+  // "Fully synced for the active scope": the ranked stream always, plus the
+  // unranked stream when the scope needs it. Drives the card's "syncing…" hint
+  // and the settled/loading logic.
   function rivalBulkDone(store) {
-    return !!(store && store.fetch && store.fetch.phase === "done");
+    if (!rivalRankedDone(store)) return false;
+    if (rivalNeedsUnranked() && !rivalUnrankedDone(store)) return false;
+    return true;
   }
 
-  // PP-keyed idempotent merge. Returns true iff the store changed.
-  function rivalMergeEntry(store, quoteId, wpm, pp) {
+  // PP-keyed idempotent merge. Returns true iff the store changed. `ranked`
+  // (optional boolean) tags the quote's ranking bucket; it's applied even when
+  // the PP didn't improve, so a quote first seen untagged (on-demand fill) or
+  // mis-tagged is corrected the moment its authoritative stream delivers it.
+  function rivalMergeEntry(store, quoteId, wpm, pp, ranked) {
     if (!quoteId) return false;
     const p = Number(pp);
     if (!Number.isFinite(p)) return false;
     const w = Number(wpm);
     const cur = store.quotes[quoteId];
-    if (cur && !(p > cur.pp + RIVAL_PP_EPS)) return false; // unchanged or regression
-    store.quotes[quoteId] = { wpm: Number.isFinite(w) ? w : (cur ? cur.wpm : 0), pp: p };
+    if (cur && !(p > cur.pp + RIVAL_PP_EPS)) {
+      // No PP improvement — but we may still need to record/fix the ranked tag.
+      if (typeof ranked === "boolean" && cur.r !== ranked) { cur.r = ranked; return true; }
+      return false;
+    }
+    const entry = { wpm: Number.isFinite(w) ? w : (cur ? cur.wpm : 0), pp: p };
+    if (typeof ranked === "boolean") entry.r = ranked;
+    else if (cur && typeof cur.r === "boolean") entry.r = cur.r; // preserve known tag
+    store.quotes[quoteId] = entry;
     return true;
   }
   function entryFromQuoteRecord(q) {
@@ -5815,14 +6035,23 @@ async function getExpRankByUsername(username) {
   }
 
   // ── Fetching ────────────────────────────────────────────────
-  async function fetchRivalQuotesPage(fetchName, { page, reverse, perPage = RIVAL_PAGE_SIZE }) {
+  async function fetchRivalQuotesPage(fetchName, { page, reverse, perPage = RIVAL_PAGE_SIZE, status }) {
     const params = new URLSearchParams({ page: String(page), perPage: String(perPage) });
     if (reverse) params.set("reverse", "true");
+    if (status)  params.set("status", status); // ranked | unranked (omitted → API default = ranked)
     const url = `https://api.typegg.io/v1/users/${encodeURIComponent(fetchName)}/quotes?${params.toString()}`;
     const r = await gtApiFetch(url, { headers: authHeaders() });
     if (!r.ok) throw new Error(`rival quotes ${fetchName} p${page} → ${r.status}`);
     const d = await r.json();
-    return { quotes: Array.isArray(d?.quotes) ? d.quotes : [], totalPages: d?.totalPages || 1 };
+    // `total` (exact quote count for this status) is surfaced when the API
+    // provides it under any of the common field names; the incremental refresh
+    // uses it to detect a drifted count. When absent it's null, and callers
+    // fall back to the perPage=1 trick (totalPages === count at one-per-page).
+    const total = (typeof d?.total === "number") ? d.total
+                : (typeof d?.totalQuotes === "number") ? d.totalQuotes
+                : (typeof d?.count === "number") ? d.count
+                : null;
+    return { quotes: Array.isArray(d?.quotes) ? d.quotes : [], totalPages: d?.totalPages || 1, total };
   }
 
   // The single-quote best for any user, used for on-demand current-quote
@@ -5854,9 +6083,12 @@ async function getExpRankByUsername(username) {
     return rivalManaged.get(name) || name;
   }
 
-  // Bulk build (resumable, oldest-first). Loops every page in one invocation;
-  // persists the cursor + re-renders after each page so progress is visible.
-  async function rivalBulkSync(name) {
+  // Bulk build of ONE stream (resumable, oldest-first). `stream` is "ranked"
+  // (the `fetch` cursor, status=ranked) or "unranked" (the `fetchU` cursor,
+  // status=unranked). Loops every page in one invocation; persists the cursor
+  // + re-renders after each page so progress is visible. Entries are tagged
+  // with their ranked bucket as they merge.
+  async function rivalBulkSync(name, stream) {
     if (!isLeader) return;
     if (!anyTabVisibleRecently()) return; // poll timer retries when visible
     if (apiThrottled()) return;           // shared backoff in effect
@@ -5866,11 +6098,22 @@ async function getExpRankByUsername(username) {
     const fetchName = rivalFetchNameFor(name);
     if (!fetchName) return; // auth not ready yet
     const store = loadRivalStore(name);
-    if (rivalBulkDone(store)) return;
+
+    const unranked  = stream === "unranked";
+    const fobj      = unranked ? store.fetchU : store.fetch;
+    const status    = unranked ? "unranked" : "ranked";
+    const rankedTag = !unranked;
+    if (fobj.phase === "done") return;
+    if (unranked) {
+      if (!rivalNeedsUnranked()) return;   // scope doesn't need it → don't fetch
+      if (!rivalRankedDone(store)) return; // ranked stream builds first
+      if (fobj.phase === "none") { fobj.phase = "bulk"; fobj.nextPage = 1; }
+    }
+
     rivalSyncInFlight.add(key);
     rivalBulkActive = true;
     try {
-      let page = store.fetch.nextPage || 1;
+      let page = fobj.nextPage || 1;
       // Saving the whole store + re-rendering after EVERY page is O(store
       // size) per page → roughly O(n²) over a large bulk, which janks the
       // main thread and starves the quote-finish path. Throttle both to at
@@ -5896,7 +6139,7 @@ async function getExpRankByUsername(username) {
         }
         firstPage = false;
         let res;
-        try { res = await fetchRivalQuotesPage(fetchName, { page, reverse: true }); }
+        try { res = await fetchRivalQuotesPage(fetchName, { page, reverse: true, status }); }
         catch (e) {
           // gtApiFetch has already escalated the shared backoff; just stop and
           // let the poll resume after it clears (cursor is persisted below).
@@ -5906,18 +6149,18 @@ async function getExpRankByUsername(username) {
         }
         for (const q of res.quotes) {
           const e = entryFromQuoteRecord(q);
-          if (e) rivalMergeEntry(store, e.quoteId, e.wpm, e.pp);
+          if (e) rivalMergeEntry(store, e.quoteId, e.wpm, e.pp, rankedTag);
         }
-        store.fetch.totalPages = res.totalPages;
+        fobj.totalPages = res.totalPages;
         if (page >= res.totalPages) {
-          store.fetch.phase = "done";
-          store.fetch.nextPage = res.totalPages + 1;
+          fobj.phase = "done";
+          fobj.nextPage = res.totalPages + 1;
           flush(true);
           return;
         }
         page += 1;
-        store.fetch.nextPage = page; // advance cursor in memory
-        flush(false);               // throttled persist + render
+        fobj.nextPage = page; // advance cursor in memory
+        flush(false);         // throttled persist + render
       }
       // Loop exited (lost leadership / tab hidden) — persist progress so we
       // resume from here rather than redoing the whole burst.
@@ -5925,19 +6168,114 @@ async function getExpRankByUsername(username) {
     } finally {
       rivalSyncInFlight.delete(key);
       rivalBulkActive = false;
-      // Chain the next store that still needs a bulk build, so self + rivals
-      // build one-after-another instead of all at once (and without waiting
-      // for the next 60s poll). Skipped while paused/hidden/non-leader.
+      // Chain the next unsynced work, one-after-another (never concurrently),
+      // without waiting for the next 60s poll. Finish this store's remaining
+      // stream first (ranked → unranked), then move to other stores. Skipped
+      // while paused/hidden/non-leader.
       if (isLeader && anyTabVisibleRecently() && !apiThrottled()) {
-        for (const other of rivalManaged.keys()) {
-          if (other === name) continue;
-          if (!rivalBulkDone(loadRivalStore(other))) { rivalSyncTick(other); break; }
+        let chained = false;
+        if (!unranked && rivalNeedsUnranked() && !rivalUnrankedDone(store)) {
+          rivalSyncTick(name); chained = true; // same store, unranked stream next
+        }
+        if (!chained) {
+          for (const other of rivalManaged.keys()) {
+            if (other === name) continue;
+            if (!rivalBulkDone(loadRivalStore(other))) { rivalSyncTick(other); break; }
+          }
         }
       }
     }
   }
 
-  // Ongoing refresh (default sort, front, early-stop).
+  // Ongoing refresh of ONE stream. Runs every RIVAL_POLL_MS.
+  //
+  // The old version read page 1 (recent-sorted) and stopped at the first quote
+  // it already had, assuming everything past it was older/known. That leaks
+  // quotes two ways: (a) quotes the rival typed while we weren't syncing
+  // (browser closed, not the leader, throttled) sit behind newer activity we
+  // never paged to, and (b) a quote we already hold can be bumped to the front
+  // by a re-race or a sub-epsilon PB, so a genuinely new quote right behind it
+  // is never reached → a small, *permanent* gap (the classic "rival has N, card
+  // shows N-4").
+  //
+  // So instead of trusting the early-stop, we make the refresh count-aware:
+  // learn how many quotes the rival actually has for this status and keep
+  // paging the recent list until our stored count matches. Counts agreeing is
+  // the cheap common case (one tiny request); we only scan deeper when behind.
+  async function rivalIncrementalStream(name, stream) {
+    const fetchName = rivalFetchNameFor(name);
+    if (!fetchName) return false;
+    const store     = loadRivalStore(name);
+    const unranked  = stream === "unranked";
+    const status    = unranked ? "unranked" : "ranked";
+    const rankedTag = !unranked;
+    let changed = false;
+
+    // (1) Authoritative count for this status. `perPage=1` makes totalPages ===
+    // the number of quotes, so this one tiny request says exactly how many the
+    // rival has (the API's `total`, if it exposes one, is used in preference).
+    // We also merge the single most-recent record it returns (a free PB catch),
+    // and remember whether the very front changed.
+    let apiCount = null, frontChanged = false;
+    try {
+      const head = await fetchRivalQuotesPage(fetchName, { page: 1, perPage: 1, reverse: false, status });
+      apiCount = (typeof head.total === "number") ? head.total : head.totalPages;
+      for (const q of head.quotes) {
+        const e = entryFromQuoteRecord(q);
+        if (e && rivalMergeEntry(store, e.quoteId, e.wpm, e.pp, rankedTag)) { changed = true; frontChanged = true; }
+      }
+    } catch (e) {
+      console.warn("[Goal Tracker] rival count probe failed (paused):", e);
+      return changed; // gtApiFetch already escalated the shared backoff
+    }
+
+    const behind = apiCount != null && rivalStoreBucketCount(store, unranked) < apiCount;
+
+    // Counts agree and the most-recent quote is unchanged → nothing new at the
+    // front and nothing missing. Skip the page fetch entirely (steady state is
+    // just the one tiny probe above).
+    if (!behind && !frontChanged) return changed;
+
+    // (2) Page the recent-sorted list.
+    //  - BEHIND: scan without early-stopping until the stored count catches up
+    //    to apiCount (the missing quotes may hide behind already-known ones),
+    //    bounded by totalPages and the usual leader/visible/throttle gates.
+    //  - NOT behind (just front activity): one page with the safe early-stop —
+    //    only PBs can have changed and they cluster at the very front.
+    let page = 1;
+    pages: while (isLeader && anyTabVisibleRecently() && !apiThrottled()) {
+      if (page > 1) await new Promise(r => setTimeout(r, RIVAL_PAGE_DELAY_MS));
+      let res;
+      try { res = await fetchRivalQuotesPage(fetchName, { page, reverse: false, perPage: RIVAL_REFRESH_PAGE_SIZE, status }); }
+      catch (e) { console.warn("[Goal Tracker] rival refresh failed (paused):", e); break; }
+      for (const q of res.quotes) {
+        const e = entryFromQuoteRecord(q);
+        if (!e) continue;
+        const cur = store.quotes[e.quoteId];
+        const improved = !cur || e.pp > cur.pp + RIVAL_PP_EPS;
+        // Front-refresh (not behind): stop at the first quote we already hold —
+        // only PBs matter and they're at the very front. Catch-up (behind): keep
+        // going and merge *every* quote. The merge is idempotent on value but
+        // also (re)applies the ranked `r` tag, so a mis-tagged entry can't keep
+        // the bucket count permanently short (which would re-scan every tick).
+        if (!improved && !behind) break pages;
+        if (rivalMergeEntry(store, e.quoteId, e.wpm, e.pp, rankedTag)) changed = true;
+      }
+      if (page >= res.totalPages) {
+        if (behind && rivalStoreBucketCount(store, unranked) < apiCount) {
+          // Scanned every page and still short — apiCount is likely stale/odd.
+          // Stop for this tick rather than loop; the next tick re-probes.
+          console.warn("[Goal Tracker] rival refresh: count still short after full scan", { name, stream, apiCount });
+        }
+        break;
+      }
+      if (!behind) break;                                                       // front-refresh: one page is enough
+      if (rivalStoreBucketCount(store, unranked) >= apiCount) break;            // caught up
+      page += 1;
+    }
+    return changed;
+  }
+
   async function rivalIncrementalSync(name) {
     if (!isLeader) return;
     if (!anyTabVisibleRecently()) return;
@@ -5947,25 +6285,13 @@ async function getExpRankByUsername(username) {
     const fetchName = rivalFetchNameFor(name);
     if (!fetchName) return;
     const store = loadRivalStore(name);
-    if (!rivalBulkDone(store)) return; // still building
+    if (!rivalBulkDone(store)) return; // still building (for the active scope)
     rivalSyncInFlight.add(key);
     try {
-      let page = 1, changed = false;
-      pages: while (isLeader) {
-        let res;
-        try { res = await fetchRivalQuotesPage(fetchName, { page, reverse: false, perPage: RIVAL_REFRESH_PAGE_SIZE }); }
-        catch (e) { console.warn("[Goal Tracker] rival refresh failed (paused):", e); break; }
-        for (const q of res.quotes) {
-          const e = entryFromQuoteRecord(q);
-          if (!e) continue;
-          const cur = store.quotes[e.quoteId];
-          const isNew = !cur || e.pp > cur.pp + RIVAL_PP_EPS;
-          if (!isNew) break pages; // first already-known PB → rest are older
-          rivalMergeEntry(store, e.quoteId, e.wpm, e.pp);
-          changed = true;
-        }
-        if (page >= res.totalPages) break;
-        page += 1; // whole page was new (essentially never for a human)
+      let changed = false;
+      if (await rivalIncrementalStream(name, "ranked")) changed = true;
+      if (rivalNeedsUnranked() && rivalUnrankedDone(store) && !apiThrottled()) {
+        if (await rivalIncrementalStream(name, "unranked")) changed = true;
       }
       if (changed) { saveRivalStore(name); renderAllGoals(); }
     } finally {
@@ -5973,12 +6299,14 @@ async function getExpRankByUsername(username) {
     }
   }
 
-  // Drive one store: resume bulk if unfinished, else do an incremental pass.
+  // Drive one store: build ranked first, then unranked (if the scope needs it),
+  // else do an incremental refresh pass.
   function rivalSyncTick(name) {
     if (apiThrottled()) return; // backing off after recent fetch failures
     const store = loadRivalStore(name);
-    if (rivalBulkDone(store)) rivalIncrementalSync(name);
-    else rivalBulkSync(name);
+    if (!rivalRankedDone(store)) { rivalBulkSync(name, "ranked"); return; }
+    if (rivalNeedsUnranked() && !rivalUnrankedDone(store)) { rivalBulkSync(name, "unranked"); return; }
+    rivalIncrementalSync(name);
   }
 
   function startRivalManaged(name, fetchName) {
@@ -6124,34 +6452,50 @@ async function getExpRankByUsername(username) {
   // whole store (potentially thousands of quotes) every time.
   function computeRivalStandings(gd) {
     const metric = gd.metric || "wpm";
+    const scope  = rivalScope();
+    const requireBoth = !!rivalSettings.requireBoth; // count only quotes you've both raced
+    const selfStore  = loadRivalStore(RIVAL_SELF_NAME);
+    const selfDone   = rivalBulkDone(selfStore);     // your history fully synced?
     const cached = rivalStandingsCache.get(gd.id);
-    if (cached && cached.epoch === rivalStoreEpoch && cached.metric === metric) {
+    if (cached && cached.epoch === rivalStoreEpoch && cached.metric === metric
+        && cached.scope === scope && cached.requireBoth === requireBoth && cached.selfDone === selfDone) {
       return cached.result;
     }
     const rivalStore = loadRivalStore(gd.rival);
-    const selfStore  = loadRivalStore(RIVAL_SELF_NAME);
     const rq = rivalStore.quotes;
     const sq = selfStore.quotes;
     let total = 0, wins = 0;
-    const worse = []; // quoteIds where you raced AND the rival currently beats you
+    const worse = []; // the "⚔ Next vs" pool: quotes the rival currently beats you on
     for (const qid in rq) {
-      total++;
-      const rv = rq[qid][metric];
+      const rentry = rq[qid];
+      if (!rivalQuoteInScope(rentry, scope)) continue; // only count in-scope quotes
       const se = sq[qid];
+      // "Shared only" mode: skip quotes you haven't raced, so the wins total
+      // reflects a head-to-head on common ground rather than counting every
+      // quote the rival has typed (where unraced ones would read as losses).
+      if (requireBoth && !se) continue;
+      total++;
+      const rv = rentry[metric];
       const sv = se ? se[metric] : 0;
-      if (sv > rv + RIVAL_PP_EPS) wins++;
-      // "worse" (the Next-vs button's pool) requires a RECORDED self time that
-      // is genuinely lower. Without this guard, any quote you haven't raced —
-      // or haven't synced yet (sv defaults to 0) — counts as a loss and gets
-      // added, so Next sends you to quotes you've actually already won. The
-      // button is meant for "a quote where you performed worse", which needs
-      // a result to compare. Wins/total are unaffected (a missing time is
-      // still not a win).
-      else if (se && sv < rv - RIVAL_PP_EPS) worse.push(qid);
-      // equal, unraced, or not-yet-synced → neither a win nor a Next target
+      if (sv > rv + RIVAL_PP_EPS) { wins++; continue; } // you already beat them here
+      // Not a win → candidate for the "⚔ Next vs" pool (a quote to go beat):
+      if (se) {
+        // You have a recorded time and you're behind (ties are neither a win
+        // nor a target — you've matched but not beaten them).
+        if (sv < rv - RIVAL_PP_EPS) worse.push(qid);
+      } else if (!requireBoth && selfDone) {
+        // Default ("Rival's quotes") mode: a quote you've NEVER raced is a valid
+        // target — you want to beat all the rival's scores, including new ones.
+        // Gated on selfDone: only once your own history is fully synced does a
+        // missing entry reliably mean "never raced" rather than "not synced
+        // yet" (which could be a quote you've actually already won). Before that
+        // these are held back so Next never sends you somewhere you've beaten.
+        worse.push(qid);
+      }
+      // unraced while not yet synced, or in shared-only mode → not a target
     }
-    const result = { total, wins, worse, rivalDone: rivalBulkDone(rivalStore), selfDone: rivalBulkDone(selfStore) };
-    rivalStandingsCache.set(gd.id, { epoch: rivalStoreEpoch, metric, result });
+    const result = { total, wins, worse, rivalDone: rivalBulkDone(rivalStore), selfDone };
+    rivalStandingsCache.set(gd.id, { epoch: rivalStoreEpoch, metric, scope, requireBoth, selfDone, result });
     return result;
   }
 
@@ -6258,19 +6602,27 @@ async function getExpRankByUsername(username) {
     }
 
     // ── Wins + Next button ──
-    const { total, wins, worse, rivalDone } = computeRivalStandings(gd);
+    const { total, wins, worse, rivalDone, selfDone } = computeRivalStandings(gd);
     const winsEl = document.getElementById(`${goalId}-rival-wins`);
     if (winsEl) {
+      const sc = rivalScope();
+      const tags = [];
+      if (sc !== "all") tags.push(sc);               // "ranked" / "unranked"
+      if (rivalSettings.requireBoth) tags.push("shared"); // both-raced denominator
+      const scopeTag = tags.length ? ` ${tags.join(", ")}` : "";
       winsEl.textContent = rivalDone
-        ? `Wins: ${wins} / ${total}`
-        : `Wins: ${wins} / ${total}  · syncing…`;
+        ? `Wins: ${wins} / ${total}${scopeTag}`
+        : `Wins: ${wins} / ${total}${scopeTag}  · syncing…`;
     }
     const nextBtn = document.getElementById(`${goalId}-rival-next`);
     if (nextBtn) {
       if (worse.length > 0) {
         nextBtn.disabled = false;
         nextBtn.textContent = `⚔ Next vs ${rivalName}`;
-      } else if (!rivalDone) {
+      } else if (!rivalDone || !selfDone) {
+        // Still building the pools — in default mode the unraced targets only
+        // appear once your own history is synced, so wait on selfDone too before
+        // claiming you're ahead on everything.
         nextBtn.disabled = true;
         nextBtn.textContent = "⚔ Finding quotes…";
       } else {
@@ -6280,16 +6632,86 @@ async function getExpRankByUsername(username) {
     }
   }
 
+  // Active Next-vs sort order (validated): "random" | "closest" | "biggest".
+  function rivalNextSort() {
+    const s = rivalSettings.nextSort;
+    return RIVAL_NEXT_SORT_VALUES.includes(s) ? s : "random";
+  }
+
+  // The Next-vs pool sorted by gap on the goal's OWN metric. Gap = rival value −
+  // your value (always > 0 for worse quotes). "closest" → smallest gap first,
+  // "biggest" → largest first. Returns an array of quoteIds. Recomputed every
+  // click off the live stores, so it tracks the rival's new quotes / PBs.
+  function rivalWorseSortedByGap(gd, sort) {
+    const metric = gd.metric || "wpm";
+    const { worse } = computeRivalStandings(gd);
+    const rq = loadRivalStore(gd.rival).quotes;
+    const sq = loadRivalStore(RIVAL_SELF_NAME).quotes;
+    const withGap = worse.map(qid => {
+      const rv = rq[qid] ? rq[qid][metric] : 0;
+      const sv = sq[qid] ? sq[qid][metric] : 0;
+      return { qid, gap: rv - sv };
+    });
+    withGap.sort((a, b) => sort === "biggest" ? b.gap - a.gap : a.gap - b.gap);
+    return withGap.map(x => x.qid);
+  }
+
+  // The sorted Next-vs modes walk the pool one quote per click, never repeating
+  // within a cycle and wrapping at the end. Because clicking the button does a
+  // full page navigation (which wipes in-memory state), the cursor is persisted
+  // to localStorage: per goal we store the sort it was built under plus the set
+  // of quoteIds already served this cycle. Switching the sort order (or finishing
+  // the cycle) starts fresh — exactly the "change away and back to get the
+  // smallest again" behaviour.
+  const RIVAL_NEXT_CURSOR_KEY = "gt-rival-next-cursor";
+  function loadRivalNextCursors() {
+    try { const o = JSON.parse(localStorage.getItem(RIVAL_NEXT_CURSOR_KEY) || "{}"); return (o && typeof o === "object") ? o : {}; }
+    catch { return {}; }
+  }
+  function saveRivalNextCursors(map) {
+    // Drop cursors for goals that no longer exist so the key can't grow forever.
+    const live = new Set((goalData.rival || []).map(g => g.id));
+    for (const id of Object.keys(map)) if (!live.has(id)) delete map[id];
+    try { localStorage.setItem(RIVAL_NEXT_CURSOR_KEY, JSON.stringify(map)); } catch {}
+  }
+
   function onRivalNextClicked(goalId) {
     const gd = (goalData.rival || []).find(g => g.id === goalId);
     if (!gd) return;
-    const { worse } = computeRivalStandings(gd);
-    if (worse.length === 0) return;
-    // Avoid navigating to the quote you're already on (no-op) when possible.
     const liveQid = getCurrentQuoteIdLive();
-    let pool = worse;
-    if (liveQid && worse.length > 1) pool = worse.filter(q => q !== liveQid);
-    const pick = pool[Math.floor(Math.random() * pool.length)];
+    const sort = rivalNextSort();
+
+    let pick;
+    if (sort === "random") {
+      // Unordered: a random quote where the rival beats you, avoiding the one
+      // you're already on when there's a choice.
+      const { worse } = computeRivalStandings(gd);
+      if (worse.length === 0) return;
+      let pool = worse;
+      if (liveQid && worse.length > 1) pool = worse.filter(q => q !== liveQid);
+      pick = pool[Math.floor(Math.random() * pool.length)];
+    } else {
+      // Sorted: step through the pool by gap, one quote per click.
+      const sorted = rivalWorseSortedByGap(gd, sort);
+      if (sorted.length === 0) return;
+      const cursors = loadRivalNextCursors();
+      let cur = cursors[goalId];
+      if (!cur || cur.sort !== sort || !Array.isArray(cur.served)) cur = { sort, served: [] };
+      const served = new Set(cur.served);
+      // You're effectively "on" the current quote — don't route back to it.
+      if (liveQid) served.add(liveQid);
+      pick = sorted.find(q => !served.has(q));
+      if (!pick) {                         // whole cycle served → wrap to the start
+        served.clear();
+        if (liveQid) served.add(liveQid);
+        pick = sorted.find(q => !served.has(q));
+      }
+      if (!pick) return;                   // only the current quote is in the pool
+      served.add(pick);
+      cursors[goalId] = { sort, served: [...served] };
+      saveRivalNextCursors(cursors);
+    }
+
     const base = `https://typegg.io/solo/${encodeURIComponent(pick)}`;
     // Global setting (Settings → Rival): optionally open the head-to-head
     // "/vs/<rival>" page instead of the quote on its own.
@@ -7237,7 +7659,11 @@ async function getExpRankByUsername(username) {
 
     if (msg.type === 'rival-settings-changed') {
       rivalSettings = loadRivalSettings();
-      return; // only affects the Next-vs link destination, read live on click
+      // Scope affects the standings shown on every rival card, so re-render;
+      // the leader also reconciles in case the unranked stream is now needed.
+      renderAllGoals();
+      if (isLeader) ensureRivalSync();
+      return;
     }
 
     if (msg.type === 'groups-changed') {
@@ -7317,7 +7743,9 @@ async function getExpRankByUsername(username) {
     // Rival settings change?
     if (e.key === RIVAL_SETTINGS_KEY) {
       rivalSettings = loadRivalSettings();
-      return; // only affects the Next-vs link destination, read live on click
+      renderAllGoals();
+      if (isLeader) ensureRivalSync();
+      return;
     }
 
     // Groups (widget layout) change?
