@@ -72,12 +72,14 @@ function gtMain() {
     return !document.hidden || (Date.now() - lastAnyVisibleTime < 15_000);
   }
   function runIfAnyTabVisible(fn) {
-    // Also pauses while the shared API backoff is active: during a throttle
-    // these background polls would only fail (logging a caught error each
-    // time) and prolong the throttle. They resume automatically once the
-    // backoff window passes. (gtApiFetch already prevents the request itself;
-    // this just avoids running the poll — and its error logging — at all.)
-    return () => { if (anyTabVisibleRecently() && !apiThrottled()) fn(); };
+    // Also pauses while the shared API backoff is active OR while logged out:
+    // during a throttle these background polls would only fail (logging a
+    // caught error each time) and prolong the throttle; logged out they'd 401.
+    // They resume automatically once the backoff passes / the user logs in.
+    // (gtApiFetch already prevents the request itself; this avoids running the
+    // poll — and its error logging — at all. Every leader background poller is
+    // wrapped in this, so it's the single gate for them.)
+    return () => { if (anyTabVisibleRecently() && !apiThrottled() && isLoggedIn()) fn(); };
   }
   function broadcastVisibilityPing() {
     if (!document.hidden) channel?.postMessage({ type: 'visible-ping' });
@@ -103,6 +105,10 @@ function gtMain() {
     const { token } = getAuth();
     return token ? { Authorization: `Bearer ${token}` } : {};
   }
+
+  // Logged in iff TypeGG's pocketbase_auth holds a token. The single source of
+  // truth for the logged-out gate (panel + fetch short-circuit). Read fresh.
+  function isLoggedIn() { return getAuth().token != null; }
 
   // ══════════════════════════════════════════════════════════════
   // Shared API throttle gate — wraps EVERY call to the TypeGG API.
@@ -141,8 +147,18 @@ function gtMain() {
     }
   }
   // Marker so callers can tell "we deliberately skipped" from a real failure.
-  const API_THROTTLED_ERR = "gt-api-throttled";
+  const API_THROTTLED_ERR  = "gt-api-throttled";
+  const API_LOGGED_OUT_ERR = "gt-api-logged-out";
   async function gtApiFetch(url, opts) {
+    if (!isLoggedIn()) {
+      // Logged out: make NO request (every TypeGG endpoint would 401, and the
+      // logged-out gate already short-circuits the pollers — this is the final
+      // backstop). Throw the same shape as the throttle skip so existing catch
+      // paths handle it; do NOT escalate the backoff (not a rate-limit signal).
+      const e = new Error(API_LOGGED_OUT_ERR);
+      e.gtLoggedOut = true;
+      throw e;
+    }
     if (apiThrottled()) {
       const e = new Error(API_THROTTLED_ERR);
       e.gtThrottled = true;
@@ -1134,6 +1150,7 @@ function gtMain() {
   // move goal sections around; that's driven by drag commits and goal
   // lifecycle events (create/remove). Safe to call any time; idempotent.
   function renderGroupWidgets() {
+    if (!isLoggedIn()) { applyLoginGate(); return; } // logged out → panel only, no detached widgets
     // Make sure every detached group has a widget
     for (const gid of Object.keys(groupData)) {
       if (gid === MAIN_GROUP_ID) {
@@ -1729,6 +1746,23 @@ function gtMain() {
       }</div>
       <div class="gt-mode-hint" style="display:block; margin-top:8px; opacity:0.75;">Sets the wins total and the “⚔ Next vs …” pool for every rival goal.</div>
 
+      <div class="gt-section-label" style="margin-top:16px;">Difficulty filter<span class="gt-range-readout" id="gt-rival-diff-readout"></span></div>
+      <div class="gt-range" id="gt-rival-diff-range">
+        <div class="gt-range-track"><div class="gt-range-fill"></div></div>
+        <input class="gt-range-input gt-range-lo" type="range" aria-label="Minimum difficulty" />
+        <input class="gt-range-input gt-range-hi" type="range" aria-label="Maximum difficulty" />
+      </div>
+      <div class="gt-range-ticks" id="gt-rival-diff-ticks"></div>
+
+      <div class="gt-section-label" style="margin-top:14px;">Quote length filter<span class="gt-range-readout" id="gt-rival-len-readout"></span></div>
+      <div class="gt-range" id="gt-rival-len-range">
+        <div class="gt-range-track"><div class="gt-range-fill"></div></div>
+        <input class="gt-range-input gt-range-lo" type="range" aria-label="Minimum length" />
+        <input class="gt-range-input gt-range-hi" type="range" aria-label="Maximum length" />
+      </div>
+      <div class="gt-range-ticks" id="gt-rival-len-ticks"></div>
+      <div class="gt-mode-hint" style="display:block; margin-top:8px; opacity:0.75;">Only the rival's quotes inside both ranges count toward the wins total and the Next-vs pool. Full range = no filter.</div>
+
       <div class="gt-section-label" style="margin-top:16px;">Quotes to beat</div>
       <div class="gt-mode-selector" id="gt-rival-count-selector">
         ${RIVAL_COUNT_OPTIONS.map(o =>
@@ -1806,6 +1840,73 @@ function gtMain() {
         applySettingsDraft();
       });
     });
+
+    // ── Difficulty / length range sliders ──────────────────────
+    // Two overlapping range inputs per axis form a dual-handle slider: live
+    // fill + readout while dragging, commit (save + re-render) on release.
+    const fmtDiff = (v) => (v >= RIVAL_DIFF_MAX ? `${RIVAL_DIFF_MAX}+` : String(v));
+    const fmtLen  = (v) => (v >= RIVAL_LEN_MAX  ? `${RIVAL_LEN_MAX}+`  : String(v));
+    const clampVal = (v, lo, hi, d) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
+    function setupRivalRange(rangeId, readoutId, ticksId, opts) {
+      const root = contentEl.querySelector(`#${rangeId}`);
+      if (!root) return;
+      const loIn = root.querySelector(".gt-range-lo");
+      const hiIn = root.querySelector(".gt-range-hi");
+      const fill = root.querySelector(".gt-range-fill");
+      const readout = contentEl.querySelector(`#${readoutId}`);
+      const ticksEl = contentEl.querySelector(`#${ticksId}`);
+      const { min, max, step, fmt, ticks, set } = opts;
+      const snap = (v) => Math.round(v / step) * step;
+      for (const inp of [loIn, hiIn]) { inp.min = min; inp.max = max; inp.step = step; }
+      loIn.value = snap(opts.lo); hiIn.value = snap(opts.hi);
+      if (ticksEl) ticksEl.innerHTML = ticks.map(t => `<span>${t}</span>`).join("");
+      const paint = () => {
+        const lv = +loIn.value, hv = +hiIn.value;
+        const lp = ((lv - min) / (max - min)) * 100;
+        const hp = ((hv - min) / (max - min)) * 100;
+        fill.style.left = lp + "%";
+        fill.style.width = Math.max(0, hp - lp) + "%";
+        if (readout) readout.textContent = `${fmt(lv)} - ${fmt(hv)}`;
+      };
+      const onInput = (which) => {
+        let lv = +loIn.value, hv = +hiIn.value;
+        if (which === "lo" && lv > hv) { lv = hv; loIn.value = lv; }
+        if (which === "hi" && hv < lv) { hv = lv; hiIn.value = hv; }
+        set(lv, hv);
+        paint();
+      };
+      loIn.addEventListener("input", () => onInput("lo"));
+      hiIn.addEventListener("input", () => onInput("hi"));
+      loIn.addEventListener("change", applySettingsDraft);
+      hiIn.addEventListener("change", applySettingsDraft);
+      // Raise whichever thumb is nearer the pointer so overlapping handles stay grabbable.
+      root.addEventListener("pointerdown", (e) => {
+        const rect = root.getBoundingClientRect();
+        if (!rect.width) return;
+        const x = e.clientX - rect.left;
+        const loX = ((+loIn.value - min) / (max - min)) * rect.width;
+        const hiX = ((+hiIn.value - min) / (max - min)) * rect.width;
+        const loCloser = Math.abs(x - loX) <= Math.abs(x - hiX);
+        loIn.style.zIndex = loCloser ? 5 : 4;
+        hiIn.style.zIndex = loCloser ? 4 : 5;
+      });
+      paint();
+    }
+    const diffTicks = [];
+    for (let dv = RIVAL_DIFF_MIN; dv <= RIVAL_DIFF_MAX; dv++) diffTicks.push(fmtDiff(dv));
+    setupRivalRange("gt-rival-diff-range", "gt-rival-diff-readout", "gt-rival-diff-ticks", {
+      min: RIVAL_DIFF_MIN, max: RIVAL_DIFF_MAX, step: 1, fmt: fmtDiff, ticks: diffTicks,
+      lo: clampVal(draft.rivalSettings.diffMin, RIVAL_DIFF_MIN, RIVAL_DIFF_MAX, RIVAL_DIFF_MIN),
+      hi: clampVal(draft.rivalSettings.diffMax, RIVAL_DIFF_MIN, RIVAL_DIFF_MAX, RIVAL_DIFF_MAX),
+      set: (lo, hi) => { draft.rivalSettings.diffMin = lo; draft.rivalSettings.diffMax = hi; },
+    });
+    setupRivalRange("gt-rival-len-range", "gt-rival-len-readout", "gt-rival-len-ticks", {
+      min: RIVAL_LEN_MIN, max: RIVAL_LEN_MAX, step: RIVAL_LEN_STEP, fmt: fmtLen,
+      ticks: [fmtLen(RIVAL_LEN_MIN), fmtLen(RIVAL_LEN_MAX)],
+      lo: clampVal(draft.rivalSettings.lenMin, RIVAL_LEN_MIN, RIVAL_LEN_MAX, RIVAL_LEN_MIN),
+      hi: clampVal(draft.rivalSettings.lenMax, RIVAL_LEN_MIN, RIVAL_LEN_MAX, RIVAL_LEN_MAX),
+      set: (lo, hi) => { draft.rivalSettings.lenMin = lo; draft.rivalSettings.lenMax = hi; },
+    });
   }
 
   function commitRivalTab(draft) {
@@ -1813,7 +1914,12 @@ function gtMain() {
     const scopeChanged = draft.rivalSettings.scope        !== rivalSettings.scope;
     const sortChanged  = draft.rivalSettings.nextSort     !== rivalSettings.nextSort;
     const countChanged = draft.rivalSettings.requireBoth  !== rivalSettings.requireBoth;
-    if (!linkChanged && !scopeChanged && !sortChanged && !countChanged) return; // no change
+    const filterChanged =
+      draft.rivalSettings.diffMin !== rivalSettings.diffMin ||
+      draft.rivalSettings.diffMax !== rivalSettings.diffMax ||
+      draft.rivalSettings.lenMin  !== rivalSettings.lenMin  ||
+      draft.rivalSettings.lenMax  !== rivalSettings.lenMax;
+    if (!linkChanged && !scopeChanged && !sortChanged && !countChanged && !filterChanged) return; // no change
     rivalSettings = { ...draft.rivalSettings };
     saveRivalSettings();
     if (scopeChanged) {
@@ -1821,9 +1927,9 @@ function gtMain() {
       // newly require the unranked stream — re-render and (leader) reconcile.
       renderAllGoals();
       if (isLeader) ensureRivalSync();
-    } else if (countChanged) {
-      // requireBoth only changes the wins denominator — re-render the cards
-      // (no refetch, no new stream).
+    } else if (countChanged || filterChanged) {
+      // requireBoth / the difficulty+length filter only change the displayed
+      // standings (wins denominator + Next-vs pool) -- re-render, no refetch.
       renderAllGoals();
     }
     // nextUsesVsLink and nextSort are both read live at click time in
@@ -2277,12 +2383,31 @@ function gtMain() {
   // the rival has typed (quotes you haven't raced count as a loss).
   const RIVAL_SCOPE_VALUES = ["all", "ranked", "unranked"];
   const RIVAL_NEXT_SORT_VALUES = ["random", "closest", "biggest"];
-  const DEFAULT_RIVAL_SETTINGS = { nextUsesVsLink: false, scope: "all", nextSort: "random", requireBoth: false };
+  // Difficulty/length range filter for rival goals. The defaults span the full
+  // range, which means NO filtering: a max handle sitting at its cap reads as
+  // "no upper bound" (difficulty 8 = "8+", length 10000 = "10000+"), so the
+  // full range never excludes a quote -- and the per-quote difficulty/length
+  // data is only consulted when a handle is actually moved off the ends.
+  const RIVAL_DIFF_MIN = 0, RIVAL_DIFF_MAX = 8;     // difficulty axis (step 1)
+  const RIVAL_LEN_MIN  = 0, RIVAL_LEN_MAX  = 10000; // length axis (step 50)
+  const RIVAL_LEN_STEP = 50;
+  const DEFAULT_RIVAL_SETTINGS = {
+    nextUsesVsLink: false, scope: "all", nextSort: "random", requireBoth: false,
+    diffMin: RIVAL_DIFF_MIN, diffMax: RIVAL_DIFF_MAX,
+    lenMin:  RIVAL_LEN_MIN,  lenMax:  RIVAL_LEN_MAX,
+  };
 
   function loadRivalSettings() {
     try {
       const saved = JSON.parse(localStorage.getItem(RIVAL_SETTINGS_KEY) || "null");
       if (!saved || typeof saved !== "object") return { ...DEFAULT_RIVAL_SETTINGS };
+      const clampNum = (v, lo, hi, dflt) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : dflt; };
+      let diffMin = clampNum(saved.diffMin, RIVAL_DIFF_MIN, RIVAL_DIFF_MAX, RIVAL_DIFF_MIN);
+      let diffMax = clampNum(saved.diffMax, RIVAL_DIFF_MIN, RIVAL_DIFF_MAX, RIVAL_DIFF_MAX);
+      if (diffMin > diffMax) { diffMin = RIVAL_DIFF_MIN; diffMax = RIVAL_DIFF_MAX; }
+      let lenMin = clampNum(saved.lenMin, RIVAL_LEN_MIN, RIVAL_LEN_MAX, RIVAL_LEN_MIN);
+      let lenMax = clampNum(saved.lenMax, RIVAL_LEN_MIN, RIVAL_LEN_MAX, RIVAL_LEN_MAX);
+      if (lenMin > lenMax) { lenMin = RIVAL_LEN_MIN; lenMax = RIVAL_LEN_MAX; }
       return {
         nextUsesVsLink: typeof saved.nextUsesVsLink === "boolean"
           ? saved.nextUsesVsLink
@@ -2296,6 +2421,7 @@ function gtMain() {
         requireBoth: typeof saved.requireBoth === "boolean"
           ? saved.requireBoth
           : DEFAULT_RIVAL_SETTINGS.requireBoth,
+        diffMin, diffMax, lenMin, lenMax,
       };
     } catch {
       return { ...DEFAULT_RIVAL_SETTINGS };
@@ -5050,7 +5176,32 @@ async function getExpRankByUsername(username) {
 
   // ── Render all goal sections using in-memory state ───────────
   // Pure DOM updates — no fetch, safe to call from any tab.
+  // ── Logged-out gate (render) ─────────────────────────────────
+  // When logged out the extension can't do anything useful and every fetch
+  // would 401, so we replace the goal UI with a single "please log in" panel
+  // and let the fetch guards short-circuit all polling. Toggling one class on
+  // the main widget (CSS hides .gt-content + .gt-header-actions and reveals the
+  // panel); a body class hides any detached group widgets.
+  function ensureLoginPanel() {
+    if (document.getElementById("gt-login-panel")) return;
+    const panel = document.createElement("div");
+    panel.id = "gt-login-panel";
+    panel.className = "gt-login-panel";
+    panel.textContent = "Please log in to TypeGG to use Goal Tracker.";
+    container.appendChild(panel); // sibling of .gt-content; shown only via the gt-loggedout class
+  }
+  // Apply the gate to the DOM and return true when logged out (caller should
+  // then skip the rest of its render).
+  function applyLoginGate() {
+    const out = !isLoggedIn();
+    if (out) ensureLoginPanel();
+    container.classList.toggle("gt-loggedout", out);
+    document.body.classList.toggle("gt-app-loggedout", out);
+    return out;
+  }
+
   function renderAllGoals() {
+    if (applyLoginGate()) return; // logged out → show panel, skip goal rendering
     const statValues = {
       exp:      currentStats.exp,
       pp:       currentStats.pp,
@@ -5355,6 +5506,7 @@ async function getExpRankByUsername(username) {
 
   // ── Stats + reset logic (leader only) ────────────────────────
   async function loadStats() {
+    if (!isLoggedIn()) return; // logged out — don't fetch (avoids 401s)
     try {
       const data = await fetchUserData();
       applyUserData(data);
@@ -5423,6 +5575,45 @@ async function getExpRankByUsername(username) {
   }
 
   // Run one retry chain: fetch up to N times, stop when stats change
+  // ── TEMP timing probe — rival-card vs standard-goal update lag ──────────
+  // Sync threshold: on a quote finish we hold the standard-goal render up to
+  // this long so the rival card (which needs a separate /races fetch) can
+  // appear in the SAME frame. Past it, the standard goals render immediately
+  // and the rival card catches up on its own. Measured baseline: /races
+  // ≈ 400ms (min ~370, max ~500), so 1s syncs in the normal case and the cap
+  // only fires on a genuinely slow fetch (network blip / backoff).
+  const RIVAL_SYNC_THRESHOLD_MS = 1000;
+
+  // ── TEMP timing probe — rival fetch latency + sync outcome ──────────────
+  // Per quote finish: how long the rival /races fetch+merge takes from the
+  // moment it's kicked, whether that beat RIVAL_SYNC_THRESHOLD_MS (SYNCED,
+  // rendered in one frame with the standard goals) or fell back to decoupled,
+  // plus a running average / min / max / timeout count to spot outliers.
+  // Logs under [GT-PERF]. TEMPORARY — search "gtPerf" / "GT-PERF" to remove.
+  const gtPerf = {
+    n: 0, sum: 0, min: Infinity, max: -Infinity, sumRaces: 0, timeouts: 0,
+    // anchor: rival /races fetch just kicked; carry this iteration's stats-fetch time
+    startRivalLag(statsFetchMs) { return { t0: performance.now(), statsFetchMs, done: false }; },
+    // called once the rival /races fetch has resolved + merged
+    endRivalLag(s, racesFetchMs, changed) {
+      if (!s || s.done) return;
+      s.done = true;
+      const lag = performance.now() - s.t0;
+      const synced = lag <= RIVAL_SYNC_THRESHOLD_MS;
+      this.n++; this.sum += lag; this.sumRaces += racesFetchMs;
+      if (!synced) this.timeouts++;
+      if (lag < this.min) this.min = lag;
+      if (lag > this.max) this.max = lag;
+      console.log(
+        `[GT-PERF] #${this.n}  rival ready +${lag.toFixed(0)}ms` +
+        `  (stats fetch ${(s.statsFetchMs ?? 0).toFixed(0)}ms → races fetch ${racesFetchMs.toFixed(0)}ms,` +
+        ` ${changed ? "new best" : "no new best"}) → ${synced ? "SYNCED" : "DECOUPLED (>threshold)"}` +
+        `  |  avg ${(this.sum / this.n).toFixed(0)}ms  min ${this.min.toFixed(0)}  max ${this.max.toFixed(0)}` +
+        `  timeouts ${this.timeouts}/${this.n}  n=${this.n}`
+      );
+    },
+  };
+
   async function runQuoteFinishRetryChain() {
     // Snapshot of stats at the moment the quote finished.
     // We compare against this — not against `currentStats`, which may
@@ -5459,11 +5650,13 @@ async function getExpRankByUsername(username) {
         : null;
 
       let data;
+      const gtStatsT0 = performance.now(); // [GT-PERF]
       try { data = await fetchUserData(); }
       catch {
         if (reqPrefetch) await reqPrefetch; // don't leak the promise
         continue;
       }
+      const gtStatsFetchMs = performance.now() - gtStatsT0; // [GT-PERF] stats fetch latency
 
       // Wait for prefetch to land before applyUserData triggers the eval —
       // otherwise the eval might fire before the caches are warm and fall
@@ -5499,17 +5692,30 @@ async function getExpRankByUsername(username) {
           console.error("[Goal Tracker] eval error in quote-finish path:", err);
         }
       }
-      renderAllGoals();
-      // Rival self-store: the just-finished race may be a new quote-best on
-      // the current quote. Refresh it in the BACKGROUND (not awaited) so the
-      // standard goals + their gain pills render instantly — this function
-      // does a /races fetch, and blocking the render on it added several
-      // seconds of lag. It re-renders the rival card itself once the store
-      // changes. Idempotent, so harmless across retries / overlaps.
+      // ── Standard-goal render + rival-card sync ─────────────────
+      // Stats are committed above, so the standard goals (max-quotes, …) are
+      // ready to render now. The rival card needs a SEPARATE /races fetch.
+      // Preference: render both in ONE frame. Cap: don't hold the standard
+      // goals longer than RIVAL_SYNC_THRESHOLD_MS — past that, render them
+      // immediately and let the rival card catch up when the fetch lands (the
+      // old decoupled behaviour). renderAllGoals() reads the live store, so in
+      // the synced case it shows the freshly merged rival bests too.
       if (racesChanged && (goalData.rival || []).length > 0) {
-        maintainSelfStoreFromRaces().catch(e => {
-          console.warn("[Goal Tracker] rival self-store maintenance failed:", e);
-        });
+        const gtPerfSession = gtPerf.startRivalLag(gtStatsFetchMs); // [GT-PERF] anchor: rival fetch kicked
+        // selfRender=false → the caller owns the render in this path.
+        const maintainPromise = maintainSelfStoreFromRaces(gtPerfSession, false)
+          .catch(e => { console.warn("[Goal Tracker] rival self-store maintenance failed:", e); return false; });
+        const winner = await Promise.race([
+          maintainPromise.then(() => "synced"),
+          new Promise(res => setTimeout(res, RIVAL_SYNC_THRESHOLD_MS, "timeout")),
+        ]);
+        renderAllGoals(); // synced → standard + freshly-merged rival in one frame; timed out → standard now
+        if (winner === "timeout") {
+          // Slow fetch: re-render the rival card once it finally lands.
+          maintainPromise.then(changed => { if (changed) renderAllGoals(); });
+        }
+      } else {
+        renderAllGoals();
       }
       try {
         localStorage.setItem(STATS_CACHE_KEY, JSON.stringify({ data, timestamp: Date.now() }));
@@ -5554,6 +5760,7 @@ async function getExpRankByUsername(username) {
   }
 
   function handleQuoteFinishAsLeader() {
+    if (!isLoggedIn()) return; // logged out — don't start the stats retry chain
     qfPending = true;
     qfWorker(); // no-op if already running; picks up pending flag on loop
   }
@@ -5895,7 +6102,13 @@ async function getExpRankByUsername(username) {
   const RIVAL_SELF_KEY   = "gt-rivalq-self";
   const RIVAL_KEY_PREFIX = "gt-rivalq-u-";
   const RIVAL_POLL_MS    = 60_000;   // ongoing refresh cadence (per the spec)
-  const RIVAL_PAGE_SIZE  = 1000;     // API max perPage (bulk build)
+  const RIVAL_PAGE_SIZE  = 250;      // bulk-build page size. Was 1000, but a
+                                     // 1000-row page took 30–90s server-side
+                                     // and occasionally crossed the gateway
+                                     // timeout (the intermittent failure). Cost
+                                     // is ~linear in rows, so 250 → ~10s/page
+                                     // with a wide timeout margin, same per-row
+                                     // efficiency, finer resume checkpoints.
   const RIVAL_REFRESH_PAGE_SIZE = 100; // ongoing refresh: only the recent changes matter (early-stop)
   const RIVAL_PP_EPS     = 1e-6;
   // Pace consecutive bulk-build page fetches. A tight fetch loop over a
@@ -5910,8 +6123,18 @@ async function getExpRankByUsername(username) {
   // see the top of the file. Rival sync just consults apiThrottled() to avoid
   // spinning up work while paused; gtApiFetch handles escalation/reset.)
 
+  // The self store is keyed by the logged-in username (gt-rivalq-self-<name>)
+  // so a different account on the same browser can't inherit the previous
+  // user's quote bests (which would mislabel wins). Reads getAuth() fresh, so a
+  // re-login picks up the right key automatically. Falls back to the legacy
+  // unscoped key only when logged out — nothing writes to it in that state.
+  // Rival stores stay account-independent (keyed by the rival's username).
   function rivalStoreKey(name) {
-    return name === RIVAL_SELF_NAME ? RIVAL_SELF_KEY : `${RIVAL_KEY_PREFIX}${String(name).toLowerCase()}`;
+    if (name === RIVAL_SELF_NAME) {
+      const u = getAuth().username;
+      return u ? `${RIVAL_SELF_KEY}-${String(u).toLowerCase()}` : RIVAL_SELF_KEY;
+    }
+    return `${RIVAL_KEY_PREFIX}${String(name).toLowerCase()}`;
   }
 
   // Parsed-store cache so renders don't re-parse JSON each frame. Reloaded
@@ -5934,10 +6157,50 @@ async function getExpRankByUsername(username) {
   // a missing `r` is treated as ranked (legacy stores were ranked-only).
   function freshRivalFetch()  { return { phase: "bulk", nextPage: 1, totalPages: null }; }
   function freshRivalFetchU() { return { phase: "none", nextPage: 1, totalPages: null }; }
+  // Store meta version. Bumped when we started capturing each quote's
+  // difficulty/length (`d`/`l`) on its entry. A store built before this lacks
+  // metaV and gets a one-time re-bulk (backfillMetaIfNeeded) to fill it in.
+  const RIVAL_META_V = 1;
   function freshRivalStore() {
-    return { quotes: {}, fetch: freshRivalFetch(), fetchU: freshRivalFetchU() };
+    return { quotes: {}, fetch: freshRivalFetch(), fetchU: freshRivalFetchU(), metaV: RIVAL_META_V };
+  }
+  // Older stores predate the d/l capture: re-run any COMPLETED bulk stream once
+  // so the re-paged /quotes rows backfill each entry's difficulty/length. The
+  // user just sees the normal "syncing" state during the re-bulk. metaV is
+  // stamped when the ranked stream finishes (fetchOneRivalBulkPage), so this
+  // fires at most once per store. Streams still building (or never built) are
+  // left alone -- they capture d/l natively as they run.
+  function backfillMetaIfNeeded(store) {
+    if (store.metaV === RIVAL_META_V) return;
+    for (const fobj of [store.fetch, store.fetchU]) {
+      if (fobj && fobj.phase === "done") { fobj.phase = "bulk"; fobj.nextPage = 1; fobj.totalPages = null; }
+    }
+  }
+  // One-time migration (pre-scoped self key → gt-rivalq-self-<username>). The
+  // self store used to live at the unscoped `gt-rivalq-self`. On the first
+  // self-store load as a logged-in user, if the new scoped key is empty but the
+  // legacy key holds a built store, adopt it — so an existing user keeps their
+  // store instead of re-paying the long bulk rebuild. Runs once per session;
+  // skipped (and retried later) while logged out, since there's no username to
+  // scope to yet. Idempotent and multi-tab safe (last write wins on identical
+  // data; the legacy remove is a no-op once gone).
+  let selfStoreMigrated = false;
+  function migrateLegacySelfStore() {
+    if (selfStoreMigrated) return;
+    const u = getAuth().username;
+    if (!u) return; // can't scope yet — retry on a later (logged-in) load
+    selfStoreMigrated = true;
+    try {
+      const scopedKey = rivalStoreKey(RIVAL_SELF_NAME); // gt-rivalq-self-<u>
+      if (localStorage.getItem(scopedKey) != null) return; // already migrated
+      const legacy = localStorage.getItem(RIVAL_SELF_KEY);
+      if (legacy == null) return; // nothing to adopt
+      localStorage.setItem(scopedKey, legacy);
+      localStorage.removeItem(RIVAL_SELF_KEY);
+    } catch {}
   }
   function loadRivalStore(name) {
+    if (name === RIVAL_SELF_NAME) migrateLegacySelfStore();
     const key = rivalStoreKey(name);
     if (rivalStores.has(key)) return rivalStores.get(key);
     let store = null;
@@ -5947,6 +6210,7 @@ async function getExpRankByUsername(username) {
     }
     if (!store.fetch)  store.fetch  = freshRivalFetch();
     if (!store.fetchU) store.fetchU = freshRivalFetchU();
+    backfillMetaIfNeeded(store); // legacy stores: re-bulk once to capture d/l
     rivalStores.set(key, store);
     return store;
   }
@@ -6018,27 +6282,43 @@ async function getExpRankByUsername(username) {
   // (optional boolean) tags the quote's ranking bucket; it's applied even when
   // the PP didn't improve, so a quote first seen untagged (on-demand fill) or
   // mis-tagged is corrected the moment its authoritative stream delivers it.
-  function rivalMergeEntry(store, quoteId, wpm, pp, ranked) {
+  function rivalMergeEntry(store, quoteId, wpm, pp, ranked, d, l) {
     if (!quoteId) return false;
     const p = Number(pp);
     if (!Number.isFinite(p)) return false;
     const w = Number(wpm);
+    const dn = Number(d), ln = Number(l);
+    const haveD = Number.isFinite(dn), haveL = Number.isFinite(ln);
     const cur = store.quotes[quoteId];
     if (cur && !(p > cur.pp + RIVAL_PP_EPS)) {
-      // No PP improvement — but we may still need to record/fix the ranked tag.
-      if (typeof ranked === "boolean" && cur.r !== ranked) { cur.r = ranked; return true; }
-      return false;
+      // No PP improvement -- but we may still need to record/fix the ranked tag
+      // or backfill the difficulty/length meta onto an older entry.
+      let touched = false;
+      if (typeof ranked === "boolean" && cur.r !== ranked) { cur.r = ranked; touched = true; }
+      if (haveD && cur.d !== dn) { cur.d = dn; touched = true; }
+      if (haveL && cur.l !== ln) { cur.l = ln; touched = true; }
+      return touched;
     }
     const entry = { wpm: Number.isFinite(w) ? w : (cur ? cur.wpm : 0), pp: p };
     if (typeof ranked === "boolean") entry.r = ranked;
     else if (cur && typeof cur.r === "boolean") entry.r = cur.r; // preserve known tag
+    // Difficulty/length: prefer fresh values, else carry forward what we had.
+    if (haveD) entry.d = dn; else if (cur && Number.isFinite(cur.d)) entry.d = cur.d;
+    if (haveL) entry.l = ln; else if (cur && Number.isFinite(cur.l)) entry.l = cur.l;
     store.quotes[quoteId] = entry;
     return true;
   }
   function entryFromQuoteRecord(q) {
     const br = q?.bestRace;
     if (!br || !br.quoteId) return null;
-    return { quoteId: br.quoteId, wpm: Number(br.wpm), pp: Number(br.pp) };
+    const qq = q.quote || null; // /users/<u>/quotes rows nest the quote meta under .quote
+    const d = qq ? Number(qq.difficulty) : NaN;
+    const l = qq ? Number(qq.length)     : NaN;
+    return {
+      quoteId: br.quoteId, wpm: Number(br.wpm), pp: Number(br.pp),
+      d: Number.isFinite(d) ? d : undefined,
+      l: Number.isFinite(l) ? l : undefined,
+    };
   }
 
   // ── Fetching ────────────────────────────────────────────────
@@ -6047,9 +6327,59 @@ async function getExpRankByUsername(username) {
     if (reverse) params.set("reverse", "true");
     if (status)  params.set("status", status); // ranked | unranked (omitted → API default = ranked)
     const url = `https://api.typegg.io/v1/users/${encodeURIComponent(fetchName)}/quotes?${params.toString()}`;
-    const r = await gtApiFetch(url, { headers: authHeaders() });
+
+    // ── DIAGNOSTIC ALARM (Issue 2) — quiet by design ────────────────────
+    // Silent on normal, fast pages. Fires only when something is wrong or
+    // regressing:
+    //   • a thrown fetch (network/CORS; real HTTP status is invisible to JS →
+    //     check the DevTools Network tab),
+    //   • a non-ok HTTP status (logged with headers + raw body),
+    //   • a 200 with an unparseable/truncated body,
+    //   • a SUCCESSFUL page that ran unusually slow (> GT_DIAG_SLOW_MS) — the
+    //     early warning that we're drifting back toward the gateway-timeout
+    //     zone that caused the original intermittent failures.
+    // Watches every real page; skips the perPage=1 count probe.
+    const GT_DIAG_SLOW_MS = 20000;
+    const gtDiagWatch = perPage > 1;
+    const gtDiagTag = `[GT-DIAG] quotes ${fetchName} p${page} perPage=${perPage}${status ? " " + status : ""}`;
+    const gtDiagT0  = gtDiagWatch ? performance.now() : 0;
+
+    let r;
+    try {
+      r = await gtApiFetch(url, { headers: authHeaders() });
+    } catch (e) {
+      if (gtDiagWatch && !e?.gtThrottled) {
+        const ms = Math.round(performance.now() - gtDiagT0);
+        console.error(`${gtDiagTag} THREW after ${ms}ms — network/CORS, no JS-visible status. Check the DevTools Network tab for the real status (e.g. 429 / 502 / 504).`, e);
+      }
+      throw e;
+    }
+    const gtDiagMs = gtDiagWatch ? Math.round(performance.now() - gtDiagT0) : 0;
+
+    if (gtDiagWatch && !r.ok) {
+      let body = "";
+      try { body = (await r.clone().text()).slice(0, 500); } catch {}
+      console.error(`${gtDiagTag} → HTTP ${r.status} in ${gtDiagMs}ms | retry-after=${r.headers.get("retry-after")} ratelimit-remaining=${r.headers.get("x-ratelimit-remaining") ?? r.headers.get("ratelimit-remaining")} | body[0:500]: ${body}`);
+    }
+
     if (!r.ok) throw new Error(`rival quotes ${fetchName} p${page} → ${r.status}`);
-    const d = await r.json();
+
+    // On watched pages, read the body as text first so a 200-with-truncated/
+    // invalid body surfaces here (with the raw text) rather than as a bare
+    // parse throw; and warn if a successful page ran slow enough to flirt with
+    // the gateway timeout.
+    let d;
+    if (gtDiagWatch) {
+      if (gtDiagMs > GT_DIAG_SLOW_MS) console.warn(`${gtDiagTag} → ${r.status} OK but SLOW: ${gtDiagMs}ms (watch for timeouts)`);
+      const raw = await r.text();
+      try { d = JSON.parse(raw); }
+      catch (e) {
+        console.error(`${gtDiagTag} → ${r.status} but JSON.parse FAILED in ${gtDiagMs}ms | raw.length=${raw.length} | raw[0:300]: ${raw.slice(0, 300)}`, e);
+        throw e;
+      }
+    } else {
+      d = await r.json();
+    }
     // `total` (exact quote count for this status) is surfaced when the API
     // provides it under any of the common field names; the incremental refresh
     // uses it to detect a drifted count. When absent it's null, and callers
@@ -6095,100 +6425,145 @@ async function getExpRankByUsername(username) {
   // status=unranked). Loops every page in one invocation; persists the cursor
   // + re-renders after each page so progress is visible. Entries are tagged
   // with their ranked bucket as they merge.
-  async function rivalBulkSync(name, stream) {
-    if (!isLeader) return;
-    if (!anyTabVisibleRecently()) return; // poll timer retries when visible
-    if (apiThrottled()) return;           // shared backoff in effect
-    if (rivalBulkActive) return;          // another bulk is running; serialize
-    const key = rivalStoreKey(name);
-    if (rivalSyncInFlight.has(key)) return;
-    const fetchName = rivalFetchNameFor(name);
-    if (!fetchName) return; // auth not ready yet
-    const store = loadRivalStore(name);
+  // ── Bulk build, round-robin across stores ─────────────────────────────
+  // The bulk loads every quote for the self store and each rival store, paged.
+  // Instead of draining one store completely before starting the next (which
+  // left standings empty the entire time the self store built — no overlap
+  // means no matches), a single driver advances every not-yet-complete store
+  // one page at a time, round-robin (1:1). Self and the rival grow together, so
+  // their intersection — the matches — starts surfacing almost immediately
+  // rather than only after self finishes. A store that's already complete drops
+  // out of the rotation, so the common "self already loaded, just add a rival"
+  // case behaves exactly like a plain single-store drain.
+  //
+  // Still strictly one request in flight at a time, with the same
+  // RIVAL_PAGE_DELAY_MS pacing between every page: this is a reordering, not
+  // more concurrency, so it adds no burst pressure. ranked builds before
+  // unranked per store. The cursor (fobj.nextPage) is persisted every page, so
+  // a pause/freeze/lost-leadership resumes cleanly from where it stopped.
 
+  // Which bulk stream this store still needs, or null if its bulk is complete.
+  function pendingBulkStreamFor(name) {
+    const store = loadRivalStore(name);
+    if (!rivalRankedDone(store)) return "ranked";
+    if (rivalNeedsUnranked() && !rivalUnrankedDone(store)) return "unranked";
+    return null;
+  }
+
+  // Fetch + merge ONE bulk page for a store/stream and advance its cursor.
+  // Returns "advanced" (more pages remain), "done" (this stream is complete), or
+  // "failed" (the request threw — gtApiFetch has already escalated the shared
+  // backoff). `persist(name, force)` saves the store and renders (throttled).
+  async function fetchOneRivalBulkPage(name, stream, persist) {
+    const fetchName = rivalFetchNameFor(name);
+    if (!fetchName) return "failed"; // auth not ready yet
+    const store     = loadRivalStore(name);
     const unranked  = stream === "unranked";
     const fobj      = unranked ? store.fetchU : store.fetch;
     const status    = unranked ? "unranked" : "ranked";
     const rankedTag = !unranked;
-    if (fobj.phase === "done") return;
-    if (unranked) {
-      if (!rivalNeedsUnranked()) return;   // scope doesn't need it → don't fetch
-      if (!rivalRankedDone(store)) return; // ranked stream builds first
-      if (fobj.phase === "none") { fobj.phase = "bulk"; fobj.nextPage = 1; }
+    if (fobj.phase === "done") return "done";
+    if (unranked && fobj.phase === "none") { fobj.phase = "bulk"; fobj.nextPage = 1; }
+    const page = fobj.nextPage || 1;
+    let res;
+    try { res = await fetchRivalQuotesPage(fetchName, { page, reverse: true, status }); }
+    catch (e) {
+      console.warn("[Goal Tracker] rival bulk page failed (paused):", e);
+      persist(name, true); // persist progress so we resume from here
+      return "failed";
     }
+    for (const q of res.quotes) {
+      const e = entryFromQuoteRecord(q);
+      if (e) rivalMergeEntry(store, e.quoteId, e.wpm, e.pp, rankedTag, e.d, e.l);
+    }
+    fobj.totalPages = res.totalPages;
+    if (page >= res.totalPages) {
+      fobj.phase = "done";
+      fobj.nextPage = res.totalPages + 1;
+      if (!unranked) store.metaV = RIVAL_META_V; // ranked stream done -> d/l fully captured
+      persist(name, true);
+      return "done";
+    }
+    fobj.nextPage = page + 1; // advance cursor (persisted below)
+    persist(name, false);
+    return "advanced";
+  }
 
-    rivalSyncInFlight.add(key);
+  // The single bulk driver: round-robins one page at a time across every
+  // managed store that still has bulk work, until all are complete (or it's
+  // paused by lost leadership / backoff, which the 60s poll later resumes).
+  // `rivalBulkActive` keeps exactly one driver running at a time.
+  async function runRivalBulkDriver() {
+    if (!isLeader) return;
+    // No visibility gate: this one-time build runs to completion even while the
+    // tab is hidden (tab away to Discord and it keeps loading). Only the
+    // recurring refresh and live polls stay visibility-gated. (Browser-level
+    // background throttling/freezing of a long-hidden tab still applies — the
+    // per-store cursor resumes on return.)
+    if (apiThrottled()) return;     // shared backoff in effect
+    if (rivalBulkActive) return;    // a driver is already running
+    let anyPending = false;
+    for (const n of rivalManaged.keys()) { if (pendingBulkStreamFor(n)) { anyPending = true; break; } }
+    if (!anyPending) return;
+
+    // Persist every page (cheap next to the multi-second page latency, and it
+    // keeps each store's resume cursor current); throttle only the expensive
+    // render to ~1/s to avoid main-thread jank / starving the quote-finish path.
+    let lastRender = 0;
+    const persist = (name, force) => {
+      saveRivalStore(name);
+      const now = Date.now();
+      if (force || now - lastRender > 1000) { renderAllGoals(); lastRender = now; }
+    };
+
     rivalBulkActive = true;
     try {
-      let page = fobj.nextPage || 1;
-      // Saving the whole store + re-rendering after EVERY page is O(store
-      // size) per page → roughly O(n²) over a large bulk, which janks the
-      // main thread and starves the quote-finish path. Throttle both to at
-      // most once per second; the cursor is still advanced in memory each
-      // page, and a crash just resumes from the last persisted page (the
-      // merge is idempotent, so re-fetching a page or two is harmless).
-      let lastFlush = 0;
-      const flush = (force) => {
-        const now = Date.now();
-        if (force || now - lastFlush > 1000) {
-          saveRivalStore(name);
-          renderAllGoals();
-          lastFlush = now;
+      let lastName = null, firstFetch = true;
+      while (isLeader && !apiThrottled()) {
+        // Rebuild the pending set each iteration so stores registered mid-run
+        // (the rivals are added just after the self store kicks the driver) and
+        // stores that just completed are reflected immediately.
+        const pending = [];
+        for (const name of rivalManaged.keys()) {
+          const s = pendingBulkStreamFor(name);
+          if (s) pending.push({ name, stream: s });
         }
-      };
-      let firstPage = true;
-      while (isLeader && anyTabVisibleRecently()) {
-        // Pace pages: fetch page 1 immediately, then wait between subsequent
-        // pages so a multi-page bulk doesn't burst the API into a rate limit.
-        if (!firstPage) {
+        if (pending.length === 0) break; // every bulk complete
+
+        // Round-robin: take the store after the last one we fetched (1:1).
+        let pick = 0;
+        if (lastName != null) {
+          const li = pending.findIndex(j => j.name === lastName);
+          pick = li >= 0 ? (li + 1) % pending.length : 0;
+        }
+        const job = pending[pick];
+
+        if (!firstFetch) {
           await new Promise(r => setTimeout(r, RIVAL_PAGE_DELAY_MS));
-          if (!isLeader || !anyTabVisibleRecently() || apiThrottled()) { flush(true); return; }
+          if (!isLeader || apiThrottled()) break;
         }
-        firstPage = false;
-        let res;
-        try { res = await fetchRivalQuotesPage(fetchName, { page, reverse: true, status }); }
-        catch (e) {
-          // gtApiFetch has already escalated the shared backoff; just stop and
-          // let the poll resume after it clears (cursor is persisted below).
-          console.warn("[Goal Tracker] rival bulk page failed (paused):", e);
-          flush(true);
-          return;
-        }
-        for (const q of res.quotes) {
-          const e = entryFromQuoteRecord(q);
-          if (e) rivalMergeEntry(store, e.quoteId, e.wpm, e.pp, rankedTag);
-        }
-        fobj.totalPages = res.totalPages;
-        if (page >= res.totalPages) {
-          fobj.phase = "done";
-          fobj.nextPage = res.totalPages + 1;
-          flush(true);
-          return;
-        }
-        page += 1;
-        fobj.nextPage = page; // advance cursor in memory
-        flush(false);         // throttled persist + render
+        firstFetch = false;
+
+        const result = await fetchOneRivalBulkPage(job.name, job.stream, persist);
+        if (result === "failed") break; // backoff in effect; poll resumes later
+        lastName = job.name;
       }
-      // Loop exited (lost leadership / tab hidden) — persist progress so we
-      // resume from here rather than redoing the whole burst.
-      flush(true);
     } finally {
-      rivalSyncInFlight.delete(key);
       rivalBulkActive = false;
-      // Chain the next unsynced work, one-after-another (never concurrently),
-      // without waiting for the next 60s poll. Finish this store's remaining
-      // stream first (ranked → unranked), then move to other stores. Skipped
-      // while paused/hidden/non-leader.
-      if (isLeader && anyTabVisibleRecently() && !apiThrottled()) {
-        let chained = false;
-        if (!unranked && rivalNeedsUnranked() && !rivalUnrankedDone(store)) {
-          rivalSyncTick(name); chained = true; // same store, unranked stream next
-        }
-        if (!chained) {
-          for (const other of rivalManaged.keys()) {
-            if (other === name) continue;
-            if (!rivalBulkDone(loadRivalStore(other))) { rivalSyncTick(other); break; }
-          }
+      // If every bulk is now complete, hand each store off to its incremental
+      // refresh immediately rather than waiting for the next 60s poll. If we
+      // instead paused with work still pending, leave it — the poll re-kicks the
+      // driver. We deliberately don't start incremental refreshes while any bulk
+      // is pending (keeps to one logical fetch stream at a time).
+      let stillPending = false;
+      for (const n of rivalManaged.keys()) { if (pendingBulkStreamFor(n)) { stillPending = true; break; } }
+      // Hand each completed store to its incremental refresh — but only when a
+      // rival goal exists. In the self-prefetch state (logged in, no rival
+      // goal) the bulk is the whole job; don't kick an ongoing self refresh.
+      const haveRivalGoals = (goalData.rival || []).length > 0;
+      if (!stillPending && isLeader && !apiThrottled() && haveRivalGoals) {
+        for (const name of rivalManaged.keys()) {
+          if (rivalBulkDone(loadRivalStore(name))) rivalIncrementalSync(name);
         }
       }
     }
@@ -6229,7 +6604,7 @@ async function getExpRankByUsername(username) {
       apiCount = (typeof head.total === "number") ? head.total : head.totalPages;
       for (const q of head.quotes) {
         const e = entryFromQuoteRecord(q);
-        if (e && rivalMergeEntry(store, e.quoteId, e.wpm, e.pp, rankedTag)) { changed = true; frontChanged = true; }
+        if (e && rivalMergeEntry(store, e.quoteId, e.wpm, e.pp, rankedTag, e.d, e.l)) { changed = true; frontChanged = true; }
       }
     } catch (e) {
       console.warn("[Goal Tracker] rival count probe failed (paused):", e);
@@ -6266,7 +6641,7 @@ async function getExpRankByUsername(username) {
         // also (re)applies the ranked `r` tag, so a mis-tagged entry can't keep
         // the bucket count permanently short (which would re-scan every tick).
         if (!improved && !behind) break pages;
-        if (rivalMergeEntry(store, e.quoteId, e.wpm, e.pp, rankedTag)) changed = true;
+        if (rivalMergeEntry(store, e.quoteId, e.wpm, e.pp, rankedTag, e.d, e.l)) changed = true;
       }
       if (page >= res.totalPages) {
         if (behind && rivalStoreBucketCount(store, unranked) < apiCount) {
@@ -6309,10 +6684,20 @@ async function getExpRankByUsername(username) {
   // Drive one store: build ranked first, then unranked (if the scope needs it),
   // else do an incremental refresh pass.
   function rivalSyncTick(name) {
+    if (!isLoggedIn()) return; // logged out — nothing to sync (no 401s)
     if (apiThrottled()) return; // backing off after recent fetch failures
-    const store = loadRivalStore(name);
-    if (!rivalRankedDone(store)) { rivalBulkSync(name, "ranked"); return; }
-    if (rivalNeedsUnranked() && !rivalUnrankedDone(store)) { rivalBulkSync(name, "unranked"); return; }
+    // If ANY managed store still has bulk work, run the round-robin driver (it
+    // advances all of them together); otherwise this store does its incremental
+    // refresh. `name` matters only for the incremental branch — bulk is global
+    // across stores, so the driver ignores it.
+    for (const n of rivalManaged.keys()) {
+      if (pendingBulkStreamFor(n)) { runRivalBulkDriver(); return; }
+    }
+    // No bulk pending. The ongoing incremental refresh is rival-goal-only
+    // machinery — in the self-prefetch state (logged in, no rival goal) the
+    // one-time bulk is the whole job, so don't start an ongoing self refresh.
+    // The poll still ran the driver above, so an interrupted bulk resumes.
+    if ((goalData.rival || []).length === 0) return;
     rivalIncrementalSync(name);
   }
 
@@ -6322,7 +6707,11 @@ async function getExpRankByUsername(username) {
     rivalSyncTick(name); // kick immediately (bulk resumes / first refresh)
     if (!rivalPollTimers.has(key)) {
       const t = setInterval(() => {
-        if (!isLeader || !anyTabVisibleRecently()) return;
+        // Fire regardless of visibility so an interrupted one-time bulk resumes
+        // in the background. rivalSyncTick → rivalIncrementalSync is itself
+        // visibility-gated, so the recurring refresh still pauses when hidden;
+        // only the bulk-resume path proceeds.
+        if (!isLeader) return;
         rivalSyncTick(name);
       }, RIVAL_POLL_MS);
       rivalPollTimers.set(key, t);
@@ -6340,6 +6729,17 @@ async function getExpRankByUsername(username) {
     }
   }
 
+  // Clear ALL rival/self poll timers and forget the managed set, WITHOUT
+  // deleting any store from localStorage (unlike stopRivalManaged, which GCs a
+  // rival's data). Used on logout: stops every rival fetch loop while keeping
+  // the account-independent rival stores and the self store on disk for the
+  // next login. A running bulk driver exits cleanly once rivalManaged is empty.
+  function stopAllRivalTimers() {
+    for (const t of rivalPollTimers.values()) clearInterval(t);
+    rivalPollTimers.clear();
+    rivalManaged.clear();
+  }
+
   // Map lowercased rival → display-cased name (first goal wins) so we fetch
   // with a real username and key the store case-insensitively.
   function referencedRivalMap() {
@@ -6354,25 +6754,46 @@ async function getExpRankByUsername(username) {
   // self store alive (the spec wants it built regardless of any rival goal).
   function ensureRivalSync() {
     if (!isLeader) return;
+    if (!isLoggedIn()) { stopAllRivalTimers(); return; } // logged out: no rival/self work, stores kept
     const map = referencedRivalMap();
     const haveRivalGoals = map.size > 0;
-    // The self store is only built/refreshed when at least one rival goal
-    // exists. Originally it was fetched unconditionally, which meant a full
-    // /users/<me>/quotes?perPage=1000 bulk build ran for EVERY user even with
-    // no rival goal — a major contributor to the startup request burst that
-    // tripped the rate limiter and delayed quote-finish updates. Gating it
-    // here removes that cost entirely when no rival goal is present. The self
-    // store is still never DELETED (so re-adding a rival reuses it), only its
-    // active syncing is stopped.
-    const wanted     = new Set(haveRivalGoals ? [RIVAL_SELF_NAME, ...map.keys()] : []);
-    const wantedKeys = new Set(haveRivalGoals ? [RIVAL_SELF_KEY, ...[...map.keys()].map(n => rivalStoreKey(n))] : []);
-    if (haveRivalGoals) {
-      startRivalManaged(RIVAL_SELF_NAME, getAuth().username);
-      for (const [lower, display] of map) startRivalManaged(lower, display);
+    const { token, username } = getAuth();
+    // F1 — proactive self prefetch. Even with NO rival goal yet, build the self
+    // store for a logged-in user so the FIRST rival goal is low-friction rather
+    // than triggering a multi-minute bulk build. Only the one-time self bulk
+    // runs in this state: rivalSyncTick and the bulk-driver handoff both gate
+    // the ongoing incremental refresh on a rival goal existing, and
+    // ensureCurrentQuoteForRivals only fires when a rival goal is on screen. So
+    // "logged in, no rival goal" runs the self bulk to completion and then goes
+    // quiet. Gated on being logged in (token present); skipped when logged out.
+    //
+    // (Historically the self store built ONLY once a rival goal existed, to
+    // avoid an unconditional bulk for every user at startup. The bulk is a paced,
+    // serialized, ONE-TIME build — once fetch.phase === "done" it never bulk-
+    // fetches again — so with a small user base the friction win is worth the
+    // one-time cost. The self store is still never DELETED, only its active
+    // syncing stops when there's neither a rival goal nor a login to prefetch.)
+    const prefetchSelf = !!token;
+    const wanted     = new Set();
+    const wantedKeys = new Set();
+    if (haveRivalGoals || prefetchSelf) {
+      wanted.add(RIVAL_SELF_NAME);
+      wantedKeys.add(rivalStoreKey(RIVAL_SELF_NAME));
     }
-    // Stop timers for managed-but-no-longer-wanted stores. When the last rival
-    // goal is removed, this also stops the self store's timer (wanted is empty);
-    // stopRivalManaged leaves the self store's localStorage intact by design.
+    if (haveRivalGoals) {
+      for (const k of map.keys()) { wanted.add(k); wantedKeys.add(rivalStoreKey(k)); }
+      startRivalManaged(RIVAL_SELF_NAME, username);
+      for (const [lower, display] of map) startRivalManaged(lower, display);
+    } else if (prefetchSelf) {
+      // Self-only: register + kick the bulk (resume timer included). No rival
+      // machinery — see the gating in rivalSyncTick / runRivalBulkDriver.
+      startRivalManaged(RIVAL_SELF_NAME, username);
+    }
+    // Stop timers for managed-but-no-longer-wanted stores. Removing the last
+    // rival goal stops the rival timers; the self timer is kept while logged in
+    // (it's wanted for prefetch — its poll just goes quiet once the bulk is
+    // done) and only stops when logged out. stopRivalManaged always leaves the
+    // self store's localStorage intact by design.
     for (const name of Array.from(rivalManaged.keys())) {
       if (!wanted.has(name)) stopRivalManaged(name);
     }
@@ -6395,17 +6816,26 @@ async function getExpRankByUsername(username) {
   }
 
   // Merge the recent /races list into the self store (called on quote-finish).
-  async function maintainSelfStoreFromRaces() {
-    if (apiThrottled()) return; // don't add load during a backoff window
+  async function maintainSelfStoreFromRaces(gtPerfSession = null, selfRender = true) {
+    if (apiThrottled()) return false; // don't add load during a backoff window
     let races;
-    try { races = await getRecentRacesData(); } catch { return; }
-    if (!Array.isArray(races) || races.length === 0) return;
+    const gtRacesT0 = performance.now(); // [GT-PERF]
+    try { races = await getRecentRacesData(); } catch { return false; }
+    const gtRacesFetchMs = performance.now() - gtRacesT0; // [GT-PERF] /races fetch latency
+    if (!Array.isArray(races) || races.length === 0) {
+      if (gtPerfSession) gtPerf.endRivalLag(gtPerfSession, gtRacesFetchMs, false); // [GT-PERF]
+      return false;
+    }
     const store = loadRivalStore(RIVAL_SELF_NAME);
     let changed = false;
     for (const race of races) {
       if (race && rivalMergeEntry(store, race.quoteId, race.wpm, race.pp)) changed = true;
     }
-    if (changed) { saveRivalStore(RIVAL_SELF_NAME); renderAllGoals(); }
+    // selfRender=false lets the quote-finish path render once (so the rival
+    // merge lands in the same frame as the standard goals when it's fast).
+    if (changed) { saveRivalStore(RIVAL_SELF_NAME); if (selfRender) renderAllGoals(); }
+    if (gtPerfSession) gtPerf.endRivalLag(gtPerfSession, gtRacesFetchMs, changed); // [GT-PERF]
+    return changed;
   }
 
   // On-demand fill of the current quote's bests (leader only), so the compare
@@ -6457,15 +6887,55 @@ async function getExpRankByUsername(username) {
   // rival's whole store. self-missing counts as 0 (i.e. a loss). Memoized by
   // store epoch + metric so the chain's repeated renders don't rescan the
   // whole store (potentially thousands of quotes) every time.
+  // ── Difficulty / length filter ───────────────────────────────
+  // Active iff a handle is off its end. When inactive the dimension is ignored
+  // (its d/l value is never read), so a default filter needs no meta at all.
+  function rivalFilterState() {
+    const s = rivalSettings;
+    const dMin = Number.isFinite(s.diffMin) ? s.diffMin : RIVAL_DIFF_MIN;
+    const dMax = Number.isFinite(s.diffMax) ? s.diffMax : RIVAL_DIFF_MAX;
+    const lMin = Number.isFinite(s.lenMin)  ? s.lenMin  : RIVAL_LEN_MIN;
+    const lMax = Number.isFinite(s.lenMax)  ? s.lenMax  : RIVAL_LEN_MAX;
+    return {
+      dMin, dMax, lMin, lMax,
+      dActive: dMin > RIVAL_DIFF_MIN || dMax < RIVAL_DIFF_MAX,
+      lActive: lMin > RIVAL_LEN_MIN  || lMax < RIVAL_LEN_MAX,
+    };
+  }
+  // Signature for the standings memo so a filter change invalidates it.
+  function rivalFilterSig() {
+    const f = rivalFilterState();
+    return (f.dActive || f.lActive) ? `${f.dMin},${f.dMax},${f.lMin},${f.lMax}` : "";
+  }
+  // Whether a quote entry passes the active filter. A CONSTRAINED dimension
+  // excludes entries whose meta is unknown (legacy data not yet backfilled); a
+  // dimension at full range is skipped. A max handle at its cap = no upper
+  // bound (difficulty 8 = "8+", length 10000 = "10000+").
+  function rivalQuotePassesFilter(entry, f) {
+    if (f.dActive) {
+      const d = Number(entry && entry.d);
+      if (!Number.isFinite(d) || d < f.dMin) return false;
+      if (f.dMax < RIVAL_DIFF_MAX && d > f.dMax) return false;
+    }
+    if (f.lActive) {
+      const l = Number(entry && entry.l);
+      if (!Number.isFinite(l) || l < f.lMin) return false;
+      if (f.lMax < RIVAL_LEN_MAX && l > f.lMax) return false;
+    }
+    return true;
+  }
   function computeRivalStandings(gd) {
     const metric = gd.metric || "wpm";
     const scope  = rivalScope();
     const requireBoth = !!rivalSettings.requireBoth; // count only quotes you've both raced
+    const filter = rivalFilterState();
+    const filterSig = rivalFilterSig();
     const selfStore  = loadRivalStore(RIVAL_SELF_NAME);
     const selfDone   = rivalBulkDone(selfStore);     // your history fully synced?
     const cached = rivalStandingsCache.get(gd.id);
     if (cached && cached.epoch === rivalStoreEpoch && cached.metric === metric
-        && cached.scope === scope && cached.requireBoth === requireBoth && cached.selfDone === selfDone) {
+        && cached.scope === scope && cached.requireBoth === requireBoth
+        && cached.selfDone === selfDone && cached.filterSig === filterSig) {
       return cached.result;
     }
     const rivalStore = loadRivalStore(gd.rival);
@@ -6476,6 +6946,7 @@ async function getExpRankByUsername(username) {
     for (const qid in rq) {
       const rentry = rq[qid];
       if (!rivalQuoteInScope(rentry, scope)) continue; // only count in-scope quotes
+      if ((filter.dActive || filter.lActive) && !rivalQuotePassesFilter(rentry, filter)) continue;
       const se = sq[qid];
       // "Shared only" mode: skip quotes you haven't raced, so the wins total
       // reflects a head-to-head on common ground rather than counting every
@@ -6502,7 +6973,7 @@ async function getExpRankByUsername(username) {
       // unraced while not yet synced, or in shared-only mode → not a target
     }
     const result = { total, wins, worse, rivalDone: rivalBulkDone(rivalStore), selfDone };
-    rivalStandingsCache.set(gd.id, { epoch: rivalStoreEpoch, metric, scope, requireBoth, selfDone, result });
+    rivalStandingsCache.set(gd.id, { epoch: rivalStoreEpoch, metric, scope, requireBoth, selfDone, filterSig, result });
     return result;
   }
 
@@ -6555,7 +7026,7 @@ async function getExpRankByUsername(username) {
     };
 
     const rKey = rivalStoreKey(gd.rival);
-    const sKey = RIVAL_SELF_KEY;
+    const sKey = rivalStoreKey(RIVAL_SELF_NAME);
     const rEntry = liveQid ? rivalStore.quotes[liveQid] : undefined;
     const sEntry = liveQid ? selfStore.quotes[liveQid]  : undefined;
 
@@ -6663,13 +7134,16 @@ async function getExpRankByUsername(username) {
     return withGap.map(x => x.qid);
   }
 
-  // The sorted Next-vs modes walk the pool one quote per click, never repeating
-  // within a cycle and wrapping at the end. Because clicking the button does a
-  // full page navigation (which wipes in-memory state), the cursor is persisted
-  // to localStorage: per goal we store the sort it was built under plus the set
-  // of quoteIds already served this cycle. Switching the sort order (or finishing
-  // the cycle) starts fresh — exactly the "change away and back to get the
-  // smallest again" behaviour.
+  // The sorted Next-vs modes walk the pool one quote per click, wrapping at the
+  // end. Because clicking the button does a full page navigation (which wipes
+  // in-memory state), the cursor is persisted to localStorage: per goal we store
+  // the sort it was built under plus a `served` map { quoteId -> self value (on
+  // the goal's metric) at the time it was served }. A served quote is skipped
+  // until the cycle wraps UNLESS you've since improved your score on it (current
+  // self value beats the recorded serve-time value), in which case it re-enters
+  // the rotation and re-sorts to its new, smaller gap. Switching the sort order
+  // (or finishing the cycle) starts fresh. (Legacy cursors stored `served` as a
+  // flat array; those are treated as a fresh cycle on first use.)
   const RIVAL_NEXT_CURSOR_KEY = "gt-rival-next-cursor";
   function loadRivalNextCursors() {
     try { const o = JSON.parse(localStorage.getItem(RIVAL_NEXT_CURSOR_KEY) || "{}"); return (o && typeof o === "object") ? o : {}; }
@@ -6698,24 +7172,40 @@ async function getExpRankByUsername(username) {
       if (liveQid && worse.length > 1) pool = worse.filter(q => q !== liveQid);
       pick = pool[Math.floor(Math.random() * pool.length)];
     } else {
-      // Sorted: step through the pool by gap, one quote per click.
+      // Sorted: step through the pool by gap, one quote per click. The cursor's
+      // `served` is a map { qid -> self value (on gd.metric) at serve time }, so
+      // we can tell an improved quote from a parked one (see the doc above).
       const sorted = rivalWorseSortedByGap(gd, sort);
       if (sorted.length === 0) return;
+      const metric = gd.metric || "wpm";
+      const sq = loadRivalStore(RIVAL_SELF_NAME).quotes;
+      const selfVal = (qid) => (sq[qid] ? sq[qid][metric] : 0);
       const cursors = loadRivalNextCursors();
-      let cur = cursors[goalId];
-      if (!cur || cur.sort !== sort || !Array.isArray(cur.served)) cur = { sort, served: [] };
-      const served = new Set(cur.served);
-      // You're effectively "on" the current quote — don't route back to it.
-      if (liveQid) served.add(liveQid);
-      pick = sorted.find(q => !served.has(q));
-      if (!pick) {                         // whole cycle served → wrap to the start
-        served.clear();
-        if (liveQid) served.add(liveQid);
-        pick = sorted.find(q => !served.has(q));
+      const cur = cursors[goalId];
+      // Fresh cycle on first use, on a sort switch, or for the legacy array shape.
+      let served = (cur && cur.sort === sort && cur.served
+        && typeof cur.served === "object" && !Array.isArray(cur.served))
+        ? cur.served : {};
+      const isParked = (q) => Object.prototype.hasOwnProperty.call(served, q);
+      // Re-eligibility: drop any served quote you've IMPROVED since serving it
+      // (current self value beats the captured serve-time value) so it can be
+      // met again at its new, smaller gap. (A quote you beat outright already
+      // left `worse`, so it isn't in `sorted` at all.)
+      for (const qid of Object.keys(served)) {
+        if (selfVal(qid) > served[qid] + RIVAL_PP_EPS) delete served[qid];
       }
-      if (!pick) return;                   // only the current quote is in the pool
-      served.add(pick);
-      cursors[goalId] = { sort, served: [...served] };
+      // Pick the first quote that's neither parked nor the one you're on. The
+      // current-quote exclusion always wins for this pick — even a just-improved
+      // liveQid is skipped now (else Next would reload the same quote); it can be
+      // served again on a later click once you've moved off it.
+      pick = sorted.find(q => q !== liveQid && !isParked(q));
+      if (!pick) {                         // whole cycle served → wrap, start fresh
+        served = {};
+        pick = sorted.find(q => q !== liveQid);
+      }
+      if (!pick) return;                   // only the current quote is a target
+      served[pick] = selfVal(pick);        // record serve-time self value
+      cursors[goalId] = { sort, served };
       saveRivalNextCursors(cursors);
     }
 
@@ -7732,6 +8222,9 @@ async function getExpRankByUsername(username) {
   window.addEventListener('storage', (e) => {
     if (!e.key) return;
 
+    // Auth changed in another tab (TypeGG's own key)? Re-evaluate the gate.
+    if (e.key === 'pocketbase_auth') { checkAuthTransition(); return; }
+
     // Recurrence settings change?
     if (e.key === REC_SETTINGS_KEY) {
       recSettings = loadRecSettings();
@@ -7788,8 +8281,9 @@ async function getExpRankByUsername(username) {
     }
 
     // Rival/self quote-best store updated by the leader (or GC'd)? Refresh
-    // our cached copy and re-render the rival cards.
-    if (e.key === RIVAL_SELF_KEY || e.key.startsWith(RIVAL_KEY_PREFIX)) {
+    // our cached copy and re-render the rival cards. startsWith(RIVAL_SELF_KEY)
+    // matches both the legacy unscoped key and the scoped gt-rivalq-self-<name>.
+    if (e.key.startsWith(RIVAL_SELF_KEY) || e.key.startsWith(RIVAL_KEY_PREFIX)) {
       reloadRivalStoreFromDisk(e.key);
       renderAllGoals();
       return;
@@ -7809,6 +8303,39 @@ async function getExpRankByUsername(username) {
       try { currentStats.expRank = JSON.parse(e.newValue).rank; } catch {}
     }
   });
+
+  // ── Auth-state watcher (login / logout transitions) ──────────
+  // getAuth() (TypeGG's pocketbase_auth) is the source of truth. A login or
+  // logout in THIS tab does NOT fire a storage event (those are cross-tab
+  // only), and when logged out the stats poll is paused so there's nothing to
+  // piggyback — so we also poll the auth state on a light interval. The
+  // cross-tab case is handled by the storage listener above; both funnel
+  // through checkAuthTransition. On a transition we re-render (panel ↔ goals)
+  // and, when logging in as the leader, kick an immediate refresh so the user
+  // doesn't wait a full poll; logging out tears down the rival timers (the
+  // fetch guards already stop traffic — this just clears the machinery).
+  let gtAuthState = isLoggedIn();
+  function onAuthChange(loggedIn) {
+    if (loggedIn) {
+      renderGroupWidgets(); // rebuild detached widgets that were hidden
+      renderAllGoals();     // clears the gate, renders goals
+      if (isLeader) {
+        loadStatsGuarded(); // immediate stats — don't wait for the 20s poll
+        ensureRivalSync();  // self prefetch + any rival stores
+      }
+    } else {
+      renderAllGoals();     // show the login panel, hide goal UI
+      if (isLeader) ensureRivalSync(); // logged-out branch stops rival timers
+    }
+  }
+  function checkAuthTransition() {
+    const now = isLoggedIn();
+    if (now === gtAuthState) return;
+    gtAuthState = now;
+    console.log(`[Goal Tracker] auth ${now ? "login" : "logout"} detected`);
+    onAuthChange(now);
+  }
+  setInterval(checkAuthTransition, 3_000);
 
   // ── Hydrate from cached stats for immediate render ───────────
   // Lets fresh tabs show accurate progress without waiting for the
