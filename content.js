@@ -1842,10 +1842,13 @@ function gtMain() {
     });
 
     // ── Difficulty / length range sliders ──────────────────────
-    // Two overlapping range inputs per axis form a dual-handle slider: live
-    // fill + readout while dragging, commit (save + re-render) on release.
-    const fmtDiff = (v) => (v >= RIVAL_DIFF_MAX ? `${RIVAL_DIFF_MAX}+` : String(v));
-    const fmtLen  = (v) => (v >= RIVAL_LEN_MAX  ? `${RIVAL_LEN_MAX}+`  : String(v));
+    // Two overlapping range inputs per axis form a dual-handle slider. The
+    // lo/hi numbers in the readout are inline-editable: click to drop a caret
+    // (the value auto-selects so you can just type a replacement), digits and
+    // backspace work like a text field, Enter or blur commits, Escape reverts.
+    // Both dragging and typing are clamped so the min handle can never pass the
+    // max (and vice versa). Difficulty steps 0.1, length steps 1.
+    const rvAxis = rivalFilterAxis(); // data-driven bounds for both sliders
     const clampVal = (v, lo, hi, d) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
     function setupRivalRange(rangeId, readoutId, ticksId, opts) {
       const root = contentEl.querySelector(`#${rangeId}`);
@@ -1855,19 +1858,39 @@ function gtMain() {
       const fill = root.querySelector(".gt-range-fill");
       const readout = contentEl.querySelector(`#${readoutId}`);
       const ticksEl = contentEl.querySelector(`#${ticksId}`);
-      const { min, max, step, fmt, ticks, set } = opts;
-      const snap = (v) => Math.round(v / step) * step;
+      const { min, max, step, ticks, set, decimals } = opts;
+      const snap = (v) => {
+        const n = Math.round(v / step) * step;
+        return decimals ? Math.round(n * 10) / 10 : Math.round(n);
+      };
+      const numStr = (v) => (decimals ? (Number.isInteger(v) ? String(v) : v.toFixed(1)) : String(v));
       for (const inp of [loIn, hiIn]) { inp.min = min; inp.max = max; inp.step = step; }
       loIn.value = snap(opts.lo); hiIn.value = snap(opts.hi);
       if (ticksEl) ticksEl.innerHTML = ticks.map(t => `<span>${t}</span>`).join("");
-      const paint = () => {
+
+      let loNum = null, hiNum = null, capEl = null;
+      if (readout) {
+        readout.innerHTML =
+          `<span class="gt-range-num" data-side="lo" spellcheck="false"></span>` +
+          `<span class="gt-range-dash"> - </span>` +
+          `<span class="gt-range-num" data-side="hi" spellcheck="false"></span>` +
+          `<span class="gt-range-cap">+</span>`;
+        loNum = readout.querySelector('[data-side="lo"]');
+        hiNum = readout.querySelector('[data-side="hi"]');
+        capEl = readout.querySelector(".gt-range-cap");
+      }
+
+      const paint = (skip) => {
         const lv = +loIn.value, hv = +hiIn.value;
         const lp = ((lv - min) / (max - min)) * 100;
         const hp = ((hv - min) / (max - min)) * 100;
         fill.style.left = lp + "%";
         fill.style.width = Math.max(0, hp - lp) + "%";
-        if (readout) readout.textContent = `${fmt(lv)} - ${fmt(hv)}`;
+        if (loNum && loNum !== skip) loNum.textContent = numStr(lv);
+        if (hiNum && hiNum !== skip) hiNum.textContent = numStr(hv);
+        if (capEl) capEl.style.display = (hv >= max) ? "" : "none";
       };
+
       const onInput = (which) => {
         let lv = +loIn.value, hv = +hiIn.value;
         if (which === "lo" && lv > hv) { lv = hv; loIn.value = lv; }
@@ -1879,6 +1902,7 @@ function gtMain() {
       hiIn.addEventListener("input", () => onInput("hi"));
       loIn.addEventListener("change", applySettingsDraft);
       hiIn.addEventListener("change", applySettingsDraft);
+
       // Raise whichever thumb is nearer the pointer so overlapping handles stay grabbable.
       root.addEventListener("pointerdown", (e) => {
         const rect = root.getBoundingClientRect();
@@ -1889,23 +1913,97 @@ function gtMain() {
         const loCloser = Math.abs(x - loX) <= Math.abs(x - hiX);
         loIn.style.zIndex = loCloser ? 5 : 4;
         hiIn.style.zIndex = loCloser ? 4 : 5;
+        // A direct thumb grab reports e.target as the input itself (the thumb is
+        // pointer-events:auto); a track click passes through the pointer-events:none
+        // input. So when this isn't a thumb hit, treat it as a track click: jump the
+        // nearer handle to the click (tie -> max) and commit via the same path as a drag.
+        if (e.target === loIn || e.target === hiIn) return;
+        const moveLo = Math.abs(x - loX) < Math.abs(x - hiX);
+        const frac = Math.min(1, Math.max(0, x / rect.width));
+        let v = Math.min(max, Math.max(min, snap(min + frac * (max - min))));
+        if (moveLo) {
+          if (v > +hiIn.value) v = +hiIn.value;
+          loIn.value = v; loIn.style.zIndex = 5; hiIn.style.zIndex = 4;
+        } else {
+          if (v < +loIn.value) v = +loIn.value;
+          hiIn.value = v; hiIn.style.zIndex = 5; loIn.style.zIndex = 4;
+        }
+        set(+loIn.value, +hiIn.value);
+        paint();
+        applySettingsDraft();
       });
+
+      // Inline-edit the lo/hi numbers like a text field.
+      const selectAllText = (el) => {
+        const r = document.createRange(); r.selectNodeContents(el);
+        const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+      };
+      const commitEdit = (el, side) => {
+        const v0 = parseFloat((el.textContent || "").replace(/[^0-9.]/g, ""));
+        if (Number.isFinite(v0)) {
+          let v = Math.min(max, Math.max(min, snap(v0)));
+          if (side === "lo") { if (v > +hiIn.value) v = +hiIn.value; loIn.value = v; }
+          else               { if (v < +loIn.value) v = +loIn.value; hiIn.value = v; }
+          set(+loIn.value, +hiIn.value);
+          applySettingsDraft();
+        }
+        paint(); // normalise the display (also reverts a junk entry)
+      };
+      const wireEdit = (el, side) => {
+        if (!el) return;
+        // First click on the number: take over focus ourselves (so the gap
+        // around it can't grab a caret), make it editable, and select the value
+        // so a keystroke replaces it. A click while already editing is left
+        // alone so you can place the caret between digits.
+        el.addEventListener("mousedown", (e) => {
+          if (el.getAttribute("contenteditable") === "true") return;
+          e.preventDefault();
+          el.setAttribute("contenteditable", "true");
+          el.focus();
+          setTimeout(() => selectAllText(el), 0);
+        });
+        el.addEventListener("keydown", (e) => {
+          if (e.key === "Enter")  { e.preventDefault(); el.blur(); return; }
+          if (e.key === "Escape") { e.preventDefault(); paint(); el.blur(); return; }
+          const k = e.key;
+          if (k.length === 1 && !/[0-9]/.test(k) && !(decimals && k === ".") && !e.ctrlKey && !e.metaKey) {
+            e.preventDefault();
+          }
+        });
+        el.addEventListener("blur", () => {
+          el.removeAttribute("contenteditable"); // back to plain text until the next click
+          commitEdit(el, side);
+        });
+      };
+      wireEdit(loNum, "lo");
+      wireEdit(hiNum, "hi");
+
       paint();
     }
-    const diffTicks = [];
-    for (let dv = RIVAL_DIFF_MIN; dv <= RIVAL_DIFF_MAX; dv++) diffTicks.push(fmtDiff(dv));
+    // Difficulty ticks: integers across the axis (thinned if the span is wide),
+    // last shown as "N+". A null handle (open) sits at the axis end; on commit a
+    // handle dragged/typed to an axis end is stored back as null so it stays open.
+    // Only the two ends, like the length slider: difficulty values aren't evenly
+    // spaced across the axis, so flex-spaced middle ticks would misalign.
+    const diffTicks = [String(rvAxis.diffMin), `${rvAxis.diffMax}+`];
     setupRivalRange("gt-rival-diff-range", "gt-rival-diff-readout", "gt-rival-diff-ticks", {
-      min: RIVAL_DIFF_MIN, max: RIVAL_DIFF_MAX, step: 1, fmt: fmtDiff, ticks: diffTicks,
-      lo: clampVal(draft.rivalSettings.diffMin, RIVAL_DIFF_MIN, RIVAL_DIFF_MAX, RIVAL_DIFF_MIN),
-      hi: clampVal(draft.rivalSettings.diffMax, RIVAL_DIFF_MIN, RIVAL_DIFF_MAX, RIVAL_DIFF_MAX),
-      set: (lo, hi) => { draft.rivalSettings.diffMin = lo; draft.rivalSettings.diffMax = hi; },
+      min: rvAxis.diffMin, max: rvAxis.diffMax, step: 0.1, decimals: true, ticks: diffTicks,
+      lo: (draft.rivalSettings.diffMin == null) ? rvAxis.diffMin : clampVal(draft.rivalSettings.diffMin, rvAxis.diffMin, rvAxis.diffMax, rvAxis.diffMin),
+      hi: (draft.rivalSettings.diffMax == null) ? rvAxis.diffMax : clampVal(draft.rivalSettings.diffMax, rvAxis.diffMin, rvAxis.diffMax, rvAxis.diffMax),
+      set: (lo, hi) => {
+        draft.rivalSettings.diffMin = (lo <= rvAxis.diffMin) ? null : lo;
+        draft.rivalSettings.diffMax = (hi >= rvAxis.diffMax) ? null : hi;
+      },
     });
     setupRivalRange("gt-rival-len-range", "gt-rival-len-readout", "gt-rival-len-ticks", {
-      min: RIVAL_LEN_MIN, max: RIVAL_LEN_MAX, step: RIVAL_LEN_STEP, fmt: fmtLen,
-      ticks: [fmtLen(RIVAL_LEN_MIN), fmtLen(RIVAL_LEN_MAX)],
-      lo: clampVal(draft.rivalSettings.lenMin, RIVAL_LEN_MIN, RIVAL_LEN_MAX, RIVAL_LEN_MIN),
-      hi: clampVal(draft.rivalSettings.lenMax, RIVAL_LEN_MIN, RIVAL_LEN_MAX, RIVAL_LEN_MAX),
-      set: (lo, hi) => { draft.rivalSettings.lenMin = lo; draft.rivalSettings.lenMax = hi; },
+      min: rvAxis.lenMin, max: rvAxis.lenMax, step: 1, decimals: false,
+      ticks: [String(rvAxis.lenMin), `${rvAxis.lenMax}+`],
+      lo: (draft.rivalSettings.lenMin == null) ? rvAxis.lenMin : clampVal(draft.rivalSettings.lenMin, rvAxis.lenMin, rvAxis.lenMax, rvAxis.lenMin),
+      hi: (draft.rivalSettings.lenMax == null) ? rvAxis.lenMax : clampVal(draft.rivalSettings.lenMax, rvAxis.lenMin, rvAxis.lenMax, rvAxis.lenMax),
+      set: (lo, hi) => {
+        draft.rivalSettings.lenMin = (lo <= rvAxis.lenMin) ? null : lo;
+        draft.rivalSettings.lenMax = (hi >= rvAxis.lenMax) ? null : hi;
+      },
     });
   }
 
@@ -2223,6 +2321,48 @@ function gtMain() {
   }
 
   // ── Modal lifecycle ───────────────────────────────────────────
+  // Keep the host page from scrolling while the settings overlay is open.
+  // TypeGG hijacks the wheel (one notch = a full-viewport jump via its own JS
+  // handler), so an `overflow:hidden` lock can't stop it. We capture the wheel
+  // on `window` BEFORE the page's handler, stop it from propagating (kills the
+  // viewport jump), and drive the right scroll container manually so it moves
+  // both ways: the `.gt-wheel` picker when the pointer is over it (its own
+  // `scroll` listener still fires on a programmatic scrollTop), otherwise the
+  // settings content; over chrome/backdrop the wheel is just swallowed.
+  let pageScrollLock = null;
+  function onSettingsWheel(e) {
+    e.stopPropagation();
+    if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+    e.preventDefault();
+    const t = e.target;
+    const pick = (t && t.closest) ? t.closest(".gt-wheel") : null;
+    const scroller = document.getElementById("gt-settings-content");
+    const el = pick || ((scroller && scroller.contains(t)) ? scroller : null);
+    if (!el) return; // over modal chrome or the backdrop → swallow, no scroll
+    let dy = e.deltaY;
+    if (e.deltaMode === 1) dy *= 16;                 // lines → px
+    else if (e.deltaMode === 2) dy *= el.clientHeight; // pages → px
+    el.scrollTop += dy;
+  }
+  function lockPageScroll() {
+    if (pageScrollLock) return;
+    const html = document.documentElement;
+    const sbw = window.innerWidth - html.clientWidth; // scrollbar width (0 if none)
+    pageScrollLock = { overflow: html.style.overflow, paddingRight: html.style.paddingRight };
+    html.style.overflow = "hidden";
+    if (sbw > 0) html.style.paddingRight = `${sbw}px`;
+    // Capture + passive:false so we run ahead of TypeGG and may preventDefault.
+    window.addEventListener("wheel", onSettingsWheel, { capture: true, passive: false });
+  }
+  function unlockPageScroll() {
+    if (!pageScrollLock) return;
+    const html = document.documentElement;
+    html.style.overflow = pageScrollLock.overflow;
+    html.style.paddingRight = pageScrollLock.paddingRight;
+    pageScrollLock = null;
+    window.removeEventListener("wheel", onSettingsWheel, { capture: true });
+  }
+
   function openSettingsModal() {
     settingsDraft = {
       recSettings:     JSON.parse(JSON.stringify(recSettings)),
@@ -2237,6 +2377,7 @@ function gtMain() {
     buildSettingsSidebar();
     renderActiveSettingsTab();
     settingsOverlay.classList.add("open");
+    lockPageScroll();
   }
 
   function closeSettingsModal() {
@@ -2245,6 +2386,7 @@ function gtMain() {
     // where the modal is closed (X / overlay click) while an input is still focused.
     commitAllTabs();
     settingsOverlay.classList.remove("open");
+    unlockPageScroll();
     settingsDraft = null;
     activeWheel = null;
   }
@@ -2383,31 +2525,40 @@ function gtMain() {
   // the rival has typed (quotes you haven't raced count as a loss).
   const RIVAL_SCOPE_VALUES = ["all", "ranked", "unranked"];
   const RIVAL_NEXT_SORT_VALUES = ["random", "closest", "biggest"];
-  // Difficulty/length range filter for rival goals. The defaults span the full
-  // range, which means NO filtering: a max handle sitting at its cap reads as
-  // "no upper bound" (difficulty 8 = "8+", length 10000 = "10000+"), so the
-  // full range never excludes a quote -- and the per-quote difficulty/length
-  // data is only consulted when a handle is actually moved off the ends.
-  const RIVAL_DIFF_MIN = 0, RIVAL_DIFF_MAX = 8;     // difficulty axis (step 1)
-  const RIVAL_LEN_MIN  = 0, RIVAL_LEN_MAX  = 10000; // length axis (step 50)
-  const RIVAL_LEN_STEP = 50;
+  // Difficulty/length range filter for rival goals. The slider axis is
+  // DATA-DRIVEN: its bounds come from the difficulty/length of the rival's
+  // stored quotes (difficulty floored to an integer, length floored to the
+  // nearest 1000), and the max reads "N+" = no upper bound. These constants are
+  // only the FALLBACK axis used before any rival quote meta is known. A stored
+  // handle is null when it sits at an axis end (= open), so the default is "no
+  // filter" and a "+" max stays uncapped as the axis grows.
+  const RIVAL_DIFF_MIN = 0, RIVAL_DIFF_MAX = 8;        // fallback difficulty axis
+  const RIVAL_LEN_MIN  = 0, RIVAL_LEN_MAX  = 10000;    // fallback length axis
+  const RIVAL_LEN_AXIS_ROUND = 1000;                  // length axis floored to this
   const DEFAULT_RIVAL_SETTINGS = {
     nextUsesVsLink: false, scope: "all", nextSort: "random", requireBoth: false,
-    diffMin: RIVAL_DIFF_MIN, diffMax: RIVAL_DIFF_MAX,
-    lenMin:  RIVAL_LEN_MIN,  lenMax:  RIVAL_LEN_MAX,
+    diffMin: null, diffMax: null, lenMin: null, lenMax: null, fv: 1,
   };
 
   function loadRivalSettings() {
     try {
       const saved = JSON.parse(localStorage.getItem(RIVAL_SETTINGS_KEY) || "null");
       if (!saved || typeof saved !== "object") return { ...DEFAULT_RIVAL_SETTINGS };
-      const clampNum = (v, lo, hi, dflt) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : dflt; };
-      let diffMin = clampNum(saved.diffMin, RIVAL_DIFF_MIN, RIVAL_DIFF_MAX, RIVAL_DIFF_MIN);
-      let diffMax = clampNum(saved.diffMax, RIVAL_DIFF_MIN, RIVAL_DIFF_MAX, RIVAL_DIFF_MAX);
-      if (diffMin > diffMax) { diffMin = RIVAL_DIFF_MIN; diffMax = RIVAL_DIFF_MAX; }
-      let lenMin = clampNum(saved.lenMin, RIVAL_LEN_MIN, RIVAL_LEN_MAX, RIVAL_LEN_MIN);
-      let lenMax = clampNum(saved.lenMax, RIVAL_LEN_MIN, RIVAL_LEN_MAX, RIVAL_LEN_MAX);
-      if (lenMin > lenMax) { lenMin = RIVAL_LEN_MIN; lenMax = RIVAL_LEN_MAX; }
+      const num = (v) => { if (v == null) return null; const n = Number(v); return Number.isFinite(n) ? n : null; };
+      let diffMin, diffMax, lenMin, lenMax;
+      if (saved.fv === 1) {
+        // New axis-relative model: a handle is null when it sits at an axis end.
+        diffMin = num(saved.diffMin); diffMax = num(saved.diffMax);
+        lenMin  = num(saved.lenMin);  lenMax  = num(saved.lenMax);
+      } else {
+        // Migrate the old fixed-axis model (0..8 / 0..10000): the old "open"
+        // ends become null; any interior value the user set is kept.
+        const openOr = (v, end) => { const n = num(v); return (n == null || n === end) ? null : n; };
+        diffMin = openOr(saved.diffMin, 0);  diffMax = openOr(saved.diffMax, 8);
+        lenMin  = openOr(saved.lenMin, 0);   lenMax  = openOr(saved.lenMax, 10000);
+      }
+      if (diffMin != null && diffMax != null && diffMin > diffMax) { diffMin = null; diffMax = null; }
+      if (lenMin  != null && lenMax  != null && lenMin  > lenMax)  { lenMin  = null; lenMax  = null; }
       return {
         nextUsesVsLink: typeof saved.nextUsesVsLink === "boolean"
           ? saved.nextUsesVsLink
@@ -2421,7 +2572,7 @@ function gtMain() {
         requireBoth: typeof saved.requireBoth === "boolean"
           ? saved.requireBoth
           : DEFAULT_RIVAL_SETTINGS.requireBoth,
-        diffMin, diffMax, lenMin, lenMax,
+        diffMin, diffMax, lenMin, lenMax, fv: 1,
       };
     } catch {
       return { ...DEFAULT_RIVAL_SETTINGS };
@@ -6890,16 +7041,48 @@ async function getExpRankByUsername(username) {
   // ── Difficulty / length filter ───────────────────────────────
   // Active iff a handle is off its end. When inactive the dimension is ignored
   // (its d/l value is never read), so a default filter needs no meta at all.
+  // Axis bounds derived from the rival's stored quotes (difficulty floored to
+  // an integer, length floored to the nearest 1000). Cached by store epoch
+  // (rebuilt when the rival stores change). Falls back to the fixed bounds
+  // until at least one rival quote with meta is known.
+  let rivalAxisCache = null;
+  function rivalFilterAxis() {
+    if (rivalAxisCache && rivalAxisCache.epoch === rivalStoreEpoch) return rivalAxisCache;
+    let dLo = Infinity, dHi = -Infinity, lLo = Infinity, lHi = -Infinity;
+    for (const gd of (goalData.rival || [])) {
+      const q = loadRivalStore(gd.rival).quotes;
+      for (const qid in q) {
+        const d = Number(q[qid].d), l = Number(q[qid].l);
+        if (Number.isFinite(d)) { if (d < dLo) dLo = d; if (d > dHi) dHi = d; }
+        if (Number.isFinite(l)) { if (l < lLo) lLo = l; if (l > lHi) lHi = l; }
+      }
+    }
+    const floorTo = (v, step) => Math.floor(v / step) * step;
+    const axis = {
+      epoch: rivalStoreEpoch,
+      diffMin: Number.isFinite(dLo) ? Math.floor(dLo) : RIVAL_DIFF_MIN,
+      diffMax: Number.isFinite(dHi) ? Math.floor(dHi) : RIVAL_DIFF_MAX,
+      lenMin:  Number.isFinite(lLo) ? floorTo(lLo, RIVAL_LEN_AXIS_ROUND) : RIVAL_LEN_MIN,
+      lenMax:  Number.isFinite(lHi) ? floorTo(lHi, RIVAL_LEN_AXIS_ROUND) : RIVAL_LEN_MAX,
+    };
+    if (axis.diffMax <= axis.diffMin) axis.diffMax = axis.diffMin + 1;                  // keep a usable span
+    if (axis.lenMax  <= axis.lenMin)  axis.lenMax  = axis.lenMin + RIVAL_LEN_AXIS_ROUND;
+    rivalAxisCache = axis;
+    return axis;
+  }
+  // Resolve the stored handles (null = at an axis end) against the live axis.
   function rivalFilterState() {
-    const s = rivalSettings;
-    const dMin = Number.isFinite(s.diffMin) ? s.diffMin : RIVAL_DIFF_MIN;
-    const dMax = Number.isFinite(s.diffMax) ? s.diffMax : RIVAL_DIFF_MAX;
-    const lMin = Number.isFinite(s.lenMin)  ? s.lenMin  : RIVAL_LEN_MIN;
-    const lMax = Number.isFinite(s.lenMax)  ? s.lenMax  : RIVAL_LEN_MAX;
+    const s = rivalSettings, axis = rivalFilterAxis();
+    const clampD = (v) => Math.min(axis.diffMax, Math.max(axis.diffMin, v));
+    const clampL = (v) => Math.min(axis.lenMax,  Math.max(axis.lenMin,  v));
+    const dMin = (s.diffMin == null) ? axis.diffMin : clampD(s.diffMin);
+    const dMax = (s.diffMax == null) ? axis.diffMax : clampD(s.diffMax);
+    const lMin = (s.lenMin  == null) ? axis.lenMin  : clampL(s.lenMin);
+    const lMax = (s.lenMax  == null) ? axis.lenMax  : clampL(s.lenMax);
     return {
-      dMin, dMax, lMin, lMax,
-      dActive: dMin > RIVAL_DIFF_MIN || dMax < RIVAL_DIFF_MAX,
-      lActive: lMin > RIVAL_LEN_MIN  || lMax < RIVAL_LEN_MAX,
+      dMin, dMax, lMin, lMax, axis,
+      dActive: dMin > axis.diffMin || dMax < axis.diffMax,
+      lActive: lMin > axis.lenMin  || lMax < axis.lenMax,
     };
   }
   // Signature for the standings memo so a filter change invalidates it.
@@ -6909,18 +7092,18 @@ async function getExpRankByUsername(username) {
   }
   // Whether a quote entry passes the active filter. A CONSTRAINED dimension
   // excludes entries whose meta is unknown (legacy data not yet backfilled); a
-  // dimension at full range is skipped. A max handle at its cap = no upper
-  // bound (difficulty 8 = "8+", length 10000 = "10000+").
+  // dimension at full range is skipped. A max handle at the axis max = no upper
+  // bound (so "14+" still includes a difficulty-14.2 quote).
   function rivalQuotePassesFilter(entry, f) {
     if (f.dActive) {
       const d = Number(entry && entry.d);
       if (!Number.isFinite(d) || d < f.dMin) return false;
-      if (f.dMax < RIVAL_DIFF_MAX && d > f.dMax) return false;
+      if (f.dMax < f.axis.diffMax && d > f.dMax) return false;
     }
     if (f.lActive) {
       const l = Number(entry && entry.l);
       if (!Number.isFinite(l) || l < f.lMin) return false;
-      if (f.lMax < RIVAL_LEN_MAX && l > f.lMax) return false;
+      if (f.lMax < f.axis.lenMax && l > f.lMax) return false;
     }
     return true;
   }

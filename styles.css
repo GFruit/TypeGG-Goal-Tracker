@@ -431,6 +431,7 @@
   justify-content: space-between;
   align-items: center;
   margin-bottom: 14px;
+  flex-shrink: 0;
 }
 .gt-modal-title { font-size: 14px; font-weight: 700; color: #f3f4f6; }
 
@@ -876,7 +877,7 @@
   z-index: 10000;
   align-items: flex-start;
   justify-content: center;
-  padding-top: 15vh;
+  padding: 7vh 0;
 }
 #gt-settings-overlay.open { display: flex; }
 
@@ -891,13 +892,17 @@
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
+  max-height: 86vh;   /* never exceed the viewport (top stays anchored, inner scrolls) */
+  min-height: 400px;  /* stable height so switching to a short tab doesn't shrink it */
+  overflow: hidden;   /* clip to the rounded corners; the content area scrolls instead */
 }
 
 /* ── Settings modal layout: sidebar + content ────────────── */
 .gt-settings-body {
   display: flex;
   gap: 16px;
-  min-height: 300px; /* enough vertical room for the weekly/monthly wheel */
+  flex: 1 1 auto;
+  min-height: 0; /* allow the content area to scroll instead of overflowing the modal */
 }
 
 .gt-settings-sidebar {
@@ -934,6 +939,9 @@
 .gt-settings-content {
   flex: 1;
   min-width: 0; /* allow wheel layout to shrink inside flex */
+  overflow-y: auto; /* tall tabs (e.g. Rival) scroll here; header + sidebar stay fixed */
+  overscroll-behavior: contain; /* don't chain wheel scroll to the page at the edges */
+  padding-right: 4px; /* gutter so content doesn't sit under the scrollbar */
 }
 
 .gt-rec-reset-text {
@@ -1416,3 +1424,10 @@ body.gt-app-loggedout .gt-widget-detached { display: none !important; }
   color: #4b5563; font-size: 10px;
 }
 .gt-range-ticks span { flex: 0 0 auto; }
+.gt-range-num {
+  cursor: text; outline: none; padding: 0 2px; border-radius: 3px;
+  min-width: 6px; display: inline-block;
+}
+.gt-range-num:hover  { background: rgba(59, 130, 246, 0.12); }
+.gt-range-num:focus  { background: rgba(59, 130, 246, 0.22); }
+.gt-range-dash, .gt-range-cap { color: #93c5fd; }
