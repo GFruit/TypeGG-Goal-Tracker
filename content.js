@@ -6457,7 +6457,15 @@ async function getExpRankByUsername(username) {
                                      // is ~linear in rows, so 250 → ~10s/page
                                      // with a wide timeout margin, same per-row
                                      // efficiency, finer resume checkpoints.
-  const RIVAL_REFRESH_PAGE_SIZE = 100; // ongoing refresh: only the recent changes matter (early-stop)
+  const RIVAL_REFRESH_PAGE_SIZE = 100; // ongoing refresh: page the since-last-sync window
+  // Re-pull a few minutes before the stored lastSync each refresh, to absorb
+  // clock skew and startDate boundary inclusivity. Merges are idempotent, so the
+  // small re-scan costs nothing but closes edge gaps.
+  const RIVAL_SYNC_OVERLAP_MS = 5 * 60_000;
+  // Safety cap on the since-last-sync scan. With a working startDate the window
+  // is tiny (a handful of pages); the cap only bounds a pathological case where
+  // startDate isn't filtering, so a refresh can never runaway-scan full history.
+  const RIVAL_REFRESH_MAX_PAGES = 50;
   const RIVAL_PP_EPS     = 1e-6;
   // Pace consecutive bulk-build page fetches. A tight fetch loop over a
   // many-page store (perPage=1000) saturates the connection and is a prime
@@ -6495,34 +6503,39 @@ async function getExpRankByUsername(username) {
   let rivalStoreEpoch = 0;
   const rivalStandingsCache = new Map(); // goalId → { epoch, metric, result }
 
-  // Each store now has TWO fetch streams: `fetch` builds the RANKED quotes and
-  // `fetchU` builds the UNRANKED ones (the API's /users/<name>/quotes endpoint
-  // takes a `status=ranked|unranked|any` filter; its default is ranked, which
-  // is what the single original stream fetched). The unranked stream only runs
-  // when the active scope needs it (see rivalNeedsUnranked). Its phase is
-  // "none" until first started. Quote entries carry an `r` flag (true=ranked,
-  // false=unranked) so standings can be filtered per scope without refetching;
-  // a missing `r` is treated as ranked (legacy stores were ranked-only).
-  function freshRivalFetch()  { return { phase: "bulk", nextPage: 1, totalPages: null }; }
-  function freshRivalFetchU() { return { phase: "none", nextPage: 1, totalPages: null }; }
-  // Store meta version. Bumped when we started capturing each quote's
-  // difficulty/length (`d`/`l`) on its entry. A store built before this lacks
-  // metaV and gets a one-time re-bulk (backfillMetaIfNeeded) to fill it in.
-  const RIVAL_META_V = 1;
+  // Each store has ONE fetch stream (`fetch`) that bulk-builds EVERY quote in a
+  // single pass via the API's `status=any` filter (ranked + unranked together).
+  // Each /users/<name>/quotes row carries its own `quote.ranked` flag, so every
+  // entry is tagged with `r` (true=ranked, false=unranked) as it merges and the
+  // scope filter (all/ranked/unranked) is then a pure read-time concern — no
+  // refetch on a scope change. A missing `r` is treated as ranked (legacy data,
+  // until that store's one-time status=any re-bulk re-tags it).
+  function freshRivalFetch() { return { phase: "bulk", nextPage: 1, totalPages: null }; }
+  // Store meta version.
+  //   v1: per-entry difficulty/length (`d`/`l`) capture.
+  //   v2: single status=any build (ranked + unranked + `r` in one stream).
+  // A store below the current version gets a one-time re-bulk (backfillMeta-
+  // IfNeeded) under status=any, which captures everything v2 needs at once.
+  const RIVAL_META_V = 2;
   function freshRivalStore() {
-    return { quotes: {}, fetch: freshRivalFetch(), fetchU: freshRivalFetchU(), metaV: RIVAL_META_V };
+    return { quotes: {}, fetch: freshRivalFetch(), metaV: RIVAL_META_V, lastSync: null };
   }
-  // Older stores predate the d/l capture: re-run any COMPLETED bulk stream once
-  // so the re-paged /quotes rows backfill each entry's difficulty/length. The
-  // user just sees the normal "syncing" state during the re-bulk. metaV is
-  // stamped when the ranked stream finishes (fetchOneRivalBulkPage), so this
-  // fires at most once per store. Streams still building (or never built) are
-  // left alone -- they capture d/l natively as they run.
+  // Pre-v2 stores were built ranked-only (or as two separate ranked/unranked
+  // streams). Re-bulk ONCE under status=any so a single pass backfills the
+  // unranked quotes plus each entry's d/l/r, then drop the obsolete unranked
+  // cursor. Existing quotes stay (merges are idempotent); the user just sees the
+  // normal "syncing…" state until the re-bulk finishes, after which metaV is
+  // stamped current (fetchOneRivalBulkPage) and this never fires again.
   function backfillMetaIfNeeded(store) {
     if (store.metaV === RIVAL_META_V) return;
-    for (const fobj of [store.fetch, store.fetchU]) {
-      if (fobj && fobj.phase === "done") { fobj.phase = "bulk"; fobj.nextPage = 1; fobj.totalPages = null; }
-    }
+    store.fetch = freshRivalFetch(); // re-page from the start under status=any
+    delete store.fetchU;             // obsolete two-stream cursor
+    // Mark the store as on the v2 (status=any) model NOW, not on completion, so
+    // the freshly-reset cursor isn't reset again next session — an interrupted
+    // re-bulk then resumes from its persisted page instead of restarting. The
+    // store still reports "syncing…" until fetch.phase === "done" (rivalBulkDone
+    // checks the phase, not metaV), so an incomplete re-bulk is never "done".
+    store.metaV = RIVAL_META_V;
   }
   // One-time migration (pre-scoped self key → gt-rivalq-self-<username>). The
   // self store used to live at the unscoped `gt-rivalq-self`. On the first
@@ -6556,9 +6569,8 @@ async function getExpRankByUsername(username) {
     if (!store || typeof store !== "object" || typeof store.quotes !== "object") {
       store = freshRivalStore();
     }
-    if (!store.fetch)  store.fetch  = freshRivalFetch();
-    if (!store.fetchU) store.fetchU = freshRivalFetchU();
-    backfillMetaIfNeeded(store); // legacy stores: re-bulk once to capture d/l
+    if (!store.fetch) store.fetch = freshRivalFetch();
+    backfillMetaIfNeeded(store); // pre-v2 stores: one-time status=any re-bulk
     rivalStores.set(key, store);
     return store;
   }
@@ -6578,8 +6590,7 @@ async function getExpRankByUsername(username) {
     try {
       const parsed = JSON.parse(localStorage.getItem(key) || "null");
       if (parsed && typeof parsed.quotes === "object") {
-        if (!parsed.fetch)  parsed.fetch  = freshRivalFetch();
-        if (!parsed.fetchU) parsed.fetchU = freshRivalFetchU();
+        if (!parsed.fetch) parsed.fetch = freshRivalFetch();
         rivalStores.set(key, parsed);
         rivalStoreEpoch++; // invalidate standings cache
       }
@@ -6603,31 +6614,12 @@ async function getExpRankByUsername(username) {
     if (scope === "unranked") return entry.r === false;
     return true; // all
   }
-  // The unranked stream is only fetched when some scope needs it. Scope is
-  // global, so this is all-or-nothing across every managed store (self + each
-  // rival) — mirrors the quotes-goal `quotesNeedUnrankedData()` gate so a
-  // ranked-only setup never pays for the extra stream.
-  function rivalNeedsUnranked() {
-    if (rivalScope() === "ranked") return false;
-    return (goalData.rival || []).length > 0;
-  }
-  function rivalRankedDone(store)   { return !!(store && store.fetch  && store.fetch.phase  === "done"); }
-  function rivalUnrankedDone(store) { return !!(store && store.fetchU && store.fetchU.phase === "done"); }
-  // How many stored quotes belong to one stream's bucket (ranked = r !== false,
-  // unranked = r === false; a missing `r` counts as ranked). Compared against
-  // the rival's API count to detect a drifted store in the incremental refresh.
-  function rivalStoreBucketCount(store, unranked) {
-    const q = store.quotes; let n = 0;
-    for (const id in q) { const u = q[id].r === false; if (unranked ? u : !u) n++; }
-    return n;
-  }
-  // "Fully synced for the active scope": the ranked stream always, plus the
-  // unranked stream when the scope needs it. Drives the card's "syncing…" hint
-  // and the settled/loading logic.
+  // "Fully synced": the single status=any bulk stream has finished. Scope no
+  // longer affects what's fetched (everything is fetched once and tagged), so
+  // this is just whether that one stream is done. Drives the card's "syncing…"
+  // hint and the settled/loading logic.
   function rivalBulkDone(store) {
-    if (!rivalRankedDone(store)) return false;
-    if (rivalNeedsUnranked() && !rivalUnrankedDone(store)) return false;
-    return true;
+    return !!(store && store.fetch && store.fetch.phase === "done");
   }
 
   // PP-keyed idempotent merge. Returns true iff the store changed. `ranked`
@@ -6666,18 +6658,24 @@ async function getExpRankByUsername(username) {
     const qq = q.quote || null; // /users/<u>/quotes rows nest the quote meta under .quote
     const d = qq ? Number(qq.difficulty) : NaN;
     const l = qq ? Number(qq.length)     : NaN;
+    // status=any rows carry the quote's ranked flag; capture it so scope
+    // filtering needs no separate stream. Undefined when absent (e.g. a /races
+    // row) → treated as ranked downstream until the bulk re-tags it.
+    const r = (qq && typeof qq.ranked === "boolean") ? qq.ranked : undefined;
     return {
       quoteId: br.quoteId, wpm: Number(br.wpm), pp: Number(br.pp),
       d: Number.isFinite(d) ? d : undefined,
       l: Number.isFinite(l) ? l : undefined,
+      r,
     };
   }
 
   // ── Fetching ────────────────────────────────────────────────
-  async function fetchRivalQuotesPage(fetchName, { page, reverse, perPage = RIVAL_PAGE_SIZE, status }) {
+  async function fetchRivalQuotesPage(fetchName, { page, reverse, perPage = RIVAL_PAGE_SIZE, status, startDate }) {
     const params = new URLSearchParams({ page: String(page), perPage: String(perPage) });
     if (reverse) params.set("reverse", "true");
-    if (status)  params.set("status", status); // ranked | unranked (omitted → API default = ranked)
+    if (status)  params.set("status", status); // ranked | unranked | any (omitted → API default = ranked)
+    if (startDate) params.set("startDate", startDate); // bound to quotes LAST-RACED on/after this (ISO)
     const url = `https://api.typegg.io/v1/users/${encodeURIComponent(fetchName)}/quotes?${params.toString()}`;
 
     // ── DIAGNOSTIC ALARM (Issue 2) — quiet by design ────────────────────
@@ -6690,7 +6688,8 @@ async function getExpRankByUsername(username) {
     //   • a SUCCESSFUL page that ran unusually slow (> GT_DIAG_SLOW_MS) — the
     //     early warning that we're drifting back toward the gateway-timeout
     //     zone that caused the original intermittent failures.
-    // Watches every real page; skips the perPage=1 count probe.
+    // Watches every real page (the perPage=1 count probe is gone — the refresh
+    // now bounds itself with startDate instead).
     const GT_DIAG_SLOW_MS = 20000;
     const gtDiagWatch = perPage > 1;
     const gtDiagTag = `[GT-DIAG] quotes ${fetchName} p${page} perPage=${perPage}${status ? " " + status : ""}`;
@@ -6732,11 +6731,12 @@ async function getExpRankByUsername(username) {
     } else {
       d = await r.json();
     }
-    // `total` (exact quote count for this status) is surfaced when the API
-    // provides it under any of the common field names; the incremental refresh
-    // uses it to detect a drifted count. When absent it's null, and callers
-    // fall back to the perPage=1 trick (totalPages === count at one-per-page).
-    const total = (typeof d?.total === "number") ? d.total
+    // Exact quote count for this status. The API's documented field is
+    // `totalCount`; the older names are kept as harmless fallbacks. When absent
+    // it's null and callers fall back to the perPage=1 trick (totalPages ===
+    // count at one-per-page).
+    const total = (typeof d?.totalCount === "number") ? d.totalCount
+                : (typeof d?.total === "number") ? d.total
                 : (typeof d?.totalQuotes === "number") ? d.totalQuotes
                 : (typeof d?.count === "number") ? d.count
                 : null;
@@ -6759,7 +6759,14 @@ async function getExpRankByUsername(username) {
 
   // ── Sync orchestration (leader-only fetching) ────────────────
   const rivalSyncInFlight = new Set(); // storeKeys currently bulk/incremental syncing
-  const rivalPollTimers   = new Map(); // storeKey → interval id
+  // ONE rotation timer drives all ongoing refreshes (not one per store): each
+  // tick advances the global bulk driver if anything is still building, else
+  // refreshes exactly ONE managed store (round-robin via rivalRefreshCursor), so
+  // steady-state traffic stays ~one small request per RIVAL_POLL_MS regardless
+  // of how many rivals are listed. (gtApiFetch backs off but doesn't serialise,
+  // so N per-store timers could otherwise burst N requests at once.)
+  let rivalPollTimer    = null;
+  let rivalRefreshCursor = 0;
   const rivalManaged      = new Map(); // lowerName ("__self__"|username) → fetchName
   // At most ONE bulk build runs at a time. Self + a rival firing their first
   // pages concurrently is exactly the doubled request rate that trips the
@@ -6772,11 +6779,6 @@ async function getExpRankByUsername(username) {
     return rivalManaged.get(name) || name;
   }
 
-  // Bulk build of ONE stream (resumable, oldest-first). `stream` is "ranked"
-  // (the `fetch` cursor, status=ranked) or "unranked" (the `fetchU` cursor,
-  // status=unranked). Loops every page in one invocation; persists the cursor
-  // + re-renders after each page so progress is visible. Entries are tagged
-  // with their ranked bucket as they merge.
   // ── Bulk build, round-robin across stores ─────────────────────────────
   // The bulk loads every quote for the self store and each rival store, paged.
   // Instead of draining one store completely before starting the next (which
@@ -6790,35 +6792,30 @@ async function getExpRankByUsername(username) {
   //
   // Still strictly one request in flight at a time, with the same
   // RIVAL_PAGE_DELAY_MS pacing between every page: this is a reordering, not
-  // more concurrency, so it adds no burst pressure. ranked builds before
-  // unranked per store. The cursor (fobj.nextPage) is persisted every page, so
-  // a pause/freeze/lost-leadership resumes cleanly from where it stopped.
+  // more concurrency, so it adds no burst pressure. The cursor (fetch.nextPage)
+  // is persisted every page, so a pause/freeze/lost-leadership resumes cleanly
+  // from where it stopped.
 
-  // Which bulk stream this store still needs, or null if its bulk is complete.
+  // Truthy ("any") while this store still has bulk work, else null. (Single
+  // status=any stream now, but kept as a string so the driver's truthiness
+  // checks and pending-set logic stay unchanged.)
   function pendingBulkStreamFor(name) {
-    const store = loadRivalStore(name);
-    if (!rivalRankedDone(store)) return "ranked";
-    if (rivalNeedsUnranked() && !rivalUnrankedDone(store)) return "unranked";
-    return null;
+    return rivalBulkDone(loadRivalStore(name)) ? null : "any";
   }
 
-  // Fetch + merge ONE bulk page for a store/stream and advance its cursor.
-  // Returns "advanced" (more pages remain), "done" (this stream is complete), or
+  // Fetch + merge ONE bulk page (status=any) for a store and advance its cursor.
+  // Returns "advanced" (more pages remain), "done" (the build is complete), or
   // "failed" (the request threw — gtApiFetch has already escalated the shared
   // backoff). `persist(name, force)` saves the store and renders (throttled).
-  async function fetchOneRivalBulkPage(name, stream, persist) {
+  async function fetchOneRivalBulkPage(name, persist) {
     const fetchName = rivalFetchNameFor(name);
     if (!fetchName) return "failed"; // auth not ready yet
-    const store     = loadRivalStore(name);
-    const unranked  = stream === "unranked";
-    const fobj      = unranked ? store.fetchU : store.fetch;
-    const status    = unranked ? "unranked" : "ranked";
-    const rankedTag = !unranked;
+    const store = loadRivalStore(name);
+    const fobj  = store.fetch;
     if (fobj.phase === "done") return "done";
-    if (unranked && fobj.phase === "none") { fobj.phase = "bulk"; fobj.nextPage = 1; }
     const page = fobj.nextPage || 1;
     let res;
-    try { res = await fetchRivalQuotesPage(fetchName, { page, reverse: true, status }); }
+    try { res = await fetchRivalQuotesPage(fetchName, { page, reverse: true, status: "any" }); }
     catch (e) {
       console.warn("[Goal Tracker] rival bulk page failed (paused):", e);
       persist(name, true); // persist progress so we resume from here
@@ -6826,13 +6823,14 @@ async function getExpRankByUsername(username) {
     }
     for (const q of res.quotes) {
       const e = entryFromQuoteRecord(q);
-      if (e) rivalMergeEntry(store, e.quoteId, e.wpm, e.pp, rankedTag, e.d, e.l);
+      if (e) rivalMergeEntry(store, e.quoteId, e.wpm, e.pp, e.r, e.d, e.l);
     }
     fobj.totalPages = res.totalPages;
     if (page >= res.totalPages) {
       fobj.phase = "done";
       fobj.nextPage = res.totalPages + 1;
-      if (!unranked) store.metaV = RIVAL_META_V; // ranked stream done -> d/l fully captured
+      store.metaV = RIVAL_META_V; // status=any build done -> ranked/unranked/d/l/r all captured
+      store.lastSync = new Date().toISOString(); // refresh anchor: all captured up to now
       persist(name, true);
       return "done";
     }
@@ -6877,8 +6875,7 @@ async function getExpRankByUsername(username) {
         // stores that just completed are reflected immediately.
         const pending = [];
         for (const name of rivalManaged.keys()) {
-          const s = pendingBulkStreamFor(name);
-          if (s) pending.push({ name, stream: s });
+          if (pendingBulkStreamFor(name)) pending.push({ name });
         }
         if (pending.length === 0) break; // every bulk complete
 
@@ -6896,7 +6893,7 @@ async function getExpRankByUsername(username) {
         }
         firstFetch = false;
 
-        const result = await fetchOneRivalBulkPage(job.name, job.stream, persist);
+        const result = await fetchOneRivalBulkPage(job.name, persist);
         if (result === "failed") break; // backoff in effect; poll resumes later
         lastName = job.name;
       }
@@ -6921,92 +6918,68 @@ async function getExpRankByUsername(username) {
     }
   }
 
-  // Ongoing refresh of ONE stream. Runs every RIVAL_POLL_MS.
+  // Ongoing refresh: a "since last sync" pull. Runs (one store per tick) every
+  // RIVAL_POLL_MS via the rotation timer.
   //
-  // The old version read page 1 (recent-sorted) and stopped at the first quote
-  // it already had, assuming everything past it was older/known. That leaks
-  // quotes two ways: (a) quotes the rival typed while we weren't syncing
-  // (browser closed, not the leader, throttled) sit behind newer activity we
-  // never paged to, and (b) a quote we already hold can be bumped to the front
-  // by a re-race or a sub-epsilon PB, so a genuinely new quote right behind it
-  // is never reached → a small, *permanent* gap (the classic "rival has N, card
-  // shows N-4").
-  //
-  // So instead of trusting the early-stop, we make the refresh count-aware:
-  // learn how many quotes the rival actually has for this status and keep
-  // paging the recent list until our stored count matches. Counts agreeing is
-  // the cheap common case (one tiny request); we only scan deeper when behind.
-  async function rivalIncrementalStream(name, stream) {
+  // startDate filters by LAST-RACED time server-side (the /quotes sort + filter
+  // run on the user's last race on each quote, NOT the PB timestamp — confirmed
+  // against /races). Since you can't beat a PB without racing the quote, the set
+  // raced since lastSync is a SUPERSET of every quote improved since lastSync
+  // AND every brand-new quote — so a single startDate=<lastSync> pull catches
+  // them all, no early-stop heuristic. We decide "improved?" by score (merges
+  // are idempotent; non-PB re-races merge as no-ops). The row `timestamp` is
+  // PB-time, so it is NOT a valid paging stop key — instead we just page the
+  // (small, server-bounded) result to exhaustion. This closes the old
+  // early-stop's permanent-gap and ">100 changes while the tab was closed"
+  // holes. A small overlap (RIVAL_SYNC_OVERLAP_MS) re-pulls a few minutes before
+  // lastSync for clock-skew / boundary safety; RIVAL_REFRESH_MAX_PAGES bounds a
+  // pathological non-filtering startDate.
+  async function rivalIncrementalRefresh(name) {
     const fetchName = rivalFetchNameFor(name);
     if (!fetchName) return false;
-    const store     = loadRivalStore(name);
-    const unranked  = stream === "unranked";
-    const status    = unranked ? "unranked" : "ranked";
-    const rankedTag = !unranked;
-    let changed = false;
+    const store  = loadRivalStore(name);
+    const status = "any";
 
-    // (1) Authoritative count for this status. `perPage=1` makes totalPages ===
-    // the number of quotes, so this one tiny request says exactly how many the
-    // rival has (the API's `total`, if it exposes one, is used in preference).
-    // We also merge the single most-recent record it returns (a free PB catch),
-    // and remember whether the very front changed.
-    let apiCount = null, frontChanged = false;
-    try {
-      const head = await fetchRivalQuotesPage(fetchName, { page: 1, perPage: 1, reverse: false, status });
-      apiCount = (typeof head.total === "number") ? head.total : head.totalPages;
-      for (const q of head.quotes) {
-        const e = entryFromQuoteRecord(q);
-        if (e && rivalMergeEntry(store, e.quoteId, e.wpm, e.pp, rankedTag, e.d, e.l)) { changed = true; frontChanged = true; }
-      }
-    } catch (e) {
-      console.warn("[Goal Tracker] rival count probe failed (paused):", e);
-      return changed; // gtApiFetch already escalated the shared backoff
+    // No anchor yet (a store that completed its bulk before lastSync existed):
+    // the bulk already captured everything, so just set the anchor to now and
+    // let the next tick do a proper bounded pull. The overlap then re-covers the
+    // gap between now and that next tick, so nothing is missed.
+    const anchorMs = store.lastSync ? Date.parse(store.lastSync) : NaN;
+    if (!Number.isFinite(anchorMs)) {
+      store.lastSync = new Date().toISOString();
+      return false; // store just changed shape but no quote changed
     }
 
-    const behind = apiCount != null && rivalStoreBucketCount(store, unranked) < apiCount;
-
-    // Counts agree and the most-recent quote is unchanged → nothing new at the
-    // front and nothing missing. Skip the page fetch entirely (steady state is
-    // just the one tiny probe above).
-    if (!behind && !frontChanged) return changed;
-
-    // (2) Page the recent-sorted list.
-    //  - BEHIND: scan without early-stopping until the stored count catches up
-    //    to apiCount (the missing quotes may hide behind already-known ones),
-    //    bounded by totalPages and the usual leader/visible/throttle gates.
-    //  - NOT behind (just front activity): one page with the safe early-stop —
-    //    only PBs can have changed and they cluster at the very front.
+    const syncStart = Date.now();
+    const startDate = new Date(Math.max(0, anchorMs - RIVAL_SYNC_OVERLAP_MS)).toISOString();
+    let changed = false;
+    let completed = false;
     let page = 1;
-    pages: while (isLeader && anyTabVisibleRecently() && !apiThrottled()) {
+    while (isLeader && anyTabVisibleRecently() && !apiThrottled()) {
       if (page > 1) await new Promise(r => setTimeout(r, RIVAL_PAGE_DELAY_MS));
       let res;
-      try { res = await fetchRivalQuotesPage(fetchName, { page, reverse: false, perPage: RIVAL_REFRESH_PAGE_SIZE, status }); }
-      catch (e) { console.warn("[Goal Tracker] rival refresh failed (paused):", e); break; }
+      try { res = await fetchRivalQuotesPage(fetchName, { page, reverse: false, perPage: RIVAL_REFRESH_PAGE_SIZE, status, startDate }); }
+      catch (e) { console.warn("[Goal Tracker] rival refresh failed (paused):", e); break; } // don't advance the anchor
       for (const q of res.quotes) {
         const e = entryFromQuoteRecord(q);
         if (!e) continue;
-        const cur = store.quotes[e.quoteId];
-        const improved = !cur || e.pp > cur.pp + RIVAL_PP_EPS;
-        // Front-refresh (not behind): stop at the first quote we already hold —
-        // only PBs matter and they're at the very front. Catch-up (behind): keep
-        // going and merge *every* quote. The merge is idempotent on value but
-        // also (re)applies the ranked `r` tag, so a mis-tagged entry can't keep
-        // the bucket count permanently short (which would re-scan every tick).
-        if (!improved && !behind) break pages;
-        if (rivalMergeEntry(store, e.quoteId, e.wpm, e.pp, rankedTag, e.d, e.l)) changed = true;
+        // Merge improvements; non-PB re-races (the bulk of a since-last-sync
+        // window) merge as no-ops. The `r` tag is (re)applied so a mis-tag heals.
+        if (rivalMergeEntry(store, e.quoteId, e.wpm, e.pp, e.r, e.d, e.l)) changed = true;
       }
-      if (page >= res.totalPages) {
-        if (behind && rivalStoreBucketCount(store, unranked) < apiCount) {
-          // Scanned every page and still short — apiCount is likely stale/odd.
-          // Stop for this tick rather than loop; the next tick re-probes.
-          console.warn("[Goal Tracker] rival refresh: count still short after full scan", { name, stream, apiCount });
-        }
+      if (page >= res.totalPages) { completed = true; break; }
+      if (page >= RIVAL_REFRESH_MAX_PAGES) {
+        console.warn("[Goal Tracker] rival refresh hit page cap — is startDate filtering?", { name, startDate, pages: page });
+        completed = true; // treat as done; the bounded set is merged
         break;
       }
-      if (!behind) break;                                                       // front-refresh: one page is enough
-      if (rivalStoreBucketCount(store, unranked) >= apiCount) break;            // caught up
       page += 1;
     }
+    // Advance the anchor only on a clean full scan — never when we bailed on
+    // throttle / lost leadership / hidden (so the missed tail is re-pulled next
+    // time). syncStart was captured BEFORE the fetches, so a quote raced during
+    // the scan stays inside the next window (the overlap reinforces this).
+    if (completed) store.lastSync = new Date(syncStart).toISOString();
     return changed;
   }
 
@@ -7019,22 +6992,54 @@ async function getExpRankByUsername(username) {
     const fetchName = rivalFetchNameFor(name);
     if (!fetchName) return;
     const store = loadRivalStore(name);
-    if (!rivalBulkDone(store)) return; // still building (for the active scope)
+    if (!rivalBulkDone(store)) return; // still building
     rivalSyncInFlight.add(key);
     try {
-      let changed = false;
-      if (await rivalIncrementalStream(name, "ranked")) changed = true;
-      if (rivalNeedsUnranked() && rivalUnrankedDone(store) && !apiThrottled()) {
-        if (await rivalIncrementalStream(name, "unranked")) changed = true;
-      }
-      if (changed) { saveRivalStore(name); renderAllGoals(); }
+      if (await rivalIncrementalRefresh(name)) { saveRivalStore(name); renderAllGoals(); }
     } finally {
       rivalSyncInFlight.delete(key);
     }
   }
 
-  // Drive one store: build ranked first, then unranked (if the scope needs it),
-  // else do an incremental refresh pass.
+  // The single rotation timer. Started lazily once anything is managed; cleared
+  // by stopAllRivalTimers (logout). It no-ops cheaply while idle.
+  function ensureRivalPollTimer() {
+    if (rivalPollTimer != null) return;
+    rivalPollTimer = setInterval(rivalPollOnce, RIVAL_POLL_MS);
+  }
+  // One rotation tick: resume the global bulk if any store is still building,
+  // otherwise refresh ONE managed store (round-robin). Fires regardless of
+  // visibility so an interrupted one-time bulk resumes in the background; the
+  // incremental refresh inside rivalIncrementalSync is itself visibility-gated,
+  // so the ongoing refresh still pauses when hidden.
+  function rivalPollOnce() {
+    if (!isLeader) return;
+    if (!isLoggedIn()) return;     // logged out — nothing to sync (no 401s)
+    if (apiThrottled()) return;    // backing off after recent fetch failures
+    if (rivalManaged.size === 0) return;
+    // Any store still building → advance the round-robin bulk driver (it builds
+    // every pending store together) and do nothing else this tick.
+    for (const n of rivalManaged.keys()) {
+      if (pendingBulkStreamFor(n)) { runRivalBulkDriver(); return; }
+    }
+    // All bulk complete. The ongoing incremental refresh is rival-goal-only
+    // machinery — in the self-prefetch state (logged in, no rival goal) the
+    // one-time bulk is the whole job, so there's no ongoing refresh.
+    if ((goalData.rival || []).length === 0) return;
+    // Round-robin: refresh exactly ONE managed store per tick. Self is included
+    // (its PBs need refreshing too); the cursor wraps and tolerates the set
+    // changing between ticks.
+    const names = Array.from(rivalManaged.keys());
+    if (names.length === 0) return;
+    if (rivalRefreshCursor >= names.length) rivalRefreshCursor = 0;
+    const name = names[rivalRefreshCursor];
+    rivalRefreshCursor = (rivalRefreshCursor + 1) % names.length;
+    rivalIncrementalSync(name);
+  }
+
+  // Drive one store: run the status=any bulk while it's still building, else do
+  // an incremental refresh pass. Used for the immediate kick on registration
+  // (the recurring cadence is rivalPollOnce).
   function rivalSyncTick(name) {
     if (!isLoggedIn()) return; // logged out — nothing to sync (no 401s)
     if (apiThrottled()) return; // backing off after recent fetch failures
@@ -7054,26 +7059,14 @@ async function getExpRankByUsername(username) {
   }
 
   function startRivalManaged(name, fetchName) {
-    const key = rivalStoreKey(name);
     rivalManaged.set(name, fetchName);
-    rivalSyncTick(name); // kick immediately (bulk resumes / first refresh)
-    if (!rivalPollTimers.has(key)) {
-      const t = setInterval(() => {
-        // Fire regardless of visibility so an interrupted one-time bulk resumes
-        // in the background. rivalSyncTick → rivalIncrementalSync is itself
-        // visibility-gated, so the recurring refresh still pauses when hidden;
-        // only the bulk-resume path proceeds.
-        if (!isLeader) return;
-        rivalSyncTick(name);
-      }, RIVAL_POLL_MS);
-      rivalPollTimers.set(key, t);
-    }
+    rivalSyncTick(name);    // kick immediately (bulk resumes / first refresh)
+    ensureRivalPollTimer(); // the single rotation timer drives the recurring cadence
   }
   function stopRivalManaged(name) {
     const key = rivalStoreKey(name);
     rivalManaged.delete(name);
-    const t = rivalPollTimers.get(key);
-    if (t) { clearInterval(t); rivalPollTimers.delete(key); }
+    if (rivalRefreshCursor >= rivalManaged.size) rivalRefreshCursor = 0; // keep cursor in range
     if (name !== RIVAL_SELF_NAME) {
       try { localStorage.removeItem(key); } catch {}
       rivalStores.delete(key);
@@ -7087,9 +7080,9 @@ async function getExpRankByUsername(username) {
   // the account-independent rival stores and the self store on disk for the
   // next login. A running bulk driver exits cleanly once rivalManaged is empty.
   function stopAllRivalTimers() {
-    for (const t of rivalPollTimers.values()) clearInterval(t);
-    rivalPollTimers.clear();
+    if (rivalPollTimer != null) { clearInterval(rivalPollTimer); rivalPollTimer = null; }
     rivalManaged.clear();
+    rivalRefreshCursor = 0;
   }
 
   // ── Single vs multiple rivals ─────────────────────────────────
