@@ -391,6 +391,7 @@ function gtMain() {
             <span id="${goalId}-metric-badge" class="gt-rival-metric-badge"></span>
           </div>
           <div class="gt-goal-actions">
+            <button id="${goalId}-rival-gear" class="gt-icon-btn gt-rival-gear-btn" title="Manage rivals" aria-label="Manage rivals" style="display:none;"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
             <button id="${goalId}-remove-btn" class="gt-remove-btn" title="Remove goal">✕</button>
           </div>
         </div>
@@ -407,9 +408,13 @@ function gtMain() {
 
       document.getElementById(`${goalId}-remove-btn`).addEventListener("click", async () => {
         const gd = (goalData.rival || []).find(g => g.id === goalId);
-        const labelText = gd ? `Rival · ${gd.rival} (${rivalMetric().toUpperCase()})` : "Rival goal";
+        const labelText = gd ? `Rival · ${goalRivalNames(gd).join(", ") || "rival"} (${rivalMetric().toUpperCase()})` : "Rival goal";
         if (await confirmDeleteGoal(labelText)) removeGoal("rival", goalId);
       });
+
+      // Gear → the "manage rivals" modal (only shown for multi-rival goals).
+      const rivalGearBtn = document.getElementById(`${goalId}-rival-gear`);
+      if (rivalGearBtn) rivalGearBtn.addEventListener("click", () => openRivalsModal(goalId));
 
       // Clicking the challenge button jumps to a random quote where the rival
       // currently beats you. Handler reads live state at click time.
@@ -1273,11 +1278,18 @@ function gtMain() {
       </div>
       <!-- Rival-mode controls (type=rival only). The rival username is entered
            in the standard Amount-row input (reused as a text field, like Player
-           mode). Metric (WPM/PP) and quote scope (all/ranked/unranked) are now
+           mode). Metric (WPM/PP) and quote scope (all/ranked/unranked) are
            global preferences in Settings -> Rival, so they are not duplicated
-           here. The (empty) row is kept as the type-visibility anchor. No mode /
-           recurrence / target. -->
-      <div id="gt-rival-metric-row" style="display:none;"></div>
+           here. This row hosts only the Single-vs-Multiple toggle; in multiple
+           mode the "+ Add" button sits beside the username input and the chosen
+           rivals render in the "Current Rivals" row below it. No recurrence/target. -->
+      <div id="gt-rival-metric-row" style="display:none;">
+        <div class="gt-section-label">Rivals</div>
+        <div class="gt-mode-selector" id="gt-rival-multimode-selector">
+          <button class="gt-mode-btn active" type="button" data-rival-multimode="single">Single rival</button>
+          <button class="gt-mode-btn"        type="button" data-rival-multimode="multi">Multiple rivals</button>
+        </div>
+      </div>
       <div id="gt-req-row" style="display:none;">
         <div class="gt-section-label">Requirements</div>
         <div class="gt-req-selector">
@@ -1342,9 +1354,16 @@ function gtMain() {
           </div>
           <div id="gt-presets" class="gt-presets"></div>
           <input id="gt-custom-input" class="gt-custom-input" type="number" min="1" placeholder="Custom" />
+          <button id="gt-rival-add-btn" class="gt-rival-add-inline-btn" type="button" style="display:none;" disabled>+ Add</button>
         </div>
       </div>
       <div id="gt-mode-hint" class="gt-mode-hint" style="display:none;"></div>
+      <!-- Current Rivals (multiple-rivals mode): the chosen rivals render here,
+           on their own row directly below the username input + Add button. -->
+      <div id="gt-rival-multi-list-row" style="display:none;">
+        <div class="gt-section-label">Current Rivals</div>
+        <div id="gt-rival-multi-list" class="gt-rival-multi-list"></div>
+      </div>
       <!-- Window size row: only visible in average mode, sits right above
            the confirm button. Uses the same presets-+-custom layout as
            the main Amount row so it visually matches the rest of the
@@ -3195,6 +3214,39 @@ async function getExpRankByUsername(username) {
   const rivalMetricBtns = document.querySelectorAll(".gt-rival-metric-group .gt-mode-btn");
   const rivalScopeBtns  = document.querySelectorAll(".gt-rival-scope-group .gt-mode-btn");
   const rivalScopeHintEl = document.getElementById("gt-rival-scope-modal-hint");
+  const rivalMultiModeBtns = document.querySelectorAll("[data-rival-multimode]");
+  const rivalAddBtn      = document.getElementById("gt-rival-add-btn");
+  const rivalListEl      = document.getElementById("gt-rival-multi-list");
+  const rivalListRow     = document.getElementById("gt-rival-multi-list-row");
+  // Render the chosen-rivals list as removable chips (multiple mode). Owns the
+  // visibility of the whole "Current Rivals" row: shown only in multiple mode
+  // once at least one rival has been added.
+  function renderRivalList() {
+    if (!rivalListEl) return;
+    rivalListEl.innerHTML = "";
+    const show = rivalMultiMode && selectedRivalList.length > 0;
+    if (rivalListRow) rivalListRow.style.display = show ? "" : "none";
+    if (!show) return;
+    for (const name of selectedRivalList) {
+      const chip = document.createElement("span");
+      chip.className = "gt-rival-list-chip";
+      const label = document.createElement("span");
+      label.textContent = name;
+      const x = document.createElement("button");
+      x.type = "button";
+      x.className = "gt-rival-list-x";
+      x.textContent = "\u2715";
+      x.title = `Remove ${name}`;
+      x.addEventListener("click", () => {
+        selectedRivalList = selectedRivalList.filter(n => n !== name);
+        renderRivalList();
+        validateConfirm();
+      });
+      chip.appendChild(label);
+      chip.appendChild(x);
+      rivalListEl.appendChild(chip);
+    }
+  }
   // selectedRivalMetric ∈ {"wpm","pp"} — which stat is compared (default wpm).
   // selectedRivalScope ∈ {"all","ranked","unranked"} — which of the rival's
   // quotes count. It's a global preference (mirrored in Settings → Rival), so
@@ -3205,6 +3257,12 @@ async function getExpRankByUsername(username) {
   let selectedRivalScope  = "all";
   let rivalFetchedName    = null;
   let rivalDebounce       = null;
+  // Multiple-rivals mode (rival goal type). rivalMultiMode toggles single vs
+  // multiple; selectedRivalList holds the resolved rival names chosen so far;
+  // rivalPendingName is a validated-but-not-yet-added name awaiting the Add btn.
+  let rivalMultiMode      = false;
+  let selectedRivalList   = [];
+  let rivalPendingName    = null;
 
   let playerFetchedValue = null;
   let playerFetchedName = null;
@@ -3509,7 +3567,9 @@ async function getExpRankByUsername(username) {
     // Rival goals are valid once a username has been resolved. The metric
     // always has a value (defaults to wpm), so the username is the only gate.
     if (selectedType === "rival") {
-      confirmBtn.disabled = (rivalFetchedName == null);
+      confirmBtn.disabled = rivalMultiMode
+        ? (selectedRivalList.length === 0)
+        : (rivalFetchedName == null);
       return;
     }
     // Max-quotes kinds drive confirmBtn.disabled directly from their async
@@ -3564,6 +3624,9 @@ async function getExpRankByUsername(username) {
     const cfg = GOAL_CONFIG[selectedType];
     selectedValue = null; rankFetchedPp = null; rankFetchedRank = null; maxQuotesFetched = null;
     confirmBtn.disabled = true; customInput.value = "";
+    customInput.classList.remove("gt-custom-input--grow");
+    if (rivalAddBtn)  rivalAddBtn.style.display  = "none"; // re-shown by the rival branch
+    if (rivalListRow) rivalListRow.style.display = "none"; // re-shown by renderRivalList
 
     // ── Rival mode (type=rival) ───────────────────────────────
     // The Amount row becomes a username input (like Player mode). No presets,
@@ -3571,21 +3634,27 @@ async function getExpRankByUsername(username) {
     // in its own row (gt-rival-metric-row), shown by the type handler.
     if (selectedType === "rival") {
       rivalFetchedName = null;
+      rivalPendingName = null;
       amountRow.style.display   = "";
-      amountLabel.textContent   = "Rival player";
+      amountLabel.textContent   = rivalMultiMode ? "Add a rival" : "Rival player";
       presetsEl.innerHTML       = "";
       presetsEl.style.display   = "none";
       customInput.style.display = "";
       customInput.type          = "text";
+      customInput.value         = "";
       customInput.removeAttribute("max");
       customInput.removeAttribute("step");
       customInput.placeholder   = "Username";
       nextRankRow.style.display = "none";
       maxQuotesRow.style.display = "none";
       avgWindowRow.style.display = "none";
-      modeHint.textContent   = "Enter a username";
+      if (rivalAddBtn) { rivalAddBtn.style.display = rivalMultiMode ? "" : "none"; rivalAddBtn.disabled = true; }
+      customInput.classList.add("gt-custom-input--grow"); // wider field for usernames
+      renderRivalList(); // owns the Current Rivals row visibility
+      modeHint.textContent   = rivalMultiMode ? "Enter a username to add" : "Enter a username";
       modeHint.className     = "gt-mode-hint";
       modeHint.style.display = "block";
+      validateConfirm();
       return;
     }
 
@@ -3839,16 +3908,18 @@ async function getExpRankByUsername(username) {
     if (selectedType === "rival") {
       const username = customInput.value.trim();
       rivalFetchedName = null;
+      rivalPendingName = null;
+      if (rivalAddBtn) rivalAddBtn.disabled = true;
       if (!username) {
-        modeHint.textContent = "Enter a username";
+        modeHint.textContent = rivalMultiMode ? "Enter a username to add" : "Enter a username";
         modeHint.className = "gt-mode-hint";
-        confirmBtn.disabled = true;
+        validateConfirm(); // multi keeps confirm gated on the existing list
         return;
       }
       clearTimeout(rivalDebounce);
       modeHint.textContent = "Checking…";
       modeHint.className = "gt-mode-hint";
-      confirmBtn.disabled = true;
+      if (!rivalMultiMode) confirmBtn.disabled = true;
       rivalDebounce = setTimeout(async () => {
         const typed = username;
         try {
@@ -3860,20 +3931,37 @@ async function getExpRankByUsername(username) {
           const resolvedName = d?.username || typed;
           // Bail if the input changed while we were fetching.
           if (customInput.value.trim() !== typed) return;
-          rivalFetchedName = resolvedName;
-          modeHint.textContent = `${resolvedName} ✓`;
-          modeHint.className = "gt-mode-hint";
-          confirmBtn.disabled = false;
+          if (rivalMultiMode) {
+            // Arm the Add button for a fresh name; block a duplicate.
+            if (selectedRivalList.some(n => n.toLowerCase() === resolvedName.toLowerCase())) {
+              rivalPendingName = null;
+              if (rivalAddBtn) rivalAddBtn.disabled = true;
+              modeHint.textContent = `${resolvedName} is already in the list`;
+              modeHint.className = "gt-mode-hint gt-mode-hint-error";
+            } else {
+              rivalPendingName = resolvedName;
+              if (rivalAddBtn) rivalAddBtn.disabled = false;
+              modeHint.textContent = `${resolvedName} ✓ — click Add`;
+              modeHint.className = "gt-mode-hint";
+            }
+          } else {
+            rivalFetchedName = resolvedName;
+            modeHint.textContent = `${resolvedName} ✓`;
+            modeHint.className = "gt-mode-hint";
+            confirmBtn.disabled = false;
+          }
         } catch (err) {
           if (customInput.value.trim() !== typed) return;
           rivalFetchedName = null;
+          rivalPendingName = null;
+          if (rivalAddBtn) rivalAddBtn.disabled = true;
           // A throttle / network error shouldn't claim the user doesn't exist —
           // that's misleading when the lookup never actually completed.
           const couldntCheck = err?.gtThrottled || err?.message === "busy" ||
                                (err instanceof TypeError); // "Failed to fetch"
           modeHint.textContent = couldntCheck ? "Can't reach TypeGG — try again in a moment" : "User not found";
           modeHint.className = "gt-mode-hint gt-mode-hint-error";
-          confirmBtn.disabled = true;
+          if (!rivalMultiMode) confirmBtn.disabled = true;
         }
       }, 400);
       return;
@@ -4009,6 +4097,37 @@ async function getExpRankByUsername(username) {
     });
   }
 
+  // Single-vs-multiple toggle for the rival goal type.
+  rivalMultiModeBtns.forEach(btn => btn.addEventListener("click", () => {
+    const wantMulti = btn.dataset.rivalMultimode === "multi";
+    if (wantMulti === rivalMultiMode) return;
+    rivalMultiMode = wantMulti;
+    rivalMultiModeBtns.forEach(b => b.classList.toggle("active", b === btn));
+    // Carry a single-mode resolved name into the list when switching to multi.
+    if (rivalMultiMode && rivalFetchedName &&
+        !selectedRivalList.some(n => n.toLowerCase() === rivalFetchedName.toLowerCase())) {
+      selectedRivalList.push(rivalFetchedName);
+    }
+    rivalFetchedName = null;
+    rivalPendingName = null;
+    renderPresets(); // re-lays the amount row + list for the new mode
+  }));
+
+  // Add the pending validated rival to the list (multiple mode).
+  if (rivalAddBtn) rivalAddBtn.addEventListener("click", () => {
+    if (!rivalMultiMode || !rivalPendingName) return;
+    if (!selectedRivalList.some(n => n.toLowerCase() === rivalPendingName.toLowerCase())) {
+      selectedRivalList.push(rivalPendingName);
+    }
+    rivalPendingName = null;
+    customInput.value = "";
+    rivalAddBtn.disabled = true;
+    renderRivalList();
+    modeHint.textContent = "Enter a username to add";
+    modeHint.className = "gt-mode-hint";
+    validateConfirm();
+  });
+
   typeBtns.forEach(btn => btn.addEventListener("click", () => {
     typeBtns.forEach(b => b.classList.remove("active")); btn.classList.add("active");
     selectedType = btn.dataset.type;
@@ -4020,6 +4139,9 @@ async function getExpRankByUsername(username) {
     // input (set up by renderPresets).
     rivalMetricRow.style.display = isRival ? "block" : "none";
     if (isRival) {
+      // Reflect the current single/multiple mode on the toggle buttons.
+      rivalMultiModeBtns.forEach(b =>
+        b.classList.toggle("active", (b.dataset.rivalMultimode === "multi") === rivalMultiMode));
       // Seed the scope buttons from the current global preference.
       selectedRivalScope = rivalScope();
       rivalScopeBtns.forEach(b => b.classList.toggle("active", b.dataset.rivalScope === selectedRivalScope));
@@ -4375,6 +4497,9 @@ async function getExpRankByUsername(username) {
     maxQuotesMode = false; maxQuotesKind = null; maxQuotesFetched = null; maxQuotesBaseline = null;
     // Rival defaults: metric=wpm, scope from the global setting, no resolved username yet.
     selectedRivalMetric = "wpm"; rivalFetchedName = null; clearTimeout(rivalDebounce);
+    rivalMultiMode = false; selectedRivalList = []; rivalPendingName = null;
+    rivalMultiModeBtns.forEach(b => b.classList.toggle("active", b.dataset.rivalMultimode === "single"));
+    renderRivalList();
     rivalMetricBtns.forEach(b => b.classList.toggle("active", b.dataset.rivalMetric === "wpm"));
     selectedRivalScope = rivalScope();
     rivalScopeBtns.forEach(b => b.classList.toggle("active", b.dataset.rivalScope === selectedRivalScope));
@@ -4404,7 +4529,7 @@ async function getExpRankByUsername(username) {
     overlay.classList.remove("open");
     selectedValue = null; rankFetchedPp = null; rankFetchedRank = null; nextRankMode = false;
     maxQuotesMode = false; maxQuotesKind = null; maxQuotesFetched = null; maxQuotesBaseline = null;
-    rivalFetchedName = null; clearTimeout(rivalDebounce);
+    rivalFetchedName = null; rivalPendingName = null; clearTimeout(rivalDebounce);
     resetRequirementsUI();
     resetAverageUI();
     resetImprovementUI();
@@ -4570,7 +4695,9 @@ async function getExpRankByUsername(username) {
     // target, recurrence or stat fetch needed. The store sync + live
     // comparison machinery (further down) does the rest.
     if (selectedType === "rival") {
-      if (rivalFetchedName == null) return;
+      // Validate per mode: single needs a resolved name, multiple needs a list.
+      if (rivalMultiMode) { if (selectedRivalList.length === 0) return; }
+      else if (rivalFetchedName == null) return;
       // Scope is a shared/global preference (also in Settings → Rival). Apply
       // the modal's choice now; saveRivalSettings broadcasts to other tabs and
       // the ensureRivalSync below will start the unranked stream if needed.
@@ -4579,10 +4706,22 @@ async function getExpRankByUsername(username) {
         saveRivalSettings();
       }
       const goalId = generateGoalId("rival");
-      const newGoal = {
-        id: goalId,
-        rival: rivalFetchedName,           // display name (as TypeGG returns it)
-      };
+      let newGoal;
+      if (rivalMultiMode) {
+        // De-dup defensively (case-insensitive; first spelling wins).
+        const seen = new Set();
+        const rivals = [];
+        for (const n of selectedRivalList) {
+          const k = n.toLowerCase();
+          if (!seen.has(k)) { seen.add(k); rivals.push(n); }
+        }
+        newGoal = { id: goalId, rivals, mode: "multi" };
+      } else {
+        newGoal = {
+          id: goalId,
+          rival: rivalFetchedName,         // display name (as TypeGG returns it)
+        };
+      }
       goalData.rival.push(newGoal);
       saveGoals("rival");
       if (!groupData[MAIN_GROUP_ID].goalIds.includes(newGoal.id)) {
@@ -6953,12 +7092,28 @@ async function getExpRankByUsername(username) {
     rivalManaged.clear();
   }
 
+  // ── Single vs multiple rivals ─────────────────────────────────
+  // A rival goal is either SINGLE ({ id, rival }) or MULTI
+  // ({ id, rivals: [name, ...], mode: "multi" }). An absent `mode` (and a
+  // present `rival`) means single — so existing goals migrate for free, with
+  // no destructive rewrite. goalRivalNames flattens either shape to a name
+  // list; goalIsMulti reports the shape.
+  function goalIsMulti(gd) {
+    return !!(gd && gd.mode === "multi" && Array.isArray(gd.rivals));
+  }
+  function goalRivalNames(gd) {
+    if (goalIsMulti(gd)) return gd.rivals.filter(Boolean);
+    return gd && gd.rival ? [gd.rival] : [];
+  }
   // Map lowercased rival → display-cased name (first goal wins) so we fetch
-  // with a real username and key the store case-insensitively.
+  // with a real username and key the store case-insensitively. Flattens both
+  // single- and multi-rival goals, deduping rivals shared across goals.
   function referencedRivalMap() {
     const m = new Map();
     for (const g of (goalData.rival || [])) {
-      if (g.rival && !m.has(g.rival.toLowerCase())) m.set(g.rival.toLowerCase(), g.rival);
+      for (const name of goalRivalNames(g)) {
+        if (name && !m.has(name.toLowerCase())) m.set(name.toLowerCase(), name);
+      }
     }
     return m;
   }
@@ -7111,8 +7266,8 @@ async function getExpRankByUsername(username) {
   function rivalFilterAxis() {
     if (rivalAxisCache && rivalAxisCache.epoch === rivalStoreEpoch) return rivalAxisCache;
     let dLo = Infinity, dHi = -Infinity, lLo = Infinity, lHi = -Infinity;
-    for (const gd of (goalData.rival || [])) {
-      const q = loadRivalStore(gd.rival).quotes;
+    for (const rname of referencedRivalMap().values()) {
+      const q = loadRivalStore(rname).quotes;
       for (const qid in q) {
         const d = Number(q[qid].d), l = Number(q[qid].l);
         if (Number.isFinite(d)) { if (d < dLo) dLo = d; if (d > dHi) dHi = d; }
@@ -7146,8 +7301,8 @@ async function getExpRankByUsername(username) {
       const v = Number(selfQ[qid][metric]);
       if (Number.isFinite(v)) { if (v < sLo) sLo = v; if (v > sHi) sHi = v; }
     }
-    for (const gd of (goalData.rival || [])) {
-      const rq = loadRivalStore(gd.rival).quotes;
+    for (const rname of referencedRivalMap().values()) {
+      const rq = loadRivalStore(rname).quotes;
       for (const qid in rq) {
         const v = Number(rq[qid][metric]);
         if (Number.isFinite(v)) { if (v < rLo) rLo = v; if (v > rHi) rHi = v; }
@@ -7234,49 +7389,92 @@ async function getExpRankByUsername(username) {
     }
     return true;
   }
-  function computeRivalStandings(gd) {
+  // ── Composite across the listed rivals ───────────────────────
+  // A multi-rival goal's target on each quote is the HIGHEST score any listed
+  // rival holds on that quote (beating it = beating every rival). buildRival-
+  // Composite returns qid -> { v, holder, r, d, l } where v is the per-quote
+  // max on `metric` and holder is the rival who set it; r/d/l are quote-level
+  // (identical across rivals) so the existing scope/difficulty/length filters
+  // apply unchanged. For a single-rival goal the names list is length 1, so
+  // this degenerates to that rival's own entries.
+  function buildRivalComposite(names, metric) {
+    const out = Object.create(null);
+    for (const name of names) {
+      const q = loadRivalStore(name).quotes;
+      for (const qid in q) {
+        const e = q[qid];
+        const v = Number(e[metric]);
+        if (!Number.isFinite(v)) continue;
+        const cur = out[qid];
+        if (!cur) {
+          out[qid] = { v, holder: name, r: e.r, d: e.d, l: e.l };
+        } else {
+          if (cur.r === undefined && typeof e.r === "boolean") cur.r = e.r;
+          if (!Number.isFinite(Number(cur.d)) && Number.isFinite(Number(e.d))) cur.d = e.d;
+          if (!Number.isFinite(Number(cur.l)) && Number.isFinite(Number(e.l))) cur.l = e.l;
+          if (v > cur.v + RIVAL_PP_EPS) { cur.v = v; cur.holder = name; }
+        }
+      }
+    }
+    return out;
+  }
+  // The composite for a single quote (the live-quote render path): the max
+  // `metric` value across the listed rivals plus its holder, or null if none
+  // of them have raced it.
+  function rivalCompositeForQuote(gd, metric, qid) {
+    if (!qid) return null;
+    let best = null, holder = null;
+    for (const name of goalRivalNames(gd)) {
+      const e = loadRivalStore(name).quotes[qid];
+      if (!e) continue;
+      const v = Number(e[metric]);
+      if (!Number.isFinite(v)) continue;
+      if (best === null || v > best + RIVAL_PP_EPS) { best = v; holder = name; }
+    }
+    return best === null ? null : { rv: best, holder };
+  }
+  // Core standings tally for an arbitrary list of rival names (length-1 for a
+  // single rival). Applies every active global filter (scope, difficulty/length,
+  // metric-value, shared-only) exactly as the card does. NOT memoized — callers
+  // that render every frame go through computeRivalStandings; the rivals modal
+  // calls this directly per rival.
+  function tallyStandings(names) {
     const metric = rivalMetric();
     const scope  = rivalScope();
     const requireBoth = !!rivalSettings.requireBoth; // count only quotes you've both raced
     const filter = rivalFilterState();
     const mf = rivalMetricFilterState();
-    const filterSig = rivalFilterSig();
     const selfStore  = loadRivalStore(RIVAL_SELF_NAME);
     const selfDone   = rivalBulkDone(selfStore);     // your history fully synced?
-    const cached = rivalStandingsCache.get(gd.id);
-    if (cached && cached.epoch === rivalStoreEpoch && cached.metric === metric
-        && cached.scope === scope && cached.requireBoth === requireBoth
-        && cached.selfDone === selfDone && cached.filterSig === filterSig) {
-      return cached.result;
-    }
-    const rivalStore = loadRivalStore(gd.rival);
-    const rq = rivalStore.quotes;
     const sq = selfStore.quotes;
+    // Composite = per-quote max across the listed rivals (length-1 list for a
+    // single rival). Beating the composite value = beating every listed rival.
+    const composite = buildRivalComposite(names, metric);
     let total = 0, wins = 0;
-    const worse = []; // the "⚔ Next vs" pool: quotes the rival currently beats you on
-    for (const qid in rq) {
-      const rentry = rq[qid];
-      if (!rivalQuoteInScope(rentry, scope)) continue; // only count in-scope quotes
-      if ((filter.dActive || filter.lActive) && !rivalQuotePassesFilter(rentry, filter)) continue;
+    const worse = []; // the "⚔ Next vs" pool: quotes a rival currently beats you on
+    for (const qid in composite) {
+      const c = composite[qid];
+      if (!rivalQuoteInScope(c, scope)) continue; // only count in-scope quotes
+      if ((filter.dActive || filter.lActive) && !rivalQuotePassesFilter(c, filter)) continue;
       const se = sq[qid];
       // "Shared only" mode: skip quotes you haven't raced, so the wins total
       // reflects a head-to-head on common ground rather than counting every
-      // quote the rival has typed (where unraced ones would read as losses).
+      // quote the rival(s) have typed (where unraced ones would read as losses).
       if (requireBoth && !se) continue;
-      const rv = rentry[metric];
+      const rv = c.v;                  // the highest score any listed rival holds
       const sv = se ? se[metric] : 0;
-      // Metric-value filter (the rival's value), if active.
+      // Metric-value filter (the composite rival value), if active.
       if (mf.rActive && !rivalMetricPasses(rv, mf)) continue;
       total++;
-      if (sv > rv + RIVAL_PP_EPS) { wins++; continue; } // you already beat them here
+      if (sv > rv + RIVAL_PP_EPS) { wins++; continue; } // you beat them all here
       // Not a win → candidate for the "⚔ Next vs" pool (a quote to go beat):
       if (se) {
         // You have a recorded time and you're behind (ties are neither a win
-        // nor a target — you've matched but not beaten them).
+        // nor a target — you've matched but not beaten the leader).
         if (sv < rv - RIVAL_PP_EPS) worse.push(qid);
       } else if (!requireBoth && selfDone) {
         // Default ("Rival's quotes") mode: a quote you've NEVER raced is a valid
-        // target — you want to beat all the rival's scores, including new ones.
+        // target — you want to beat all the rival scores, including new ones.
         // Gated on selfDone: only once your own history is fully synced does a
         // missing entry reliably mean "never raced" rather than "not synced
         // yet" (which could be a quote you've actually already won). Before that
@@ -7285,9 +7483,167 @@ async function getExpRankByUsername(username) {
       }
       // unraced while not yet synced, or in shared-only mode → not a target
     }
-    const result = { total, wins, worse, rivalDone: rivalBulkDone(rivalStore), selfDone };
-    rivalStandingsCache.set(gd.id, { epoch: rivalStoreEpoch, metric, scope, requireBoth, selfDone, filterSig, result });
+    // Every listed rival fully synced (so the pools are settled).
+    const rivalDone = names.length > 0 && names.every(n => rivalBulkDone(loadRivalStore(n)));
+    return { total, wins, worse, rivalDone, selfDone };
+  }
+  function computeRivalStandings(gd) {
+    const metric = rivalMetric();
+    const scope  = rivalScope();
+    const requireBoth = !!rivalSettings.requireBoth;
+    const filterSig = rivalFilterSig();
+    const selfDone  = rivalBulkDone(loadRivalStore(RIVAL_SELF_NAME));
+    // The set of listed rivals is part of the goal identity; include a signature
+    // so editing the list (or a name resolving to different casing) invalidates
+    // the memo even when nothing else changed.
+    const names = goalRivalNames(gd);
+    const namesSig = names.map(n => String(n).toLowerCase()).sort().join(",");
+    const cached = rivalStandingsCache.get(gd.id);
+    if (cached && cached.epoch === rivalStoreEpoch && cached.metric === metric
+        && cached.scope === scope && cached.requireBoth === requireBoth
+        && cached.selfDone === selfDone && cached.filterSig === filterSig
+        && cached.namesSig === namesSig) {
+      return cached.result;
+    }
+    const result = tallyStandings(names);
+    rivalStandingsCache.set(gd.id, { epoch: rivalStoreEpoch, metric, scope, requireBoth, selfDone, filterSig, namesSig, result });
     return result;
+  }
+
+  // Active global rival filters as short human labels (for the modal header).
+  function activeRivalFilterLabels() {
+    const out = [];
+    const scope = rivalScope();
+    if (scope === "ranked") out.push("Ranked only");
+    else if (scope === "unranked") out.push("Unranked only");
+    if (rivalSettings.requireBoth) out.push("Shared quotes only");
+    const f = rivalFilterState();
+    if (f.dActive) out.push(`Difficulty ${f.dMin}\u2013${f.dMax < f.axis.diffMax ? f.dMax : f.dMax + "+"}`);
+    if (f.lActive) out.push(`Length ${f.lMin}\u2013${f.lMax < f.axis.lenMax ? f.lMax : f.lMax + "+"}`);
+    const mf = rivalMetricFilterState();
+    if (mf.rActive) out.push(`${rivalMetric().toUpperCase()} ${mf.rMin}\u2013${mf.rMax < mf.axis.rivalMax ? mf.rMax : mf.rMax + "+"}`);
+    return out;
+  }
+
+  // The per-goal "manage rivals" modal (gear icon on a multi-rival card). Lists
+  // each rival's wins vs you (respecting the active global filters), floored %
+  // progress + a bar (green + ✓ at 100%), and a remove button. Sorted A–Z;
+  // rebuilds after a removal. The last rival can't be removed here (delete the
+  // whole goal from its card instead).
+  function openRivalsModal(goalId) {
+    const gd = (goalData.rival || []).find(g => g.id === goalId);
+    if (!gd || !goalIsMulti(gd)) return;
+
+    const overlay = document.createElement("div");
+    overlay.className = "gt-rivals-overlay";
+    overlay.innerHTML = `
+      <div class="gt-rivals-modal">
+        <div class="gt-rivals-modal-header">
+          <span class="gt-rivals-modal-title">Current Rivals</span>
+          <button class="gt-rivals-modal-close" title="Close" aria-label="Close">\u2715</button>
+        </div>
+        <div class="gt-rivals-modal-sub"></div>
+        <div class="gt-rivals-filter-note" style="display:none;"></div>
+        <table class="gt-rivals-table">
+          <thead><tr><th>Rival</th><th>Wins</th><th>Progress</th><th></th></tr></thead>
+          <tbody class="gt-rivals-tbody"></tbody>
+        </table>
+        <div class="gt-rivals-empty" style="display:none;">No rivals left in this goal.</div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const subEl   = overlay.querySelector(".gt-rivals-modal-sub");
+    const noteEl  = overlay.querySelector(".gt-rivals-filter-note");
+    const tbody   = overlay.querySelector(".gt-rivals-tbody");
+    const emptyEl = overlay.querySelector(".gt-rivals-empty");
+    const tableEl = overlay.querySelector(".gt-rivals-table");
+
+    const cleanup = () => { document.removeEventListener("keydown", onKey); overlay.remove(); };
+    const onKey = (e) => { if (e.key === "Escape") { e.preventDefault(); cleanup(); } };
+    document.addEventListener("keydown", onKey);
+    overlay.addEventListener("click", e => { if (e.target === overlay) cleanup(); });
+    overlay.querySelector(".gt-rivals-modal-close").addEventListener("click", cleanup);
+
+    const renderTable = () => {
+      const metric = rivalMetric();
+      subEl.textContent = `Wins compared by ${metric.toUpperCase()} \u00b7 sorted A\u2013Z`;
+      const labels = activeRivalFilterLabels();
+      if (labels.length) {
+        noteEl.textContent = `Filters applied (Settings \u2192 Rival): ${labels.join(" \u00b7 ")}`;
+        noteEl.style.display = "";
+      } else {
+        noteEl.style.display = "none";
+      }
+      const names = goalRivalNames(gd).slice().sort((a, b) =>
+        a.toLowerCase().localeCompare(b.toLowerCase()));
+      tbody.innerHTML = "";
+      if (names.length === 0) { tableEl.style.display = "none"; emptyEl.style.display = ""; return; }
+      tableEl.style.display = ""; emptyEl.style.display = "none";
+      const canRemove = names.length > 1;
+      for (const name of names) {
+        const { total, wins, rivalDone } = tallyStandings([name]);
+        const pct  = total > 0 ? Math.floor((wins / total) * 100) : 0;
+        const done = total > 0 && wins >= total;
+
+        const tr = document.createElement("tr");
+
+        const nameTd = document.createElement("td");
+        nameTd.className = "gt-rivals-name";
+        nameTd.textContent = name;
+
+        const winsTd = document.createElement("td");
+        winsTd.className = "gt-rivals-wins";
+        winsTd.textContent = rivalDone ? `${wins} / ${total}` : `${wins} / ${total} \u00b7 syncing\u2026`;
+
+        const progTd = document.createElement("td");
+        progTd.className = "gt-rivals-progress-cell";
+        const bar = document.createElement("div");
+        bar.className = "gt-rivals-bar";
+        const fill = document.createElement("div");
+        fill.className = "gt-rivals-bar-fill" + (done ? " done" : "");
+        fill.style.width = `${pct}%`;
+        bar.appendChild(fill);
+        const pctLine = document.createElement("div");
+        pctLine.className = "gt-rivals-pct";
+        pctLine.textContent = `${pct}%`;
+        if (done) {
+          const chk = document.createElement("span");
+          chk.className = "done-check";
+          chk.textContent = "\u2713";
+          pctLine.appendChild(chk);
+        }
+        progTd.appendChild(bar);
+        progTd.appendChild(pctLine);
+
+        const removeTd = document.createElement("td");
+        removeTd.className = "gt-rivals-remove-cell";
+        const x = document.createElement("button");
+        x.className = "gt-rivals-remove";
+        x.textContent = "\u2715";
+        x.disabled = !canRemove;
+        x.title = canRemove
+          ? `Remove ${name}`
+          : "A multiple-rivals goal needs at least one rival \u2014 delete the goal from its card instead.";
+        x.addEventListener("click", () => {
+          if (!canRemove) return;
+          gd.rivals = gd.rivals.filter(n => n.toLowerCase() !== name.toLowerCase());
+          saveGoals("rival");
+          renderAllGoals();
+          if (isLeader) ensureRivalSync(); // GC the dropped rival's store if now unreferenced
+          renderTable();
+        });
+        removeTd.appendChild(x);
+
+        tr.appendChild(nameTd);
+        tr.appendChild(winsTd);
+        tr.appendChild(progTd);
+        tr.appendChild(removeTd);
+        tbody.appendChild(tr);
+      }
+    };
+
+    renderTable();
   }
 
   function renderRivalSections() {
@@ -7315,14 +7671,19 @@ async function getExpRankByUsername(username) {
 
   function updateRivalGoalSection(goalId, gd, liveQid) {
     const metric = rivalMetric();
-    const rivalName = gd.rival || "rival";
+    const names = goalRivalNames(gd);
+    const multi = goalIsMulti(gd);
+    const rivalName = multi
+      ? (names.length === 1 ? names[0] : `${names.length} rivals`)
+      : (gd.rival || "rival");
 
     const labelEl = document.getElementById(`${goalId}-label`);
     if (labelEl) labelEl.textContent = `Rival vs ${rivalName}`;
     const badge = document.getElementById(`${goalId}-metric-badge`);
     if (badge) badge.textContent = metric.toUpperCase();
+    const gearEl = document.getElementById(`${goalId}-rival-gear`);
+    if (gearEl) gearEl.style.display = multi ? "" : "none";
 
-    const rivalStore = loadRivalStore(gd.rival);
     const selfStore  = loadRivalStore(RIVAL_SELF_NAME);
 
     const wrapEl = document.getElementById(`${goalId}-rival-value-wrap`);
@@ -7338,19 +7699,20 @@ async function getExpRankByUsername(username) {
       if (msgEl) { msgEl.textContent = text; msgEl.style.display = ""; }
     };
 
-    const rKey = rivalStoreKey(gd.rival);
     const sKey = rivalStoreKey(RIVAL_SELF_NAME);
-    const rEntry = liveQid ? rivalStore.quotes[liveQid] : undefined;
+    // Composite (highest score across the listed rivals) for the live quote;
+    // for a single-rival goal this is just that rival's entry + their name.
+    const comp = liveQid ? rivalCompositeForQuote(gd, metric, liveQid) : null;
     const sEntry = liveQid ? selfStore.quotes[liveQid]  : undefined;
 
     if (!liveQid) {
       showMsg("Race a quote to compare");
-    } else if (rEntry) {
+    } else if (comp) {
       // ── Value mode ──
-      // We know the rival's number, so render the matchup immediately. Your
-      // number defaults to 0 when you've never raced this quote (which is
-      // exactly the case for a "Next vs" target) — no waiting on a fetch.
-      const rv = rEntry[metric];
+      // We know the rival number (the highest among the listed rivals), so
+      // render the matchup immediately. Your number defaults to 0 when you've
+      // never raced this quote (the "Next vs" target case) — no fetch wait.
+      const rv = comp.rv;
       const sv = sEntry ? sEntry[metric] : 0;
       const settled = !!sEntry || isRememberedAbsent(sKey, liveQid) || rivalBulkDone(selfStore);
 
@@ -7362,7 +7724,9 @@ async function getExpRankByUsername(username) {
         // "reached the target" feel as the average goals).
         youEl.className = "gt-rival-you" + (sv >= rv - RIVAL_PP_EPS ? " gt-rival-you-done" : "");
       }
-      if (themEl) themEl.textContent = ` / ${rivalFmt(rv)}`;
+      if (themEl) themEl.textContent = multi
+        ? ` / ${rivalFmt(rv)} (${comp.holder})`
+        : ` / ${rivalFmt(rv)}`;
 
       // +X gain pill: pops when your value on THIS quote rises (i.e. you just
       // set a new best here). Only baseline/compare once self is settled, so
@@ -7387,9 +7751,12 @@ async function getExpRankByUsername(username) {
         prevRivalYouMap[goalId] = { quoteId: liveQid, value: sv, metric };
       }
     } else {
-      // Rival number unknown for this quote.
-      const rivalResolved = rivalBulkDone(rivalStore) || isRememberedAbsent(rKey, liveQid);
-      showMsg(rivalResolved ? `${rivalName} hasn't raced this quote` : "Loading…");
+      // Rival number unknown for this quote. "Resolved" = every listed rival is
+      // either fully synced or confirmed to have never raced this quote.
+      const rivalResolved = names.length > 0 && names.every(n =>
+        rivalBulkDone(loadRivalStore(n)) || isRememberedAbsent(rivalStoreKey(n), liveQid));
+      const noneMsg = multi ? "No rival has raced this quote" : `${rivalName} hasn't raced this quote`;
+      showMsg(rivalResolved ? noneMsg : "Loading…");
     }
 
     // ── Wins + Next button ──
@@ -7441,10 +7808,10 @@ async function getExpRankByUsername(username) {
   function rivalWorseSortedByGap(gd, sort) {
     const metric = rivalMetric();
     const { worse } = computeRivalStandings(gd);
-    const rq = loadRivalStore(gd.rival).quotes;
+    const composite = buildRivalComposite(goalRivalNames(gd), metric);
     const sq = loadRivalStore(RIVAL_SELF_NAME).quotes;
     const withGap = worse.map(qid => {
-      const rv = rq[qid] ? rq[qid][metric] : 0;
+      const rv = composite[qid] ? composite[qid].v : 0;
       const sv = sq[qid] ? sq[qid][metric] : 0;
       return { qid, gap: rv - sv };
     });
