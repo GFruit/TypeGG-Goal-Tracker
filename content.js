@@ -1729,18 +1729,7 @@ function gtMain() {
         <button class="gt-mode-btn${curMetric === "pp" ? " active" : ""}" data-rival-metric="pp">PP</button>
       </div>
 
-      <div class="gt-section-label" style="margin-top:16px;">Your ${curMetric.toUpperCase()} filter<span class="gt-range-readout" id="gt-rival-mself-readout"></span></div>
-      <div class="gt-range-row" id="gt-rival-mself-ticks">
-        <span class="gt-range-end gt-range-end-lo"></span>
-        <div class="gt-range" id="gt-rival-mself-range">
-          <div class="gt-range-track"><div class="gt-range-fill"></div></div>
-          <input class="gt-range-input gt-range-lo" type="range" aria-label="Minimum your ${curMetric.toUpperCase()}" />
-          <input class="gt-range-input gt-range-hi" type="range" aria-label="Maximum your ${curMetric.toUpperCase()}" />
-        </div>
-        <span class="gt-range-end gt-range-end-hi"></span>
-      </div>
-
-      <div class="gt-section-label" style="margin-top:14px;">Rival ${curMetric.toUpperCase()} filter<span class="gt-range-readout" id="gt-rival-mrival-readout"></span></div>
+      <div class="gt-section-label" style="margin-top:16px;">Rival ${curMetric.toUpperCase()} filter<span class="gt-range-readout" id="gt-rival-mrival-readout"></span></div>
       <div class="gt-range-row" id="gt-rival-mrival-ticks">
         <span class="gt-range-end gt-range-end-lo"></span>
         <div class="gt-range" id="gt-rival-mrival-range">
@@ -2030,16 +2019,6 @@ function gtMain() {
       set: (lo, hi) => {
         draft.rivalSettings.lenMin = (lo <= rvAxis.lenMin) ? null : lo;
         draft.rivalSettings.lenMax = (hi >= rvAxis.lenMax) ? null : hi;
-      },
-    });
-    setupRivalRange("gt-rival-mself-range", "gt-rival-mself-readout", "gt-rival-mself-ticks", {
-      min: rvmAxis.selfMin, max: rvmAxis.selfMax, step: 1, decimals: false,
-      ticks: [String(rvmAxis.selfMin), `${rvmAxis.selfMax}+`],
-      lo: (draft.rivalSettings[mfK.sMin] == null) ? rvmAxis.selfMin : clampVal(draft.rivalSettings[mfK.sMin], rvmAxis.selfMin, rvmAxis.selfMax, rvmAxis.selfMin),
-      hi: (draft.rivalSettings[mfK.sMax] == null) ? rvmAxis.selfMax : clampVal(draft.rivalSettings[mfK.sMax], rvmAxis.selfMin, rvmAxis.selfMax, rvmAxis.selfMax),
-      set: (lo, hi) => {
-        draft.rivalSettings[mfK.sMin] = (lo <= rvmAxis.selfMin) ? null : lo;
-        draft.rivalSettings[mfK.sMax] = (hi >= rvmAxis.selfMax) ? null : hi;
       },
     });
     setupRivalRange("gt-rival-mrival-range", "gt-rival-mrival-readout", "gt-rival-mrival-ticks", {
@@ -2627,9 +2606,11 @@ function gtMain() {
       // Metric-value filter handles (per metric). null = open end; an inverted
       // pair collapses to open (defensive against corrupted storage).
       const fixPair = (lo, hi) => (lo != null && hi != null && lo > hi) ? [null, null] : [lo, hi];
-      let [mfWpmSelfMin,  mfWpmSelfMax]  = fixPair(num(saved.mfWpmSelfMin),  num(saved.mfWpmSelfMax));
+      // The self metric-value filter was removed (self-defeating: improving toward
+      // the rival pushed you out of your own window). Force any previously saved
+      // self handles to null so a stored filter can't keep applying invisibly.
+      const mfWpmSelfMin = null, mfWpmSelfMax = null, mfPpSelfMin = null, mfPpSelfMax = null;
       let [mfWpmRivalMin, mfWpmRivalMax] = fixPair(num(saved.mfWpmRivalMin), num(saved.mfWpmRivalMax));
-      let [mfPpSelfMin,   mfPpSelfMax]   = fixPair(num(saved.mfPpSelfMin),   num(saved.mfPpSelfMax));
       let [mfPpRivalMin,  mfPpRivalMax]  = fixPair(num(saved.mfPpRivalMin),  num(saved.mfPpRivalMax));
       return {
         nextUsesVsLink: typeof saved.nextUsesVsLink === "boolean"
@@ -7209,15 +7190,11 @@ async function getExpRankByUsername(username) {
   // Resolve the metric-filter handles (null = axis end) against the live axis.
   function rivalMetricFilterState() {
     const s = rivalSettings, axis = rivalMetricAxis(), k = rivalMetricKeys();
-    const clampS = (v) => Math.min(axis.selfMax,  Math.max(axis.selfMin,  v));
     const clampR = (v) => Math.min(axis.rivalMax, Math.max(axis.rivalMin, v));
-    const sMin = (s[k.sMin] == null) ? axis.selfMin  : clampS(s[k.sMin]);
-    const sMax = (s[k.sMax] == null) ? axis.selfMax  : clampS(s[k.sMax]);
     const rMin = (s[k.rMin] == null) ? axis.rivalMin : clampR(s[k.rMin]);
     const rMax = (s[k.rMax] == null) ? axis.rivalMax : clampR(s[k.rMax]);
     return {
-      sMin, sMax, rMin, rMax, axis,
-      sActive: sMin > axis.selfMin  || sMax < axis.selfMax,
+      rMin, rMax, axis,
       rActive: rMin > axis.rivalMin || rMax < axis.rivalMax,
     };
   }
@@ -7226,7 +7203,7 @@ async function getExpRankByUsername(username) {
     const f = rivalFilterState();
     const m = rivalMetricFilterState();
     const dl = (f.dActive || f.lActive) ? `${f.dMin},${f.dMax},${f.lMin},${f.lMax}` : "";
-    const mm = (m.sActive || m.rActive) ? `s${m.sMin}-${m.sMax}r${m.rMin}-${m.rMax}` : "";
+    const mm = m.rActive ? `r${m.rMin}-${m.rMax}` : "";
     return `${dl}|${mm}`;
   }
   // Whether a quote entry passes the active filter. A CONSTRAINED dimension
@@ -7246,14 +7223,11 @@ async function getExpRankByUsername(username) {
     }
     return true;
   }
-  // Per-quote metric-value predicate. sv = your value, rv = the rival's (both on
-  // the current metric). A max handle at the axis max = no upper bound. An active
-  // SELF range implies you have raced the quote (sv = 0 for unraced -> excluded).
-  function rivalMetricPasses(sv, rv, m) {
-    if (m.sActive) {
-      if (!Number.isFinite(sv) || sv < m.sMin) return false;
-      if (m.sMax < m.axis.selfMax && sv > m.sMax) return false;
-    }
+  // Per-quote metric-value predicate. rv = the rival's value on the current
+  // metric. A max handle at the axis max = no upper bound. (Filtering by YOUR
+  // own value was removed: as you improve toward the rival you'd climb out of
+  // your own window, so a quote could never convert to a win inside the filter.)
+  function rivalMetricPasses(rv, m) {
     if (m.rActive) {
       if (!Number.isFinite(rv) || rv < m.rMin) return false;
       if (m.rMax < m.axis.rivalMax && rv > m.rMax) return false;
@@ -7291,8 +7265,8 @@ async function getExpRankByUsername(username) {
       if (requireBoth && !se) continue;
       const rv = rentry[metric];
       const sv = se ? se[metric] : 0;
-      // Metric-value filter (your value and/or the rival's), if active.
-      if ((mf.sActive || mf.rActive) && !rivalMetricPasses(sv, rv, mf)) continue;
+      // Metric-value filter (the rival's value), if active.
+      if (mf.rActive && !rivalMetricPasses(rv, mf)) continue;
       total++;
       if (sv > rv + RIVAL_PP_EPS) { wins++; continue; } // you already beat them here
       // Not a win → candidate for the "⚔ Next vs" pool (a quote to go beat):
@@ -7442,6 +7416,11 @@ async function getExpRankByUsername(username) {
         // claiming you're ahead on everything.
         nextBtn.disabled = true;
         nextBtn.textContent = "⚔ Finding quotes…";
+      } else if (total === 0) {
+        // No quote survived the current scope + filters (+ shared-only) — there's
+        // nothing to be ahead OR behind on, so "You lead" would be misleading.
+        nextBtn.disabled = true;
+        nextBtn.textContent = "⚔ No quotes found";
       } else {
         nextBtn.disabled = true;
         nextBtn.textContent = `⚔ You lead ${rivalName} 🎉`;
