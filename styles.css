@@ -1397,6 +1397,12 @@ body.gt-app-loggedout .gt-widget-detached { display: none !important; }
 /* ── Rival difficulty/length range sliders ───────────────────── */
 .gt-range-readout { color: #93c5fd; font-weight: 600; margin-left: 6px; font-size: 11px; }
 .gt-range { position: relative; height: 22px; margin: 10px 2px 2px; }
+/* Inline layout: min/max axis labels flank the track on one row. */
+.gt-range-row { display: flex; align-items: center; gap: 8px; margin: 8px 2px 2px; }
+.gt-range-row .gt-range { flex: 1 1 auto; margin: 0; }
+.gt-range-end { flex: 0 0 auto; min-width: 16px; color: #4b5563; font-size: 10px; }
+.gt-range-end-lo { text-align: left; }
+.gt-range-end-hi { text-align: right; }
 .gt-range-track {
   position: absolute; left: 8px; right: 8px; top: 8px; height: 6px;
   background: #cbd5e1; border-radius: 999px; overflow: hidden;

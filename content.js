@@ -407,7 +407,7 @@ function gtMain() {
 
       document.getElementById(`${goalId}-remove-btn`).addEventListener("click", async () => {
         const gd = (goalData.rival || []).find(g => g.id === goalId);
-        const labelText = gd ? `Rival · ${gd.rival} (${(gd.metric || "wpm").toUpperCase()})` : "Rival goal";
+        const labelText = gd ? `Rival · ${gd.rival} (${rivalMetric().toUpperCase()})` : "Rival goal";
         if (await confirmDeleteGoal(labelText)) removeGoal("rival", goalId);
       });
 
@@ -1271,26 +1271,13 @@ function gtMain() {
           <input id="gt-improvement-avgwindow-input" class="gt-improvement-avgwindow-input" type="number" min="2" placeholder="e.g. 5" />
         </div>
       </div>
-      <!-- Rival-mode controls (type=rival only). A WPM/PP metric selector
-           chooses which stat is compared against the rival. The rival's
-           username is entered in the standard Amount-row input (reused as a
-           text field, like Player mode). No mode / recurrence / target. -->
-      <div id="gt-rival-metric-row" style="display:none;">
-        <div class="gt-section-label">Metric</div>
-        <div class="gt-req-selector">
-          <div class="gt-req-group gt-rival-metric-group">
-            <button class="gt-mode-btn active" data-rival-metric="wpm" type="button">WPM</button>
-            <button class="gt-mode-btn"        data-rival-metric="pp"  type="button">PP</button>
-          </div>
-        </div>
-        <div class="gt-section-label">Track</div>
-        <div class="gt-mode-selector gt-rival-scope-group">
-          <button class="gt-mode-btn active" data-rival-scope="all"      type="button">All</button>
-          <button class="gt-mode-btn"        data-rival-scope="ranked"   type="button">Ranked</button>
-          <button class="gt-mode-btn"        data-rival-scope="unranked" type="button">Unranked</button>
-        </div>
-        <div class="gt-mode-hint" id="gt-rival-scope-modal-hint" style="display:block;"></div>
-      </div>
+      <!-- Rival-mode controls (type=rival only). The rival username is entered
+           in the standard Amount-row input (reused as a text field, like Player
+           mode). Metric (WPM/PP) and quote scope (all/ranked/unranked) are now
+           global preferences in Settings -> Rival, so they are not duplicated
+           here. The (empty) row is kept as the type-visibility anchor. No mode /
+           recurrence / target. -->
+      <div id="gt-rival-metric-row" style="display:none;"></div>
       <div id="gt-req-row" style="display:none;">
         <div class="gt-section-label">Requirements</div>
         <div class="gt-req-selector">
@@ -1577,7 +1564,7 @@ function gtMain() {
   // add an entry to SETTINGS_TABS with { id, label, render, commit }
   // to introduce a new settings group.
 
-  let activeSettingsTabId = null;    // which sidebar tab is currently shown
+  let activeSettingsTabId = (() => { try { return localStorage.getItem("gt-settings-tab"); } catch { return null; } })();    // restored across reloads; validated in openSettingsModal
   let activeRecSubTab     = "daily"; // sub-selection within the Recurrence tab
   let activeWheel         = null;    // current wheel picker (if the visible sub-tab has one)
   let settingsDraft       = null;    // working copy of settings while the modal is open; auto-committed on each change
@@ -1716,64 +1703,89 @@ function gtMain() {
     { value: "unranked", label: "Unranked", hint: "Counts only your rival's unranked quotes." },
   ];
   const RIVAL_NEXT_LINK_OPTIONS = [
-    { value: false, label: "Quote only",  hint: "Opens the quote on its own: typegg.io/solo/<quote>" },
-    { value: true,  label: "Versus rival", hint: "Opens a head-to-head against the rival on that quote: typegg.io/solo/<quote>/vs/<rival>" },
+    { value: false, label: "Solo",     hint: "Opens the text as a standard solo race." },
+    { value: true,  label: "Vs Rival", hint: "Opens a head-to-head race against the rival's ghost." },
   ];
   const RIVAL_NEXT_SORT_OPTIONS = [
     { value: "random",  label: "Random",   hint: "Picks a random quote where the rival beats you." },
-    { value: "closest", label: "Closest",  hint: "Smallest gap first — the quote you're nearest to beating; each click steps to the next-closest, then wraps around." },
-    { value: "biggest", label: "Biggest",  hint: "Largest gap first — where you're furthest behind; each click steps to the next-biggest, then wraps around." },
+    { value: "closest", label: "Closest",  hint: "Smallest gap first — the quote you're nearest to beating." },
+    { value: "biggest", label: "Biggest",  hint: "Largest gap first — where you're furthest behind." },
   ];
   const RIVAL_COUNT_OPTIONS = [
-    { value: false, label: "Rival's quotes", hint: "Counts every quote the rival has typed, and the “⚔ Next vs …” button can send you to any of them — including quotes you haven't raced yet, so you can chase all their scores." },
-    { value: true,  label: "Shared only",    hint: "Counts only quotes you've both raced, and “⚔ Next vs …” stays on those — a strict head-to-head on common ground." },
+    { value: false, label: "All Rival Quotes",   hint: "" },
+    { value: true,  label: "Shared Quotes Only", hint: "" },
   ];
 
   function renderRivalTab(contentEl, draft) {
     const curScope = RIVAL_SCOPE_VALUES.includes(draft.rivalSettings.scope) ? draft.rivalSettings.scope : "all";
+    const curMetric = RIVAL_METRIC_VALUES.includes(draft.rivalSettings.metric) ? draft.rivalSettings.metric : "wpm";
     const curSort  = RIVAL_NEXT_SORT_VALUES.includes(draft.rivalSettings.nextSort) ? draft.rivalSettings.nextSort : "random";
     const curCount = !!draft.rivalSettings.requireBoth;
     const current  = draft.rivalSettings.nextUsesVsLink;
     contentEl.innerHTML = `
-      <div class="gt-section-label">Track which of the rival's quotes</div>
+      <div class="gt-section-label">Metric</div>
+      <div class="gt-mode-selector" id="gt-rival-metric-selector">
+        <button class="gt-mode-btn${curMetric === "wpm" ? " active" : ""}" data-rival-metric="wpm">WPM</button>
+        <button class="gt-mode-btn${curMetric === "pp" ? " active" : ""}" data-rival-metric="pp">PP</button>
+      </div>
+
+      <div class="gt-section-label" style="margin-top:16px;">Your ${curMetric.toUpperCase()} filter<span class="gt-range-readout" id="gt-rival-mself-readout"></span></div>
+      <div class="gt-range-row" id="gt-rival-mself-ticks">
+        <span class="gt-range-end gt-range-end-lo"></span>
+        <div class="gt-range" id="gt-rival-mself-range">
+          <div class="gt-range-track"><div class="gt-range-fill"></div></div>
+          <input class="gt-range-input gt-range-lo" type="range" aria-label="Minimum your ${curMetric.toUpperCase()}" />
+          <input class="gt-range-input gt-range-hi" type="range" aria-label="Maximum your ${curMetric.toUpperCase()}" />
+        </div>
+        <span class="gt-range-end gt-range-end-hi"></span>
+      </div>
+
+      <div class="gt-section-label" style="margin-top:14px;">Rival ${curMetric.toUpperCase()} filter<span class="gt-range-readout" id="gt-rival-mrival-readout"></span></div>
+      <div class="gt-range-row" id="gt-rival-mrival-ticks">
+        <span class="gt-range-end gt-range-end-lo"></span>
+        <div class="gt-range" id="gt-rival-mrival-range">
+          <div class="gt-range-track"><div class="gt-range-fill"></div></div>
+          <input class="gt-range-input gt-range-lo" type="range" aria-label="Minimum rival ${curMetric.toUpperCase()}" />
+          <input class="gt-range-input gt-range-hi" type="range" aria-label="Maximum rival ${curMetric.toUpperCase()}" />
+        </div>
+        <span class="gt-range-end gt-range-end-hi"></span>
+      </div>
+
+      <div class="gt-section-label" style="margin-top:16px;">Quotes Status Filter</div>
       <div class="gt-mode-selector" id="gt-rival-scope-selector">
         ${RIVAL_SCOPE_OPTIONS.map(o =>
           `<button class="gt-mode-btn${o.value === curScope ? " active" : ""}" data-rival-scope="${o.value}">${o.label}</button>`
         ).join("")}
       </div>
-      <div class="gt-mode-hint" id="gt-rival-scope-hint" style="display:block;">${
-        RIVAL_SCOPE_OPTIONS.find(o => o.value === curScope)?.hint ?? ""
-      }</div>
-      <div class="gt-mode-hint" style="display:block; margin-top:8px; opacity:0.75;">Sets the wins total and the “⚔ Next vs …” pool for every rival goal.</div>
 
       <div class="gt-section-label" style="margin-top:16px;">Difficulty filter<span class="gt-range-readout" id="gt-rival-diff-readout"></span></div>
-      <div class="gt-range" id="gt-rival-diff-range">
-        <div class="gt-range-track"><div class="gt-range-fill"></div></div>
-        <input class="gt-range-input gt-range-lo" type="range" aria-label="Minimum difficulty" />
-        <input class="gt-range-input gt-range-hi" type="range" aria-label="Maximum difficulty" />
+      <div class="gt-range-row" id="gt-rival-diff-ticks">
+        <span class="gt-range-end gt-range-end-lo"></span>
+        <div class="gt-range" id="gt-rival-diff-range">
+          <div class="gt-range-track"><div class="gt-range-fill"></div></div>
+          <input class="gt-range-input gt-range-lo" type="range" aria-label="Minimum difficulty" />
+          <input class="gt-range-input gt-range-hi" type="range" aria-label="Maximum difficulty" />
+        </div>
+        <span class="gt-range-end gt-range-end-hi"></span>
       </div>
-      <div class="gt-range-ticks" id="gt-rival-diff-ticks"></div>
 
       <div class="gt-section-label" style="margin-top:14px;">Quote length filter<span class="gt-range-readout" id="gt-rival-len-readout"></span></div>
-      <div class="gt-range" id="gt-rival-len-range">
-        <div class="gt-range-track"><div class="gt-range-fill"></div></div>
-        <input class="gt-range-input gt-range-lo" type="range" aria-label="Minimum length" />
-        <input class="gt-range-input gt-range-hi" type="range" aria-label="Maximum length" />
+      <div class="gt-range-row" id="gt-rival-len-ticks">
+        <span class="gt-range-end gt-range-end-lo"></span>
+        <div class="gt-range" id="gt-rival-len-range">
+          <div class="gt-range-track"><div class="gt-range-fill"></div></div>
+          <input class="gt-range-input gt-range-lo" type="range" aria-label="Minimum length" />
+          <input class="gt-range-input gt-range-hi" type="range" aria-label="Maximum length" />
+        </div>
+        <span class="gt-range-end gt-range-end-hi"></span>
       </div>
-      <div class="gt-range-ticks" id="gt-rival-len-ticks"></div>
-      <div class="gt-mode-hint" style="display:block; margin-top:8px; opacity:0.75;">Only the rival's quotes inside both ranges count toward the wins total and the Next-vs pool. Full range = no filter.</div>
 
-      <div class="gt-section-label" style="margin-top:16px;">Quotes to beat</div>
+      <div class="gt-section-label" style="margin-top:16px;">Quote Pool</div>
       <div class="gt-mode-selector" id="gt-rival-count-selector">
         ${RIVAL_COUNT_OPTIONS.map(o =>
           `<button class="gt-mode-btn${o.value === curCount ? " active" : ""}" data-rival-count="${o.value}">${o.label}</button>`
         ).join("")}
       </div>
-      <div class="gt-mode-hint" id="gt-rival-count-hint" style="display:block;">${
-        RIVAL_COUNT_OPTIONS.find(o => o.value === curCount)?.hint ?? ""
-      }</div>
-      <div class="gt-mode-hint" style="display:block; margin-top:8px; opacity:0.75;">Sets the wins total and which quotes “⚔ Next vs …” can send you to.</div>
-
       <div class="gt-section-label" style="margin-top:16px;">“⚔ Next vs …” button picks</div>
       <div class="gt-mode-selector" id="gt-rival-nextsort-selector">
         ${RIVAL_NEXT_SORT_OPTIONS.map(o =>
@@ -1783,8 +1795,6 @@ function gtMain() {
       <div class="gt-mode-hint" id="gt-rival-nextsort-hint" style="display:block;">${
         RIVAL_NEXT_SORT_OPTIONS.find(o => o.value === curSort)?.hint ?? ""
       }</div>
-      <div class="gt-mode-hint" style="display:block; margin-top:8px; opacity:0.75;">Gap is measured on each goal's own metric (WPM or PP).</div>
-
       <div class="gt-section-label" style="margin-top:16px;">“⚔ Next vs …” button opens</div>
       <div class="gt-mode-selector" id="gt-rival-nextlink-selector">
         ${RIVAL_NEXT_LINK_OPTIONS.map(o =>
@@ -1794,8 +1804,18 @@ function gtMain() {
       <div class="gt-mode-hint" id="gt-rival-nextlink-hint" style="display:block;">${
         RIVAL_NEXT_LINK_OPTIONS.find(o => o.value === current)?.hint ?? ""
       }</div>
-      <div class="gt-mode-hint" style="display:block; margin-top:8px; opacity:0.75;">Applies to the “⚔ Next vs …” button on every rival goal.</div>
     `;
+
+    contentEl.querySelectorAll("[data-rival-metric]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        if (draft.rivalSettings.metric === btn.dataset.rivalMetric) return;
+        draft.rivalSettings.metric = btn.dataset.rivalMetric;
+        applySettingsDraft();
+        // Rebuild the tab so the metric-filter sliders track the new metric
+        // (both their axis and the per-metric stored handles change).
+        renderRivalTab(contentEl, draft);
+      });
+    });
 
     const scopeHintEl = contentEl.querySelector("#gt-rival-scope-hint");
     contentEl.querySelectorAll("[data-rival-scope]").forEach(btn => {
@@ -1848,7 +1868,9 @@ function gtMain() {
     // backspace work like a text field, Enter or blur commits, Escape reverts.
     // Both dragging and typing are clamped so the min handle can never pass the
     // max (and vice versa). Difficulty steps 0.1, length steps 1.
-    const rvAxis = rivalFilterAxis(); // data-driven bounds for both sliders
+    const rvAxis = rivalFilterAxis();   // data-driven bounds for the diff/length sliders
+    const rvmAxis = rivalMetricAxis();  // data-driven bounds for the metric sliders (current metric)
+    const mfK = rivalMetricKeys();      // which stored handles apply for the current metric
     const clampVal = (v, lo, hi, d) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
     function setupRivalRange(rangeId, readoutId, ticksId, opts) {
       const root = contentEl.querySelector(`#${rangeId}`);
@@ -1866,7 +1888,12 @@ function gtMain() {
       const numStr = (v) => (decimals ? (Number.isInteger(v) ? String(v) : v.toFixed(1)) : String(v));
       for (const inp of [loIn, hiIn]) { inp.min = min; inp.max = max; inp.step = step; }
       loIn.value = snap(opts.lo); hiIn.value = snap(opts.hi);
-      if (ticksEl) ticksEl.innerHTML = ticks.map(t => `<span>${t}</span>`).join("");
+      if (ticksEl) {
+        const loEnd = ticksEl.querySelector(".gt-range-end-lo");
+        const hiEnd = ticksEl.querySelector(".gt-range-end-hi");
+        if (loEnd) loEnd.textContent = ticks[0];
+        if (hiEnd) hiEnd.textContent = ticks[ticks.length - 1];
+      }
 
       let loNum = null, hiNum = null, capEl = null;
       if (readout) {
@@ -2005,19 +2032,49 @@ function gtMain() {
         draft.rivalSettings.lenMax = (hi >= rvAxis.lenMax) ? null : hi;
       },
     });
+    setupRivalRange("gt-rival-mself-range", "gt-rival-mself-readout", "gt-rival-mself-ticks", {
+      min: rvmAxis.selfMin, max: rvmAxis.selfMax, step: 1, decimals: false,
+      ticks: [String(rvmAxis.selfMin), `${rvmAxis.selfMax}+`],
+      lo: (draft.rivalSettings[mfK.sMin] == null) ? rvmAxis.selfMin : clampVal(draft.rivalSettings[mfK.sMin], rvmAxis.selfMin, rvmAxis.selfMax, rvmAxis.selfMin),
+      hi: (draft.rivalSettings[mfK.sMax] == null) ? rvmAxis.selfMax : clampVal(draft.rivalSettings[mfK.sMax], rvmAxis.selfMin, rvmAxis.selfMax, rvmAxis.selfMax),
+      set: (lo, hi) => {
+        draft.rivalSettings[mfK.sMin] = (lo <= rvmAxis.selfMin) ? null : lo;
+        draft.rivalSettings[mfK.sMax] = (hi >= rvmAxis.selfMax) ? null : hi;
+      },
+    });
+    setupRivalRange("gt-rival-mrival-range", "gt-rival-mrival-readout", "gt-rival-mrival-ticks", {
+      min: rvmAxis.rivalMin, max: rvmAxis.rivalMax, step: 1, decimals: false,
+      ticks: [String(rvmAxis.rivalMin), `${rvmAxis.rivalMax}+`],
+      lo: (draft.rivalSettings[mfK.rMin] == null) ? rvmAxis.rivalMin : clampVal(draft.rivalSettings[mfK.rMin], rvmAxis.rivalMin, rvmAxis.rivalMax, rvmAxis.rivalMin),
+      hi: (draft.rivalSettings[mfK.rMax] == null) ? rvmAxis.rivalMax : clampVal(draft.rivalSettings[mfK.rMax], rvmAxis.rivalMin, rvmAxis.rivalMax, rvmAxis.rivalMax),
+      set: (lo, hi) => {
+        draft.rivalSettings[mfK.rMin] = (lo <= rvmAxis.rivalMin) ? null : lo;
+        draft.rivalSettings[mfK.rMax] = (hi >= rvmAxis.rivalMax) ? null : hi;
+      },
+    });
   }
 
   function commitRivalTab(draft) {
-    const linkChanged  = draft.rivalSettings.nextUsesVsLink !== rivalSettings.nextUsesVsLink;
-    const scopeChanged = draft.rivalSettings.scope        !== rivalSettings.scope;
-    const sortChanged  = draft.rivalSettings.nextSort     !== rivalSettings.nextSort;
-    const countChanged = draft.rivalSettings.requireBoth  !== rivalSettings.requireBoth;
+    const linkChanged   = draft.rivalSettings.nextUsesVsLink !== rivalSettings.nextUsesVsLink;
+    const scopeChanged  = draft.rivalSettings.scope        !== rivalSettings.scope;
+    const metricChanged = draft.rivalSettings.metric       !== rivalSettings.metric;
+    const sortChanged   = draft.rivalSettings.nextSort     !== rivalSettings.nextSort;
+    const countChanged  = draft.rivalSettings.requireBoth  !== rivalSettings.requireBoth;
     const filterChanged =
       draft.rivalSettings.diffMin !== rivalSettings.diffMin ||
       draft.rivalSettings.diffMax !== rivalSettings.diffMax ||
       draft.rivalSettings.lenMin  !== rivalSettings.lenMin  ||
       draft.rivalSettings.lenMax  !== rivalSettings.lenMax;
-    if (!linkChanged && !scopeChanged && !sortChanged && !countChanged && !filterChanged) return; // no change
+    const metricFilterChanged =
+      draft.rivalSettings.mfWpmSelfMin  !== rivalSettings.mfWpmSelfMin  ||
+      draft.rivalSettings.mfWpmSelfMax  !== rivalSettings.mfWpmSelfMax  ||
+      draft.rivalSettings.mfWpmRivalMin !== rivalSettings.mfWpmRivalMin ||
+      draft.rivalSettings.mfWpmRivalMax !== rivalSettings.mfWpmRivalMax ||
+      draft.rivalSettings.mfPpSelfMin   !== rivalSettings.mfPpSelfMin   ||
+      draft.rivalSettings.mfPpSelfMax   !== rivalSettings.mfPpSelfMax   ||
+      draft.rivalSettings.mfPpRivalMin  !== rivalSettings.mfPpRivalMin  ||
+      draft.rivalSettings.mfPpRivalMax  !== rivalSettings.mfPpRivalMax;
+    if (!linkChanged && !scopeChanged && !metricChanged && !sortChanged && !countChanged && !filterChanged && !metricFilterChanged) return; // no change
     rivalSettings = { ...draft.rivalSettings };
     saveRivalSettings();
     if (scopeChanged) {
@@ -2025,9 +2082,11 @@ function gtMain() {
       // newly require the unranked stream — re-render and (leader) reconcile.
       renderAllGoals();
       if (isLeader) ensureRivalSync();
-    } else if (countChanged || filterChanged) {
-      // requireBoth / the difficulty+length filter only change the displayed
-      // standings (wins denominator + Next-vs pool) -- re-render, no refetch.
+    } else if (metricChanged || countChanged || filterChanged || metricFilterChanged) {
+      // Metric flips which stat the standings/Next-vs compare; requireBoth and
+      // the difficulty+length filter change the displayed standings (wins
+      // denominator + Next-vs pool). The store already holds both wpm & pp per
+      // quote, so a re-render is enough — no refetch.
       renderAllGoals();
     }
     // nextUsesVsLink and nextSort are both read live at click time in
@@ -2370,7 +2429,7 @@ function gtMain() {
       rivalSettings:   { ...rivalSettings },
       // future tabs seed their own draft slice here
     };
-    if (!activeSettingsTabId) activeSettingsTabId = SETTINGS_TABS[0].id;
+    if (!activeSettingsTabId || !SETTINGS_TABS.some(t => t.id === activeSettingsTabId)) activeSettingsTabId = SETTINGS_TABS[0].id;
     activeRecSubTab = "daily";
     activeWheel = null;
 
@@ -2433,6 +2492,7 @@ function gtMain() {
         if (btn.dataset.tabId === activeSettingsTabId) return;
         persistActiveFormToDraft(); // capture edits before leaving the current tab
         activeSettingsTabId = btn.dataset.tabId;
+        try { localStorage.setItem("gt-settings-tab", activeSettingsTabId); } catch {}
         sidebar.querySelectorAll(".gt-settings-tab-btn").forEach(b => b.classList.toggle("active", b === btn));
         renderActiveSettingsTab();
       });
@@ -2524,6 +2584,7 @@ function gtMain() {
   // raced (a head-to-head on shared quotes); when false it counts every quote
   // the rival has typed (quotes you haven't raced count as a loss).
   const RIVAL_SCOPE_VALUES = ["all", "ranked", "unranked"];
+  const RIVAL_METRIC_VALUES = ["wpm", "pp"];
   const RIVAL_NEXT_SORT_VALUES = ["random", "closest", "biggest"];
   // Difficulty/length range filter for rival goals. The slider axis is
   // DATA-DRIVEN: its bounds come from the difficulty/length of the rival's
@@ -2536,8 +2597,12 @@ function gtMain() {
   const RIVAL_LEN_MIN  = 0, RIVAL_LEN_MAX  = 10000;    // fallback length axis
   const RIVAL_LEN_AXIS_ROUND = 1000;                  // length axis floored to this
   const DEFAULT_RIVAL_SETTINGS = {
-    nextUsesVsLink: false, scope: "all", nextSort: "random", requireBoth: false,
+    nextUsesVsLink: false, scope: "all", metric: "wpm", nextSort: "random", requireBoth: false,
     diffMin: null, diffMax: null, lenMin: null, lenMax: null, fv: 1,
+    // Metric-value filter, kept per-metric so switching WPM<->PP preserves each.
+    // null = handle at an axis end (open). self* gates YOUR value, rival* the rival's.
+    mfWpmSelfMin: null, mfWpmSelfMax: null, mfWpmRivalMin: null, mfWpmRivalMax: null,
+    mfPpSelfMin: null, mfPpSelfMax: null, mfPpRivalMin: null, mfPpRivalMax: null,
   };
 
   function loadRivalSettings() {
@@ -2559,6 +2624,13 @@ function gtMain() {
       }
       if (diffMin != null && diffMax != null && diffMin > diffMax) { diffMin = null; diffMax = null; }
       if (lenMin  != null && lenMax  != null && lenMin  > lenMax)  { lenMin  = null; lenMax  = null; }
+      // Metric-value filter handles (per metric). null = open end; an inverted
+      // pair collapses to open (defensive against corrupted storage).
+      const fixPair = (lo, hi) => (lo != null && hi != null && lo > hi) ? [null, null] : [lo, hi];
+      let [mfWpmSelfMin,  mfWpmSelfMax]  = fixPair(num(saved.mfWpmSelfMin),  num(saved.mfWpmSelfMax));
+      let [mfWpmRivalMin, mfWpmRivalMax] = fixPair(num(saved.mfWpmRivalMin), num(saved.mfWpmRivalMax));
+      let [mfPpSelfMin,   mfPpSelfMax]   = fixPair(num(saved.mfPpSelfMin),   num(saved.mfPpSelfMax));
+      let [mfPpRivalMin,  mfPpRivalMax]  = fixPair(num(saved.mfPpRivalMin),  num(saved.mfPpRivalMax));
       return {
         nextUsesVsLink: typeof saved.nextUsesVsLink === "boolean"
           ? saved.nextUsesVsLink
@@ -2566,13 +2638,19 @@ function gtMain() {
         scope: RIVAL_SCOPE_VALUES.includes(saved.scope)
           ? saved.scope
           : DEFAULT_RIVAL_SETTINGS.scope,
+        metric: RIVAL_METRIC_VALUES.includes(saved.metric)
+          ? saved.metric
+          : DEFAULT_RIVAL_SETTINGS.metric,
         nextSort: RIVAL_NEXT_SORT_VALUES.includes(saved.nextSort)
           ? saved.nextSort
           : DEFAULT_RIVAL_SETTINGS.nextSort,
         requireBoth: typeof saved.requireBoth === "boolean"
           ? saved.requireBoth
           : DEFAULT_RIVAL_SETTINGS.requireBoth,
-        diffMin, diffMax, lenMin, lenMax, fv: 1,
+        diffMin, diffMax, lenMin, lenMax,
+        mfWpmSelfMin, mfWpmSelfMax, mfWpmRivalMin, mfWpmRivalMax,
+        mfPpSelfMin, mfPpSelfMax, mfPpRivalMin, mfPpRivalMax,
+        fv: 1,
       };
     } catch {
       return { ...DEFAULT_RIVAL_SETTINGS };
@@ -4523,7 +4601,6 @@ async function getExpRankByUsername(username) {
       const newGoal = {
         id: goalId,
         rival: rivalFetchedName,           // display name (as TypeGG returns it)
-        metric: selectedRivalMetric,       // "wpm" | "pp"
       };
       goalData.rival.push(newGoal);
       saveGoals("rival");
@@ -6395,6 +6472,10 @@ async function getExpRankByUsername(username) {
     const s = rivalSettings.scope;
     return (s === "ranked" || s === "unranked" || s === "all") ? s : "all";
   }
+  // Comparison metric for ALL rival goals — a global preference (Settings -> Rival).
+  function rivalMetric() {
+    return rivalSettings.metric === "pp" ? "pp" : "wpm";
+  }
   // Whether a rival quote falls inside the active scope. A missing `r` flag is
   // legacy data, which was ranked-only, so it counts as ranked.
   function rivalQuoteInScope(entry, scope) {
@@ -7070,6 +7151,40 @@ async function getExpRankByUsername(username) {
     rivalAxisCache = axis;
     return axis;
   }
+  // Metric-value axis (WPM/PP) — data-driven and metric-dependent. Two ranges:
+  // YOUR values (self store) and the RIVAL's (across all rival stores). Cached by
+  // store epoch + metric; floored to integers; a max at the axis end = uncapped.
+  let rivalMetricAxisCache = null;
+  function rivalMetricAxis() {
+    const metric = rivalMetric();
+    const key = `${rivalStoreEpoch}:${metric}`;
+    if (rivalMetricAxisCache && rivalMetricAxisCache.key === key) return rivalMetricAxisCache;
+    let sLo = Infinity, sHi = -Infinity, rLo = Infinity, rHi = -Infinity;
+    const selfQ = loadRivalStore(RIVAL_SELF_NAME).quotes;
+    for (const qid in selfQ) {
+      const v = Number(selfQ[qid][metric]);
+      if (Number.isFinite(v)) { if (v < sLo) sLo = v; if (v > sHi) sHi = v; }
+    }
+    for (const gd of (goalData.rival || [])) {
+      const rq = loadRivalStore(gd.rival).quotes;
+      for (const qid in rq) {
+        const v = Number(rq[qid][metric]);
+        if (Number.isFinite(v)) { if (v < rLo) rLo = v; if (v > rHi) rHi = v; }
+      }
+    }
+    const fb = (metric === "pp") ? 1000 : 200; // fallback span when no data yet
+    const axis = {
+      key,
+      selfMin:  Number.isFinite(sLo) ? Math.floor(sLo) : 0,
+      selfMax:  Number.isFinite(sHi) ? Math.floor(sHi) : fb,
+      rivalMin: Number.isFinite(rLo) ? Math.floor(rLo) : 0,
+      rivalMax: Number.isFinite(rHi) ? Math.floor(rHi) : fb,
+    };
+    if (axis.selfMax  <= axis.selfMin)  axis.selfMax  = axis.selfMin  + 1;
+    if (axis.rivalMax <= axis.rivalMin) axis.rivalMax = axis.rivalMin + 1;
+    rivalMetricAxisCache = axis;
+    return axis;
+  }
   // Resolve the stored handles (null = at an axis end) against the live axis.
   function rivalFilterState() {
     const s = rivalSettings, axis = rivalFilterAxis();
@@ -7085,10 +7200,34 @@ async function getExpRankByUsername(username) {
       lActive: lMin > axis.lenMin  || lMax < axis.lenMax,
     };
   }
+  // Which stored handles apply for the CURRENT metric (per-metric storage).
+  function rivalMetricKeys() {
+    return rivalMetric() === "pp"
+      ? { sMin: "mfPpSelfMin", sMax: "mfPpSelfMax", rMin: "mfPpRivalMin", rMax: "mfPpRivalMax" }
+      : { sMin: "mfWpmSelfMin", sMax: "mfWpmSelfMax", rMin: "mfWpmRivalMin", rMax: "mfWpmRivalMax" };
+  }
+  // Resolve the metric-filter handles (null = axis end) against the live axis.
+  function rivalMetricFilterState() {
+    const s = rivalSettings, axis = rivalMetricAxis(), k = rivalMetricKeys();
+    const clampS = (v) => Math.min(axis.selfMax,  Math.max(axis.selfMin,  v));
+    const clampR = (v) => Math.min(axis.rivalMax, Math.max(axis.rivalMin, v));
+    const sMin = (s[k.sMin] == null) ? axis.selfMin  : clampS(s[k.sMin]);
+    const sMax = (s[k.sMax] == null) ? axis.selfMax  : clampS(s[k.sMax]);
+    const rMin = (s[k.rMin] == null) ? axis.rivalMin : clampR(s[k.rMin]);
+    const rMax = (s[k.rMax] == null) ? axis.rivalMax : clampR(s[k.rMax]);
+    return {
+      sMin, sMax, rMin, rMax, axis,
+      sActive: sMin > axis.selfMin  || sMax < axis.selfMax,
+      rActive: rMin > axis.rivalMin || rMax < axis.rivalMax,
+    };
+  }
   // Signature for the standings memo so a filter change invalidates it.
   function rivalFilterSig() {
     const f = rivalFilterState();
-    return (f.dActive || f.lActive) ? `${f.dMin},${f.dMax},${f.lMin},${f.lMax}` : "";
+    const m = rivalMetricFilterState();
+    const dl = (f.dActive || f.lActive) ? `${f.dMin},${f.dMax},${f.lMin},${f.lMax}` : "";
+    const mm = (m.sActive || m.rActive) ? `s${m.sMin}-${m.sMax}r${m.rMin}-${m.rMax}` : "";
+    return `${dl}|${mm}`;
   }
   // Whether a quote entry passes the active filter. A CONSTRAINED dimension
   // excludes entries whose meta is unknown (legacy data not yet backfilled); a
@@ -7107,11 +7246,26 @@ async function getExpRankByUsername(username) {
     }
     return true;
   }
+  // Per-quote metric-value predicate. sv = your value, rv = the rival's (both on
+  // the current metric). A max handle at the axis max = no upper bound. An active
+  // SELF range implies you have raced the quote (sv = 0 for unraced -> excluded).
+  function rivalMetricPasses(sv, rv, m) {
+    if (m.sActive) {
+      if (!Number.isFinite(sv) || sv < m.sMin) return false;
+      if (m.sMax < m.axis.selfMax && sv > m.sMax) return false;
+    }
+    if (m.rActive) {
+      if (!Number.isFinite(rv) || rv < m.rMin) return false;
+      if (m.rMax < m.axis.rivalMax && rv > m.rMax) return false;
+    }
+    return true;
+  }
   function computeRivalStandings(gd) {
-    const metric = gd.metric || "wpm";
+    const metric = rivalMetric();
     const scope  = rivalScope();
     const requireBoth = !!rivalSettings.requireBoth; // count only quotes you've both raced
     const filter = rivalFilterState();
+    const mf = rivalMetricFilterState();
     const filterSig = rivalFilterSig();
     const selfStore  = loadRivalStore(RIVAL_SELF_NAME);
     const selfDone   = rivalBulkDone(selfStore);     // your history fully synced?
@@ -7135,9 +7289,11 @@ async function getExpRankByUsername(username) {
       // reflects a head-to-head on common ground rather than counting every
       // quote the rival has typed (where unraced ones would read as losses).
       if (requireBoth && !se) continue;
-      total++;
       const rv = rentry[metric];
       const sv = se ? se[metric] : 0;
+      // Metric-value filter (your value and/or the rival's), if active.
+      if ((mf.sActive || mf.rActive) && !rivalMetricPasses(sv, rv, mf)) continue;
+      total++;
       if (sv > rv + RIVAL_PP_EPS) { wins++; continue; } // you already beat them here
       // Not a win → candidate for the "⚔ Next vs" pool (a quote to go beat):
       if (se) {
@@ -7184,7 +7340,7 @@ async function getExpRankByUsername(username) {
   }
 
   function updateRivalGoalSection(goalId, gd, liveQid) {
-    const metric = gd.metric || "wpm";
+    const metric = rivalMetric();
     const rivalName = gd.rival || "rival";
 
     const labelEl = document.getElementById(`${goalId}-label`);
@@ -7241,7 +7397,7 @@ async function getExpRankByUsername(username) {
       // different quotes.
       if (settled && wrapEl) {
         const prev = prevRivalYouMap[goalId];
-        if (prev && prev.quoteId === liveQid && prev.value > RIVAL_PP_EPS && sv > prev.value + RIVAL_PP_EPS) {
+        if (prev && prev.quoteId === liveQid && prev.metric === metric && prev.value > RIVAL_PP_EPS && sv > prev.value + RIVAL_PP_EPS) {
           const delta = sv - prev.value;
           if (Number(delta.toFixed(2)) > 0) {
             const existing = document.getElementById(`${goalId}-rival-gain`);
@@ -7254,7 +7410,7 @@ async function getExpRankByUsername(username) {
             ind.addEventListener("animationend", () => ind.remove());
           }
         }
-        prevRivalYouMap[goalId] = { quoteId: liveQid, value: sv };
+        prevRivalYouMap[goalId] = { quoteId: liveQid, value: sv, metric };
       }
     } else {
       // Rival number unknown for this quote.
@@ -7304,7 +7460,7 @@ async function getExpRankByUsername(username) {
   // "biggest" → largest first. Returns an array of quoteIds. Recomputed every
   // click off the live stores, so it tracks the rival's new quotes / PBs.
   function rivalWorseSortedByGap(gd, sort) {
-    const metric = gd.metric || "wpm";
+    const metric = rivalMetric();
     const { worse } = computeRivalStandings(gd);
     const rq = loadRivalStore(gd.rival).quotes;
     const sq = loadRivalStore(RIVAL_SELF_NAME).quotes;
@@ -7360,7 +7516,7 @@ async function getExpRankByUsername(username) {
       // we can tell an improved quote from a parked one (see the doc above).
       const sorted = rivalWorseSortedByGap(gd, sort);
       if (sorted.length === 0) return;
-      const metric = gd.metric || "wpm";
+      const metric = rivalMetric();
       const sq = loadRivalStore(RIVAL_SELF_NAME).quotes;
       const selfVal = (qid) => (sq[qid] ? sq[qid][metric] : 0);
       const cursors = loadRivalNextCursors();
