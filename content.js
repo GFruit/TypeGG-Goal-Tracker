@@ -6503,6 +6503,105 @@ async function getExpRankByUsername(username) {
   let rivalStoreEpoch = 0;
   const rivalStandingsCache = new Map(); // goalId → { epoch, metric, result }
 
+  // ── IndexedDB persistence (replaces localStorage) ────────────
+  // Rival/self stores live in IndexedDB now, not localStorage: a few rivals
+  // could blow past localStorage's ~5 MB origin cap, while IDB has orders of
+  // magnitude more room. The in-memory `rivalStores` Map stays the SYNCHRONOUS
+  // source of truth for the (many, per-frame) reads — IDB is hydrated into it
+  // once at startup (initRivalStorage) and writes update the Map synchronously
+  // then persist to IDB asynchronously. Cross-tab propagation rides the existing
+  // BroadcastChannel (localStorage's automatic `storage` event is gone for these
+  // keys). All async; on IDB failure we degrade to in-memory-only for the
+  // session (a warning, no crash) — the leader rebuilds from the API anyway.
+  const RIVAL_IDB_NAME     = "gt-rival";
+  const RIVAL_IDB_STORE    = "kv";
+  const RIVAL_META_KEY     = "gt-rivalq-meta";          // shared quote-meta record
+  const RIVAL_MIGRATED_KEY = "gt-rivalq-idb-migrated";  // one-time LS→IDB marker
+  let rivalIdb = null;
+  function idbOpen() {
+    if (rivalIdb) return Promise.resolve(rivalIdb);
+    return new Promise((resolve, reject) => {
+      let req;
+      try { req = indexedDB.open(RIVAL_IDB_NAME, 1); } catch (e) { reject(e); return; }
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(RIVAL_IDB_STORE)) db.createObjectStore(RIVAL_IDB_STORE);
+      };
+      req.onsuccess = () => { rivalIdb = req.result; resolve(rivalIdb); };
+      req.onerror   = () => reject(req.error);
+    });
+  }
+  function idbStore(mode) {
+    return rivalIdb.transaction(RIVAL_IDB_STORE, mode).objectStore(RIVAL_IDB_STORE);
+  }
+  function idbGet(key) {
+    return idbOpen().then(() => new Promise((res, rej) => {
+      const r = idbStore("readonly").get(key);
+      r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+    }));
+  }
+  function idbGetAll() {
+    return idbOpen().then(() => new Promise((res, rej) => {
+      const out = [];
+      const cur = idbStore("readonly").openCursor();
+      cur.onsuccess = () => { const c = cur.result; if (c) { out.push({ key: c.key, value: c.value }); c.continue(); } else res(out); };
+      cur.onerror = () => rej(cur.error);
+    }));
+  }
+  function idbPut(key, value) {
+    return idbOpen().then(() => new Promise((res, rej) => {
+      const r = idbStore("readwrite").put(value, key);
+      r.onsuccess = () => res(); r.onerror = () => rej(r.error);
+    }));
+  }
+  function idbDelete(key) {
+    return idbOpen().then(() => new Promise((res, rej) => {
+      const r = idbStore("readwrite").delete(key);
+      r.onsuccess = () => res(); r.onerror = () => rej(r.error);
+    }));
+  }
+  let rivalIdbReady = false; // hydration complete? fetch/write paths gate on this
+
+  // ── Shared quote-meta table (storage trim) ───────────────────
+  // difficulty (`d`) / length (`l`) / ranked (`r`) are QUOTE-level facts —
+  // identical across every rival + self — so they're factored OUT of the
+  // per-store entries (now just `{ wpm, pp }`) into ONE shared table keyed by
+  // quoteId. Roughly halves per-store size and de-duplicates across rivals.
+  // Persisted as the single RIVAL_META_KEY IDB record; never GC'd (tiny, and a
+  // quote's meta is reusable by any store).
+  let rivalQuoteMeta = Object.create(null); // qid → { d, l, r }
+  let rivalMetaDirty = false;
+  const EMPTY_META = Object.freeze({});
+  function rivalMetaOf(qid) { return rivalQuoteMeta[qid] || EMPTY_META; }
+  // Fill/refresh a quote's shared meta. Returns true iff something changed (so a
+  // merge that only learned a ranked tag still triggers a save + standings
+  // recompute, since scope filtering depends on it).
+  function rivalMetaMerge(qid, ranked, d, l) {
+    if (!qid) return false;
+    let m = rivalQuoteMeta[qid];
+    if (!m) { m = {}; rivalQuoteMeta[qid] = m; }
+    let touched = false;
+    if (typeof ranked === "boolean" && m.r !== ranked) { m.r = ranked; touched = true; }
+    const dn = Number(d); if (Number.isFinite(dn) && m.d !== dn) { m.d = dn; touched = true; }
+    const ln = Number(l); if (Number.isFinite(ln) && m.l !== ln) { m.l = ln; touched = true; }
+    if (touched) rivalMetaDirty = true;
+    return touched;
+  }
+  // Trim a fat (pre-trim) store in place: hoist each entry's d/l/r into the
+  // shared meta table and reduce the entry to { wpm, pp }. Used by the LS→IDB
+  // migration and tolerated again on any store that still carries fat entries.
+  function trimStoreIntoMeta(store) {
+    const q = store.quotes;
+    for (const qid in q) {
+      const e = q[qid];
+      if (e == null) { delete q[qid]; continue; }
+      if (e.r !== undefined || e.d !== undefined || e.l !== undefined) {
+        rivalMetaMerge(qid, e.r, e.d, e.l);
+        q[qid] = { wpm: e.wpm, pp: e.pp };
+      }
+    }
+  }
+
   // Each store has ONE fetch stream (`fetch`) that bulk-builds EVERY quote in a
   // single pass via the API's `status=any` filter (ranked + unranked together).
   // Each /users/<name>/quotes row carries its own `quote.ranked` flag, so every
@@ -6537,64 +6636,139 @@ async function getExpRankByUsername(username) {
     // checks the phase, not metaV), so an incomplete re-bulk is never "done".
     store.metaV = RIVAL_META_V;
   }
-  // One-time migration (pre-scoped self key → gt-rivalq-self-<username>). The
-  // self store used to live at the unscoped `gt-rivalq-self`. On the first
-  // self-store load as a logged-in user, if the new scoped key is empty but the
-  // legacy key holds a built store, adopt it — so an existing user keeps their
-  // store instead of re-paying the long bulk rebuild. Runs once per session;
-  // skipped (and retried later) while logged out, since there's no username to
-  // scope to yet. Idempotent and multi-tab safe (last write wins on identical
-  // data; the legacy remove is a no-op once gone).
+  // Legacy unscoped-self adoption, IDB era. The self store used to live at the
+  // unscoped `gt-rivalq-self`; it's now keyed by username. Post-hydration, on
+  // the first self load as a logged-in user, if the scoped store is absent in
+  // the cache but the legacy one is present, adopt it (cache + IDB) so the user
+  // keeps their built store. Cache-based + sync; retried (flag stays false)
+  // until both hydration and login have happened.
   let selfStoreMigrated = false;
-  function migrateLegacySelfStore() {
+  function adoptLegacySelfFromCache() {
     if (selfStoreMigrated) return;
+    if (!rivalIdbReady) return;           // wait until the cache is hydrated
     const u = getAuth().username;
-    if (!u) return; // can't scope yet — retry on a later (logged-in) load
+    if (!u) return;                       // can't scope yet — retry once logged in
     selfStoreMigrated = true;
-    try {
-      const scopedKey = rivalStoreKey(RIVAL_SELF_NAME); // gt-rivalq-self-<u>
-      if (localStorage.getItem(scopedKey) != null) return; // already migrated
-      const legacy = localStorage.getItem(RIVAL_SELF_KEY);
-      if (legacy == null) return; // nothing to adopt
-      localStorage.setItem(scopedKey, legacy);
-      localStorage.removeItem(RIVAL_SELF_KEY);
-    } catch {}
+    const scopedKey = rivalStoreKey(RIVAL_SELF_NAME);
+    if (rivalStores.has(scopedKey)) return; // already have the scoped store
+    const legacy = rivalStores.get(RIVAL_SELF_KEY);
+    if (!legacy) return;                  // nothing to adopt
+    rivalStores.set(scopedKey, legacy);
+    rivalStores.delete(RIVAL_SELF_KEY);
+    idbPut(scopedKey, legacy).catch(() => {});
+    idbDelete(RIVAL_SELF_KEY).catch(() => {});
   }
+  // Synchronous read against the in-memory cache (hydrated from IDB at startup).
+  // A cache miss BEFORE hydration completes means "not loaded yet" → return a
+  // transient empty store WITHOUT caching, so hydration's real data isn't
+  // shadowed by a placeholder (all fetch/write paths gate on rivalIdbReady, so
+  // nothing mutates the transient). After hydration a miss is a genuinely new
+  // store and is cached.
   function loadRivalStore(name) {
-    if (name === RIVAL_SELF_NAME) migrateLegacySelfStore();
+    if (name === RIVAL_SELF_NAME) adoptLegacySelfFromCache();
     const key = rivalStoreKey(name);
     if (rivalStores.has(key)) return rivalStores.get(key);
-    let store = null;
-    try { store = JSON.parse(localStorage.getItem(key) || "null"); } catch {}
-    if (!store || typeof store !== "object" || typeof store.quotes !== "object") {
-      store = freshRivalStore();
-    }
-    if (!store.fetch) store.fetch = freshRivalFetch();
-    backfillMetaIfNeeded(store); // pre-v2 stores: one-time status=any re-bulk
-    rivalStores.set(key, store);
-    return store;
+    const fresh = freshRivalStore();
+    if (rivalIdbReady) rivalStores.set(key, fresh);
+    return fresh;
   }
+  // Update the in-memory store synchronously (already done by the caller), then
+  // persist to IDB and broadcast AFTER the write commits so followers reload
+  // fresh. Flushes the shared meta table in the same chain when it's dirty.
   function saveRivalStore(name, { broadcast = true } = {}) {
     const key = rivalStoreKey(name);
     const store = rivalStores.get(key);
     if (!store) return;
     rivalStoreEpoch++; // invalidate standings cache
-    try {
-      localStorage.setItem(key, JSON.stringify(store));
-    } catch (e) {
-      console.warn("[Goal Tracker] rival store save failed (quota?):", e);
-    }
-    if (broadcast) channel?.postMessage({ type: "rival-store", storeKey: key });
+    const flushMeta = rivalMetaDirty;
+    if (flushMeta) rivalMetaDirty = false;
+    const metaSnapshot = rivalQuoteMeta; // live ref — persists the latest state
+    idbPut(key, store)
+      .then(() => flushMeta ? idbPut(RIVAL_META_KEY, metaSnapshot) : null)
+      .then(() => {
+        if (!broadcast) return;
+        channel?.postMessage({ type: "rival-store", storeKey: key });
+        if (flushMeta) channel?.postMessage({ type: "rival-meta" });
+      })
+      .catch(e => console.warn("[Goal Tracker] rival store IDB save failed:", e));
   }
+  // Cross-tab: a follower reloads one store (or, when the leader GC'd it, drops
+  // it) from IDB and re-renders. Async (IDB), so it renders on completion rather
+  // than relying on a caller's render.
   function reloadRivalStoreFromDisk(key) {
-    try {
-      const parsed = JSON.parse(localStorage.getItem(key) || "null");
-      if (parsed && typeof parsed.quotes === "object") {
+    idbGet(key).then(parsed => {
+      if (parsed && typeof parsed === "object" && typeof parsed.quotes === "object") {
         if (!parsed.fetch) parsed.fetch = freshRivalFetch();
         rivalStores.set(key, parsed);
-        rivalStoreEpoch++; // invalidate standings cache
+      } else {
+        rivalStores.delete(key); // leader deleted it (GC)
+      }
+      rivalStoreEpoch++;
+      renderAllGoals();
+    }).catch(() => {});
+  }
+  function reloadRivalMetaFromDisk() {
+    idbGet(RIVAL_META_KEY).then(m => {
+      if (m && typeof m === "object") { rivalQuoteMeta = m; rivalStoreEpoch++; renderAllGoals(); }
+    }).catch(() => {});
+  }
+  // One-time localStorage → IndexedDB migration (cross-tab idempotent via the
+  // IDB marker). Trims each store into the shared meta table on the way in, then
+  // clears the localStorage keys to reclaim that space. A per-key IDB-write
+  // failure leaves that localStorage key in place to retry next run.
+  async function migrateLocalStorageToIdb() {
+    let done = false;
+    try { done = await idbGet(RIVAL_MIGRATED_KEY); } catch {}
+    if (done) return;
+    const keys = [];
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && (k.startsWith(RIVAL_SELF_KEY) || k.startsWith(RIVAL_KEY_PREFIX))) keys.push(k);
       }
     } catch {}
+    for (const k of keys) {
+      let store = null;
+      try { store = JSON.parse(localStorage.getItem(k) || "null"); } catch {}
+      if (store && typeof store === "object" && typeof store.quotes === "object") {
+        if (!store.fetch) store.fetch = freshRivalFetch();
+        trimStoreIntoMeta(store); // hoist d/l/r → shared meta; entries → { wpm, pp }
+        try { await idbPut(k, store); }
+        catch (e) { console.warn("[Goal Tracker] rival store migration failed (kept in localStorage):", k, e); continue; }
+      }
+      try { localStorage.removeItem(k); } catch {}
+    }
+    try { await idbPut(RIVAL_META_KEY, rivalQuoteMeta); } catch {}
+    try { await idbPut(RIVAL_MIGRATED_KEY, true); } catch {}
+  }
+  // Hydrate the in-memory cache from IDB once at startup (every tab), running the
+  // one-time LS→IDB migration first. Until this completes, reads return empty
+  // and all fetch/write paths are gated (rivalIdbReady), so the leader never
+  // re-bulks over data that's merely "not loaded yet". On completion we enable
+  // sync, invalidate any standings computed on empty stores, and re-render.
+  async function initRivalStorage() {
+    try {
+      await idbOpen();
+      await migrateLocalStorageToIdb();
+      const all = await idbGetAll();
+      for (const { key, value } of all) {
+        if (key === RIVAL_META_KEY) { if (value && typeof value === "object") rivalQuoteMeta = value; continue; }
+        if (key === RIVAL_MIGRATED_KEY) continue;
+        if (value && typeof value === "object" && typeof value.quotes === "object") {
+          if (!value.fetch) value.fetch = freshRivalFetch();
+          trimStoreIntoMeta(value);    // tolerate any still-fat entries
+          backfillMetaIfNeeded(value); // pre-v2 stores: one-time status=any re-bulk
+          rivalStores.set(key, value);
+        }
+      }
+    } catch (e) {
+      console.warn("[Goal Tracker] IndexedDB unavailable — rival data won't persist this session:", e);
+    } finally {
+      rivalIdbReady = true;
+      rivalStoreEpoch++;
+      renderAllGoals();
+      if (isLeader) ensureRivalSync();
+    }
   }
   // ── Scope (all / ranked / unranked) ──────────────────────────
   // A single global preference (Settings → Rival, also surfaced in the add-goal
@@ -6622,34 +6796,23 @@ async function getExpRankByUsername(username) {
     return !!(store && store.fetch && store.fetch.phase === "done");
   }
 
-  // PP-keyed idempotent merge. Returns true iff the store changed. `ranked`
-  // (optional boolean) tags the quote's ranking bucket; it's applied even when
-  // the PP didn't improve, so a quote first seen untagged (on-demand fill) or
-  // mis-tagged is corrected the moment its authoritative stream delivers it.
+  // PP-keyed idempotent merge. Returns true iff anything changed (store entry OR
+  // shared quote-meta). The per-store entry is just `{ wpm, pp }`; the quote's
+  // ranked/difficulty/length go to the shared meta table (identical across all
+  // stores). The ranked tag is applied even when PP didn't improve, so a quote
+  // first seen untagged (on-demand fill) or mis-tagged is corrected the moment
+  // its authoritative stream delivers it.
   function rivalMergeEntry(store, quoteId, wpm, pp, ranked, d, l) {
     if (!quoteId) return false;
     const p = Number(pp);
     if (!Number.isFinite(p)) return false;
-    const w = Number(wpm);
-    const dn = Number(d), ln = Number(l);
-    const haveD = Number.isFinite(dn), haveL = Number.isFinite(ln);
+    const metaTouched = rivalMetaMerge(quoteId, ranked, d, l);
     const cur = store.quotes[quoteId];
     if (cur && !(p > cur.pp + RIVAL_PP_EPS)) {
-      // No PP improvement -- but we may still need to record/fix the ranked tag
-      // or backfill the difficulty/length meta onto an older entry.
-      let touched = false;
-      if (typeof ranked === "boolean" && cur.r !== ranked) { cur.r = ranked; touched = true; }
-      if (haveD && cur.d !== dn) { cur.d = dn; touched = true; }
-      if (haveL && cur.l !== ln) { cur.l = ln; touched = true; }
-      return touched;
+      return metaTouched; // no PP improvement; entry unchanged
     }
-    const entry = { wpm: Number.isFinite(w) ? w : (cur ? cur.wpm : 0), pp: p };
-    if (typeof ranked === "boolean") entry.r = ranked;
-    else if (cur && typeof cur.r === "boolean") entry.r = cur.r; // preserve known tag
-    // Difficulty/length: prefer fresh values, else carry forward what we had.
-    if (haveD) entry.d = dn; else if (cur && Number.isFinite(cur.d)) entry.d = cur.d;
-    if (haveL) entry.l = ln; else if (cur && Number.isFinite(cur.l)) entry.l = cur.l;
-    store.quotes[quoteId] = entry;
+    const w = Number(wpm);
+    store.quotes[quoteId] = { wpm: Number.isFinite(w) ? w : (cur ? cur.wpm : 0), pp: p };
     return true;
   }
   function entryFromQuoteRecord(q) {
@@ -7014,6 +7177,7 @@ async function getExpRankByUsername(username) {
   // so the ongoing refresh still pauses when hidden.
   function rivalPollOnce() {
     if (!isLeader) return;
+    if (!rivalIdbReady) return;    // hydration not done yet
     if (!isLoggedIn()) return;     // logged out — nothing to sync (no 401s)
     if (apiThrottled()) return;    // backing off after recent fetch failures
     if (rivalManaged.size === 0) return;
@@ -7115,6 +7279,7 @@ async function getExpRankByUsername(username) {
   // self store alive (the spec wants it built regardless of any rival goal).
   function ensureRivalSync() {
     if (!isLeader) return;
+    if (!rivalIdbReady) return; // wait for the IDB hydration before any fetch/build
     if (!isLoggedIn()) { stopAllRivalTimers(); return; } // logged out: no rival/self work, stores kept
     const map = referencedRivalMap();
     const haveRivalGoals = map.size > 0;
@@ -7160,24 +7325,26 @@ async function getExpRankByUsername(username) {
     }
     // Garbage-collect ANY persisted rival store whose user isn't referenced by
     // a current goal — including stale keys left by a goal removed in a prior
-    // session (which stopRivalManaged alone would miss, since it only knows
-    // about rivals managed this session). Scan localStorage directly.
+    // session (which stopRivalManaged alone would miss). Scans IDB keys (async).
+    gcStaleRivalStores(wantedKeys);
+  }
+  async function gcStaleRivalStores(wantedKeys) {
     try {
-      const stale = [];
-      for (let i = 0; i < localStorage.length; i++) {
-        const k = localStorage.key(i);
-        if (k && k.startsWith(RIVAL_KEY_PREFIX) && !wantedKeys.has(k)) stale.push(k);
-      }
-      for (const k of stale) {
-        localStorage.removeItem(k);
-        rivalStores.delete(k);
-        channel?.postMessage({ type: "rival-store", storeKey: k });
+      const all = await idbGetAll();
+      for (const { key } of all) {
+        if (key === RIVAL_META_KEY || key === RIVAL_MIGRATED_KEY) continue;
+        if (key.startsWith(RIVAL_KEY_PREFIX) && !wantedKeys.has(key)) {
+          await idbDelete(key);
+          rivalStores.delete(key);
+          channel?.postMessage({ type: "rival-store", storeKey: key });
+        }
       }
     } catch {}
   }
 
   // Merge the recent /races list into the self store (called on quote-finish).
   async function maintainSelfStoreFromRaces(gtPerfSession = null, selfRender = true) {
+    if (!rivalIdbReady) return false; // self store not hydrated yet
     if (apiThrottled()) return false; // don't add load during a backoff window
     let races;
     const gtRacesT0 = performance.now(); // [GT-PERF]
@@ -7213,6 +7380,7 @@ async function getExpRankByUsername(username) {
   }
   function ensureCurrentQuoteForRivals(quoteId) {
     if (!isLeader || !quoteId) return;
+    if (!rivalIdbReady) return; // stores not hydrated yet
     if (apiThrottled()) return; // backing off after recent failures
     const refMap = referencedRivalMap();
     if (refMap.size === 0) return; // no rival goals → nothing to compare, don't fetch self
@@ -7262,7 +7430,8 @@ async function getExpRankByUsername(username) {
     for (const rname of referencedRivalMap().values()) {
       const q = loadRivalStore(rname).quotes;
       for (const qid in q) {
-        const d = Number(q[qid].d), l = Number(q[qid].l);
+        const m = rivalMetaOf(qid);
+        const d = Number(m.d), l = Number(m.l);
         if (Number.isFinite(d)) { if (d < dLo) dLo = d; if (d > dHi) dHi = d; }
         if (Number.isFinite(l)) { if (l < lLo) lLo = l; if (l > lHi) lHi = l; }
       }
@@ -7400,12 +7569,12 @@ async function getExpRankByUsername(username) {
         if (!Number.isFinite(v)) continue;
         const cur = out[qid];
         if (!cur) {
-          out[qid] = { v, holder: name, r: e.r, d: e.d, l: e.l };
-        } else {
-          if (cur.r === undefined && typeof e.r === "boolean") cur.r = e.r;
-          if (!Number.isFinite(Number(cur.d)) && Number.isFinite(Number(e.d))) cur.d = e.d;
-          if (!Number.isFinite(Number(cur.l)) && Number.isFinite(Number(e.l))) cur.l = e.l;
-          if (v > cur.v + RIVAL_PP_EPS) { cur.v = v; cur.holder = name; }
+          // Quote-level meta (r/d/l) is shared + identical across rivals, so it
+          // only needs reading once per quote (from the shared table).
+          const m = rivalMetaOf(qid);
+          out[qid] = { v, holder: name, r: m.r, d: m.d, l: m.l };
+        } else if (v > cur.v + RIVAL_PP_EPS) {
+          cur.v = v; cur.holder = name;
         }
       }
     }
@@ -7634,6 +7803,92 @@ async function getExpRankByUsername(username) {
         tr.appendChild(removeTd);
         tbody.appendChild(tr);
       }
+
+      // ── Add-rival row ────────────────────────────────────────
+      // Below the last rival, in the name column: a "Username" input + "+ Add"
+      // to grow this multi-rival goal after creation. The name is validated
+      // against the API first (canonical case resolved; 404 / duplicate / throttle
+      // handled) — same as the create flow — so a typo can't add a phantom rival
+      // whose store would just sync forever empty.
+      const addTr = document.createElement("tr");
+      addTr.className = "gt-rivals-add-row";
+      const addInputTd = document.createElement("td");
+      addInputTd.className = "gt-rivals-add-cell";
+      const addInput = document.createElement("input");
+      addInput.type = "text";
+      addInput.className = "gt-rivals-add-input";
+      addInput.placeholder = "Username";
+      addInput.maxLength = 40;
+      addInput.autocomplete = "off";
+      addInput.spellcheck = false;
+      addInputTd.appendChild(addInput);
+      const addBtnTd = document.createElement("td");
+      addBtnTd.className = "gt-rivals-add-btn-cell";
+      addBtnTd.colSpan = 3;
+      const addBtn = document.createElement("button");
+      addBtn.type = "button";
+      addBtn.className = "gt-rivals-add-btn";
+      addBtn.textContent = "+ Add";
+      addBtnTd.appendChild(addBtn);
+      addTr.appendChild(addInputTd);
+      addTr.appendChild(addBtnTd);
+      tbody.appendChild(addTr);
+
+      const statusTr = document.createElement("tr");
+      statusTr.className = "gt-rivals-add-status-row";
+      const statusTd = document.createElement("td");
+      statusTd.colSpan = 4;
+      statusTd.className = "gt-rivals-add-status";
+      statusTd.style.display = "none";
+      statusTr.appendChild(statusTd);
+      tbody.appendChild(statusTr);
+
+      const setAddStatus = (msg, isError) => {
+        if (!msg) { statusTd.style.display = "none"; statusTd.textContent = ""; return; }
+        statusTd.textContent = msg;
+        statusTd.className = "gt-rivals-add-status" + (isError ? " gt-rivals-add-status-error" : "");
+        statusTd.style.display = "";
+      };
+
+      let adding = false;
+      const doAddRival = async () => {
+        if (adding) return;
+        const typed = addInput.value.trim();
+        if (!typed) { setAddStatus("Enter a username", true); addInput.focus(); return; }
+        if (goalRivalNames(gd).some(n => n.toLowerCase() === typed.toLowerCase())) {
+          setAddStatus(`${typed} is already in this goal`, true); return;
+        }
+        adding = true; addBtn.disabled = true; setAddStatus("Checking\u2026", false);
+        try {
+          const url = `https://api.typegg.io/v1/users/${encodeURIComponent(typed)}`;
+          const r = await gtApiFetch(url, { headers: authHeaders() });
+          if (r.status === 404) throw new Error("not found");
+          if (!r.ok) throw new Error("busy"); // 429/5xx — not a "no such user"
+          const d = await r.json();
+          const resolved = d?.username || typed;
+          // Re-check against the resolved (canonical) name and the live list.
+          if (goalRivalNames(gd).some(n => n.toLowerCase() === resolved.toLowerCase())) {
+            setAddStatus(`${resolved} is already in this goal`, true);
+            adding = false; addBtn.disabled = false; return;
+          }
+          gd.rivals.push(resolved);
+          saveGoals("rival");
+          renderAllGoals();
+          if (isLeader) ensureRivalSync(); // build the new rival's store
+          adding = false;
+          renderTable(); // rebuild: the new rival appears + a fresh empty input
+          const fresh = tbody.querySelector(".gt-rivals-add-input");
+          if (fresh) fresh.focus();
+        } catch (err) {
+          // A throttle / network error shouldn't claim the user doesn't exist.
+          const couldntCheck = err?.gtThrottled || err?.message === "busy" || (err instanceof TypeError);
+          setAddStatus(couldntCheck ? "Can't reach TypeGG \u2014 try again in a moment" : "User not found", true);
+          adding = false; addBtn.disabled = false; addInput.focus();
+        }
+      };
+      addBtn.addEventListener("click", doAddRival);
+      addInput.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); doAddRival(); } });
+      addInput.addEventListener("input", () => { if (statusTd.style.display !== "none") setAddStatus("", false); });
     };
 
     renderTable();
@@ -8865,10 +9120,15 @@ async function getExpRankByUsername(username) {
     }
 
     if (msg.type === 'rival-store') {
-      // The leader updated a rival/self quote-best store. Refresh our cached
-      // copy from disk and re-render the rival cards.
+      // The leader updated (or GC'd) a rival/self store. Reload our cached copy
+      // from IDB; reloadRivalStoreFromDisk re-renders on completion.
       if (msg.storeKey) reloadRivalStoreFromDisk(msg.storeKey);
-      renderAllGoals();
+      return;
+    }
+
+    if (msg.type === 'rival-meta') {
+      // The leader updated the shared quote-meta table. Reload + re-render.
+      reloadRivalMetaFromDisk();
       return;
     }
 
@@ -8958,14 +9218,9 @@ async function getExpRankByUsername(username) {
       }
     }
 
-    // Rival/self quote-best store updated by the leader (or GC'd)? Refresh
-    // our cached copy and re-render the rival cards. startsWith(RIVAL_SELF_KEY)
-    // matches both the legacy unscoped key and the scoped gt-rivalq-self-<name>.
-    if (e.key.startsWith(RIVAL_SELF_KEY) || e.key.startsWith(RIVAL_KEY_PREFIX)) {
-      reloadRivalStoreFromDisk(e.key);
-      renderAllGoals();
-      return;
-    }
+    // (Rival/self stores moved to IndexedDB — they no longer fire storage
+    // events; cross-tab propagation rides the 'rival-store' / 'rival-meta'
+    // BroadcastChannel messages instead.)
 
     // Stats cache updated by leader? Hydrate.
     if (e.key === STATS_CACHE_KEY && e.newValue && !isLeader) {
@@ -9014,6 +9269,11 @@ async function getExpRankByUsername(username) {
     onAuthChange(now);
   }
   setInterval(checkAuthTransition, 3_000);
+
+  // ── Hydrate rival stores from IndexedDB (every tab) ──────────
+  // Runs the one-time localStorage→IDB migration, loads stores into the cache,
+  // then enables sync. Fire-and-forget; self-gates everything on rivalIdbReady.
+  initRivalStorage();
 
   // ── Hydrate from cached stats for immediate render ───────────
   // Lets fresh tabs show accurate progress without waiting for the
