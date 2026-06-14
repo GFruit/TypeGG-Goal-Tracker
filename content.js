@@ -248,7 +248,7 @@ function gtMain() {
     const size     = JSON.parse(localStorage.getItem(LEGACY_SIZE_KEY) || "null");
     // Order matches the historical type-sorted order so pre-existing users
     // don't see a jarring reshuffle on upgrade.
-    const typeOrder = ['exp', 'pp', 'races', 'quotes', 'playtime', 'chars'];
+    const typeOrder = ['exp', 'pp', 'races', 'improvement', 'quotes', 'playtime', 'chars'];
     const goalIds = [];
     for (const type of typeOrder) {
       try {
@@ -1191,6 +1191,7 @@ function gtMain() {
         <button class="gt-type-btn"        data-type="quotes">Quotes</button>
         <button class="gt-type-btn"        data-type="playtime">Time</button>
         <button class="gt-type-btn"        data-type="chars">Chars</button>
+        <button class="gt-type-btn"        data-type="improvement">Improve</button>
         <button class="gt-type-btn"        data-type="rival">Rival</button>
       </div>
       <div id="gt-filter-row" style="display:none;">
@@ -1742,7 +1743,21 @@ function gtMain() {
     const curCount = !!draft.rivalSettings.requireBoth;
     const current  = draft.rivalSettings.nextUsesVsLink;
     contentEl.innerHTML = `
-      <div class="gt-section-label">Metric</div>
+      <div class="gt-section-label">Quote Pool</div>
+      <div class="gt-mode-selector" id="gt-rival-count-selector">
+        ${RIVAL_COUNT_OPTIONS.map(o =>
+          `<button class="gt-mode-btn${o.value === curCount ? " active" : ""}" data-rival-count="${o.value}">${o.label}</button>`
+        ).join("")}
+      </div>
+
+      <div class="gt-section-label" style="margin-top:16px;">Quotes Status Filter</div>
+      <div class="gt-mode-selector" id="gt-rival-scope-selector">
+        ${RIVAL_SCOPE_OPTIONS.map(o =>
+          `<button class="gt-mode-btn${o.value === curScope ? " active" : ""}" data-rival-scope="${o.value}">${o.label}</button>`
+        ).join("")}
+      </div>
+
+      <div class="gt-section-label" style="margin-top:16px;">Metric</div>
       <div class="gt-mode-selector" id="gt-rival-metric-selector">
         <button class="gt-mode-btn${curMetric === "wpm" ? " active" : ""}" data-rival-metric="wpm">WPM</button>
         <button class="gt-mode-btn${curMetric === "pp" ? " active" : ""}" data-rival-metric="pp">PP</button>
@@ -1757,13 +1772,6 @@ function gtMain() {
           <input class="gt-range-input gt-range-hi" type="range" aria-label="Maximum rival ${curMetric.toUpperCase()}" />
         </div>
         <span class="gt-range-end gt-range-end-hi"></span>
-      </div>
-
-      <div class="gt-section-label" style="margin-top:16px;">Quotes Status Filter</div>
-      <div class="gt-mode-selector" id="gt-rival-scope-selector">
-        ${RIVAL_SCOPE_OPTIONS.map(o =>
-          `<button class="gt-mode-btn${o.value === curScope ? " active" : ""}" data-rival-scope="${o.value}">${o.label}</button>`
-        ).join("")}
       </div>
 
       <div class="gt-section-label" style="margin-top:16px;">Difficulty filter<span class="gt-range-readout" id="gt-rival-diff-readout"></span></div>
@@ -1788,12 +1796,6 @@ function gtMain() {
         <span class="gt-range-end gt-range-end-hi"></span>
       </div>
 
-      <div class="gt-section-label" style="margin-top:16px;">Quote Pool</div>
-      <div class="gt-mode-selector" id="gt-rival-count-selector">
-        ${RIVAL_COUNT_OPTIONS.map(o =>
-          `<button class="gt-mode-btn${o.value === curCount ? " active" : ""}" data-rival-count="${o.value}">${o.label}</button>`
-        ).join("")}
-      </div>
       <div class="gt-section-label" style="margin-top:16px;">“⚔ Next vs …” button picks</div>
       <div class="gt-mode-selector" id="gt-rival-nextsort-selector">
         ${RIVAL_NEXT_SORT_OPTIONS.map(o =>
@@ -1825,25 +1827,26 @@ function gtMain() {
       });
     });
 
-    const scopeHintEl = contentEl.querySelector("#gt-rival-scope-hint");
     contentEl.querySelectorAll("[data-rival-scope]").forEach(btn => {
       btn.addEventListener("click", () => {
         const val = btn.dataset.rivalScope;
+        if (draft.rivalSettings.scope === val) return;
         draft.rivalSettings.scope = val;
-        contentEl.querySelectorAll("[data-rival-scope]").forEach(b => b.classList.toggle("active", b === btn));
-        if (scopeHintEl) scopeHintEl.textContent = RIVAL_SCOPE_OPTIONS.find(o => o.value === val)?.hint ?? "";
         applySettingsDraft();
+        // Rebuild so the WPM/PP, difficulty and length slider bounds recompute
+        // against the newly filtered quote set (this status + the pool above).
+        renderRivalTab(contentEl, draft);
       });
     });
 
-    const countHintEl = contentEl.querySelector("#gt-rival-count-hint");
     contentEl.querySelectorAll("[data-rival-count]").forEach(btn => {
       btn.addEventListener("click", () => {
         const val = btn.dataset.rivalCount === "true";
+        if (draft.rivalSettings.requireBoth === val) return;
         draft.rivalSettings.requireBoth = val;
-        contentEl.querySelectorAll("[data-rival-count]").forEach(b => b.classList.toggle("active", b === btn));
-        if (countHintEl) countHintEl.textContent = RIVAL_COUNT_OPTIONS.find(o => o.value === val)?.hint ?? "";
         applySettingsDraft();
+        // Rebuild so the slider bounds recompute against the new quote pool.
+        renderRivalTab(contentEl, draft);
       });
     });
 
@@ -2162,6 +2165,7 @@ function gtMain() {
       try { goalData[type] = JSON.parse(localStorage.getItem(cfg.storageKey) || "[]"); }
       catch { goalData[type] = []; }
     }
+    migrateImprovementToOwnType(); // imported backups may carry legacy races-improvement goals
     groupData       = loadGroups() || { [MAIN_GROUP_ID]: { position: null, size: null, goalIds: [] } };
     ensureMainGroup();
     recSettings     = loadRecSettings();
@@ -3085,6 +3089,15 @@ async function getExpRankByUsername(username) {
     label: "Chars",
     supportsTarget: true,
     decimals: 0,
+  },
+  // Improvement is a per-quote goal type (its own type now; was a races mode).
+  // Like rival it bypasses the cumulative Mode/Amount machinery — supportsTarget
+  // is false so the Mode row stays hidden — and is driven by its own controls,
+  // render, seed and evaluator paths. baselineKey is present but unused.
+  improvement: {
+    presets: [], storageKey: "gt-goals-improvement",
+    baselineKey: "baselineImprovement",
+    label: "Improvement", supportsTarget: false, decimals: 0,
   },
   // Rival is a comparison goal, not a cumulative one — it has no baseline,
   // stat key, presets, target or recurrence. Only storageKey + label are
@@ -4150,7 +4163,7 @@ async function getExpRankByUsername(username) {
     }
 
     // Show filter row only for races
-    filterRow.style.display = (selectedType === "races") ? "block" : "none";
+    filterRow.style.display = (selectedType === "races" || selectedType === "improvement") ? "block" : "none";
 
     // Show rank button only for PP
     rankBtn.style.display = (selectedType === "pp" || selectedType === "exp") ? "" : "none";
@@ -4160,8 +4173,8 @@ async function getExpRankByUsername(username) {
 
     // Average mode is races-only — same visibility pattern as rank/player.
     avgBtn.style.display = (selectedType === "races") ? "" : "none";
-    // Improvement mode is races-only too.
-    improvementBtn.style.display = (selectedType === "races") ? "" : "none";
+    // Improvement is its own goal TYPE now — the legacy mode button is retired.
+    improvementBtn.style.display = "none";
 
 
     // If rank/player was active and we switched away from PP/EXP, fall back to gain
@@ -4169,8 +4182,18 @@ async function getExpRankByUsername(username) {
       selectedMode = "gain";
       modeBtns.forEach(b => b.classList.toggle("active", b.dataset.mode === "gain"));
     }
-    // Same fallback for average/improvement when leaving races
-    if ((selectedMode === "average" || selectedMode === "improvement") && selectedType !== "races") {
+    // Average is races-only: fall back to gain when leaving races.
+    if (selectedMode === "average" && selectedType !== "races") {
+      selectedMode = "gain";
+      modeBtns.forEach(b => b.classList.toggle("active", b.dataset.mode === "gain"));
+    }
+    // Improvement is its own TYPE now. Entering it drives the (gain) improvement
+    // flow via selectedMode="improvement"; leaving it returns to gain. The Mode
+    // row stays hidden for this type (supportsTarget=false) — the gain/target
+    // sub-mode toggle arrives with target mode in the next drop.
+    if (selectedType === "improvement") {
+      selectedMode = "improvement";
+    } else if (selectedMode === "improvement") {
       selectedMode = "gain";
       modeBtns.forEach(b => b.classList.toggle("active", b.dataset.mode === "gain"));
     }
@@ -4469,7 +4492,7 @@ async function getExpRankByUsername(username) {
   // window) are only meaningful for races + improvement. Mirror
   // updateAvgRowVisibility().
   function updateImprovementRowVisibility() {
-    const visible = selectedType === "races" && selectedMode === "improvement";
+    const visible = selectedMode === "improvement";
     improvementMetricRow.style.display = visible ? "block" : "none";
     improvementTrackRow.style.display  = visible ? "block" : "none";
     if (!visible) { resetImprovementUI(); return; }
@@ -4480,7 +4503,7 @@ async function getExpRankByUsername(username) {
   // first-time toggle applies only to the Best track (Average's warm-up
   // handles new quotes), so it's hidden for Average.
   function updateImprovementWindowRowVisibility() {
-    const avg = selectedType === "races" && selectedMode === "improvement"
+    const avg = selectedMode === "improvement"
                 && selectedImprovementTrack === "average";
     improvementWindowRow.style.display = avg ? "block" : "none";
     improvementFirstTimeBtn.style.display = avg ? "none" : "";
@@ -4512,7 +4535,7 @@ async function getExpRankByUsername(username) {
     playerBtn.style.display = (selectedType === "pp" || selectedType === "exp") ? "" : "none";
     rankBtn.style.display = (selectedType === "pp" || selectedType === "exp") ? "" : "none";
     avgBtn.style.display = (selectedType === "races") ? "" : "none";
-    improvementBtn.style.display = (selectedType === "races") ? "" : "none";
+    improvementBtn.style.display = "none";
     nextRankRow.style.display = "none";
     maxQuotesRow.style.display = "none";
     filterRow.style.display = "none"; // hide filter row initially (only show for races)
@@ -4551,7 +4574,25 @@ async function getExpRankByUsername(username) {
     playtime: JSON.parse(localStorage.getItem("gt-goals-playtime")) || [],
     chars: JSON.parse(localStorage.getItem("gt-goals-chars")) || [],
     rival: JSON.parse(localStorage.getItem("gt-goals-rival")) || [],
+    improvement: JSON.parse(localStorage.getItem("gt-goals-improvement")) || [],
   };
+
+  // One-time migration: improvement goals used to be a MODE on the races type
+  // (stored in gt-goals-races with mode:"improvement"). They're their own type
+  // now — relocate any such goals into gt-goals-improvement, leaving the rest of
+  // the races list intact. Idempotent: a second run finds nothing to move.
+  function migrateImprovementToOwnType() {
+    const races = goalData.races || [];
+    const movers = races.filter(g => g && g.mode === "improvement");
+    if (movers.length === 0) return;
+    goalData.races = races.filter(g => !(g && g.mode === "improvement"));
+    goalData.improvement = [...(goalData.improvement || []), ...movers];
+    try {
+      localStorage.setItem("gt-goals-races", JSON.stringify(goalData.races));
+      localStorage.setItem("gt-goals-improvement", JSON.stringify(goalData.improvement));
+    } catch {}
+  }
+  migrateImprovementToOwnType();
 
   // ── Save goals to localStorage ─────────────────────────────────
   function saveGoals(type) {
@@ -4747,6 +4788,10 @@ async function getExpRankByUsername(username) {
         currentVal = data.stats?.quickplayRaces;
       } else if (selectedType === "races" && selectedFilter === "solo") {
         currentVal = data.stats?.soloRaces;
+      } else if (selectedType === "improvement") {
+        // No cumulative stat — use lifetime races so the null-guard passes and
+        // lastEvalRaces seeds from the same field the evaluator reads.
+        currentVal = data.stats?.races ?? 0;
       } else {
         currentVal = data.stats?.[cfg.statKey];
       }
@@ -4873,7 +4918,7 @@ async function getExpRankByUsername(username) {
       // seeds lastEvalRaces from lifetime races so only post-creation races
       // count. quoteBests starts empty (baselines are seeded lazily at
       // quote-start); accumulatedGain starts at 0.
-      const isImprovementMode = selectedMode === "improvement" && selectedType === "races";
+      const isImprovementMode = selectedType === "improvement";
       const goalMode     = isAvgMode ? "average" : (isImprovementMode ? "improvement" : undefined);
 
       // Improvement track config: "best" (ratchet your PB) vs "average"
@@ -4893,7 +4938,7 @@ async function getExpRankByUsername(username) {
         targetUsername: selectedMode === "player" ? playerFetchedName : undefined,
         maxQuotes: isMaxQuotes || undefined,
         maxQuotesKind: maxQuotesKindForGoal || undefined,
-        filter: selectedType === "races" ? selectedFilter : undefined,
+        filter: (selectedType === "races" || selectedType === "improvement") ? selectedFilter : undefined,
         targetLoaded: selectedMode === "rank" ? false : true, // false for rank goals — target is loaded async by updateRankGoals/updateExpRankGoals
         [cfg.baselineKey]: maxQuotesBaselineOverride != null ? maxQuotesBaselineOverride : currentVal,
         recurrence: selectedRec,
@@ -4975,7 +5020,8 @@ async function getExpRankByUsername(username) {
         // so seeding lastEvalRaces = currentStats.races above means "look
         // at races AFTER right now". So this kick-off is a no-op on
         // creation but ensures the eval cycle has a chance to wire up.
-        if (usesEvaluator || isAvgMode || isImprovementMode) evaluateRaceRequirementsGuarded();
+        if (usesEvaluator || isAvgMode) evaluateRaceRequirementsGuarded();
+        if (isImprovementMode) evaluateImprovementGuarded();
       }
     } catch (err) { console.error("Failed to set goal:", err); }
   });
@@ -5329,7 +5375,7 @@ async function getExpRankByUsername(username) {
                    : kind === "all"      ? "max all"
                    :                       "max ranked";
       document.getElementById(`${goalId}-label`).textContent = `${cfg.label} → ${suffix}`;
-    } else if (type === "races" && goalIsImprovement(gd)) {
+    } else if (goalIsImprovement(gd)) {
       const metricLbl = (gd.improvementMetric === "pp") ? "PP" : "WPM";
       const filterStr = (gd.filter && gd.filter !== "all") ? ` (${gd.filter})` : "";
       const trackStr = (gd.improvementTrack === "average")
@@ -5519,6 +5565,7 @@ async function getExpRankByUsername(username) {
     // + explicit eval-then-render to avoid a double-render stagger.
     if (isLeader && data.races != null && data.races !== prevRaces) {
       evaluateRaceRequirementsGuarded();
+      evaluateImprovementGuarded();
     }
   }
 
@@ -5560,7 +5607,7 @@ async function getExpRankByUsername(username) {
     };
     const quickplayRaces = currentStats.quickplayRaces;
     const soloRaces      = currentStats.soloRaces;
-    const typeOrder = ['exp', 'pp', 'races', 'quotes', 'playtime', 'chars', 'rival'];
+    const typeOrder = ['exp', 'pp', 'races', 'improvement', 'quotes', 'playtime', 'chars', 'rival'];
 
     // Collect all active goal IDs for orphan removal
     const allActiveGoalIds = new Set();
@@ -5599,6 +5646,11 @@ async function getExpRankByUsername(username) {
           currentVal = soloRaces;
         } else if (type === "races") {
           currentVal = statValues[type];
+        } else if (type === "improvement") {
+          // Improvement has no cumulative stat — its progress is accumulatedGain
+          // (computed below). Give a non-null currentVal so the stat-guard
+          // doesn't skip the goal before its section is created.
+          currentVal = currentStats.races ?? 0;
         }
 
         // For max-quotes goals, the "current" value depends on which quote
@@ -5669,7 +5721,7 @@ async function getExpRankByUsername(username) {
         const isRecurring = !!(gd.recurrence && gd.recurrence !== "none");
         const hasReq = type === "races" && goalIsGated(gd);
         const isAvg  = type === "races" && goalIsAverage(gd);
-        const isImprovement = type === "races" && goalIsImprovement(gd);
+        const isImprovement = goalIsImprovement(gd);
 
         // Period reset check
         if (isRecurring) {
@@ -6025,17 +6077,19 @@ async function getExpRankByUsername(username) {
       const prevRaces = commitUserData(data);
       const racesChanged = isLeader && data.races != null && data.races !== prevRaces;
       const anyEvalGoals = (goalData.races || []).some(g => goalNeedsRaceList(g));
-      if (racesChanged && anyEvalGoals) {
+      const anyImprovement = (goalData.improvement || []).some(g => goalIsImprovement(g));
+      if (racesChanged && (anyEvalGoals || anyImprovement)) {
         // If any improvement goal is present, make sure the just-finished
         // quote's pre-race baseline seed (kicked off at quote-start) has
         // landed first — otherwise the evaluator drops this race as
         // unseeded and the gain is lost / later lumped. Bounded so a hung
         // seed fetch can't stall the finish path.
-        if ((goalData.races || []).some(g => goalIsImprovement(g))) {
+        if (anyImprovement) {
           await awaitPendingSeed();
         }
         try {
-          await evaluateRaceRequirementsGuarded({ deferRender: true });
+          if (anyEvalGoals)   await evaluateRaceRequirementsGuarded({ deferRender: true });
+          if (anyImprovement) await evaluateImprovementGuarded({ deferRender: true });
         } catch (err) {
           console.error("[Goal Tracker] eval error in quote-finish path:", err);
         }
@@ -6214,7 +6268,7 @@ async function getExpRankByUsername(username) {
   // fetch dedupe + idempotent writes make overlapping calls safe.
   const SEED_RETRY_DELAYS_MS = [0, 250, 700, 1500, 3000];
   async function seedImprovementForCurrentQuote(knownQuoteId) {
-    const goals = goalData.races;
+    const goals = goalData.improvement;
     if (!goals || !goals.some(g => goalIsImprovement(g))) return;
 
     // The quote-change watcher already has the live id, so it passes it in
@@ -6233,7 +6287,7 @@ async function getExpRankByUsername(username) {
 
     // Goals still missing a baseline for this quote. (Already-seeded quotes
     // are left untouched — only the evaluator updates them.)
-    const missing = goalData.races.filter(
+    const missing = goalData.improvement.filter(
       g => goalIsImprovement(g) && !goalHasQuoteSeed(g, quoteId)
     );
     if (missing.length === 0) return;
@@ -6253,7 +6307,7 @@ async function getExpRankByUsername(username) {
     }
 
     let changed = false;
-    const arr = goalData.races;
+    const arr = goalData.improvement;
     for (let i = 0; i < arr.length; i++) {
       const g = arr[i];
       if (!goalIsImprovement(g)) continue;
@@ -6307,11 +6361,11 @@ async function getExpRankByUsername(username) {
         changed = true;
       }
     }
-    if (changed) saveGoals("races");
+    if (changed) saveGoals("improvement");
   }
 
   function onQuoteStarted(knownQuoteId) {
-    const goals = goalData.races;
+    const goals = goalData.improvement;
     if (!goals || !goals.some(g => goalIsImprovement(g))) return;
     // Hold the promise so the quote-finish path can await this seed before
     // it evaluates the finished race (prevents the drop-then-lump bug).
@@ -6393,8 +6447,8 @@ async function getExpRankByUsername(username) {
     let lastSeenQuoteId = null;
     function check() {
       if (document.hidden) return;
-      const races = goalData.races;
-      const hasImprovement = races && races.some(g => goalIsImprovement(g));
+      const improvementGoals = goalData.improvement;
+      const hasImprovement = improvementGoals && improvementGoals.some(g => goalIsImprovement(g));
       const hasRival = (goalData.rival || []).length > 0;
       if (!hasImprovement && !hasRival) return; // cheap no-op when irrelevant
       const qid = getCurrentQuoteIdLive();
@@ -7425,12 +7479,18 @@ async function getExpRankByUsername(username) {
   // until at least one rival quote with meta is known.
   let rivalAxisCache = null;
   function rivalFilterAxis() {
-    if (rivalAxisCache && rivalAxisCache.epoch === rivalStoreEpoch) return rivalAxisCache;
+    const scope = rivalScope();
+    const requireBoth = !!rivalSettings.requireBoth;
+    const axisKey = `${rivalStoreEpoch}:${scope}:${requireBoth}`;
+    if (rivalAxisCache && rivalAxisCache.axisKey === axisKey) return rivalAxisCache;
+    const sq = loadRivalStore(RIVAL_SELF_NAME).quotes; // for the "shared quotes only" pool
     let dLo = Infinity, dHi = -Infinity, lLo = Infinity, lHi = -Infinity;
     for (const rname of referencedRivalMap().values()) {
       const q = loadRivalStore(rname).quotes;
       for (const qid in q) {
         const m = rivalMetaOf(qid);
+        if (!rivalQuoteInScope(m, scope)) continue;   // honour ranked/unranked status
+        if (requireBoth && !(qid in sq)) continue;     // honour shared-only quote pool
         const d = Number(m.d), l = Number(m.l);
         if (Number.isFinite(d)) { if (d < dLo) dLo = d; if (d > dHi) dHi = d; }
         if (Number.isFinite(l)) { if (l < lLo) lLo = l; if (l > lHi) lHi = l; }
@@ -7438,7 +7498,7 @@ async function getExpRankByUsername(username) {
     }
     const floorTo = (v, step) => Math.floor(v / step) * step;
     const axis = {
-      epoch: rivalStoreEpoch,
+      axisKey,
       diffMin: Number.isFinite(dLo) ? Math.floor(dLo) : RIVAL_DIFF_MIN,
       diffMax: Number.isFinite(dHi) ? Math.floor(dHi) : RIVAL_DIFF_MAX,
       lenMin:  Number.isFinite(lLo) ? floorTo(lLo, RIVAL_LEN_AXIS_ROUND) : RIVAL_LEN_MIN,
@@ -7455,17 +7515,22 @@ async function getExpRankByUsername(username) {
   let rivalMetricAxisCache = null;
   function rivalMetricAxis() {
     const metric = rivalMetric();
-    const key = `${rivalStoreEpoch}:${metric}`;
+    const scope = rivalScope();
+    const requireBoth = !!rivalSettings.requireBoth;
+    const key = `${rivalStoreEpoch}:${metric}:${scope}:${requireBoth}`;
     if (rivalMetricAxisCache && rivalMetricAxisCache.key === key) return rivalMetricAxisCache;
     let sLo = Infinity, sHi = -Infinity, rLo = Infinity, rHi = -Infinity;
     const selfQ = loadRivalStore(RIVAL_SELF_NAME).quotes;
     for (const qid in selfQ) {
+      if (!rivalQuoteInScope(rivalMetaOf(qid), scope)) continue;
       const v = Number(selfQ[qid][metric]);
       if (Number.isFinite(v)) { if (v < sLo) sLo = v; if (v > sHi) sHi = v; }
     }
     for (const rname of referencedRivalMap().values()) {
       const rq = loadRivalStore(rname).quotes;
       for (const qid in rq) {
+        if (!rivalQuoteInScope(rivalMetaOf(qid), scope)) continue;  // ranked/unranked
+        if (requireBoth && !(qid in selfQ)) continue;               // shared-only pool
         const v = Number(rq[qid][metric]);
         if (Number.isFinite(v)) { if (v < rLo) rLo = v; if (v > rHi) rHi = v; }
       }
@@ -7707,7 +7772,7 @@ async function getExpRankByUsername(username) {
         <div class="gt-rivals-modal-sub"></div>
         <div class="gt-rivals-filter-note" style="display:none;"></div>
         <table class="gt-rivals-table">
-          <thead><tr><th>Rival</th><th>Wins</th><th>Progress</th><th></th></tr></thead>
+          <thead><tr><th>Rival</th><th>Wins</th><th>Progress</th><th></th><th></th></tr></thead>
           <tbody class="gt-rivals-tbody"></tbody>
         </table>
         <div class="gt-rivals-empty" style="display:none;">No rivals left in this goal.</div>
@@ -7721,13 +7786,25 @@ async function getExpRankByUsername(username) {
     const emptyEl = overlay.querySelector(".gt-rivals-empty");
     const tableEl = overlay.querySelector(".gt-rivals-table");
 
-    const cleanup = () => { document.removeEventListener("keydown", onKey); overlay.remove(); };
-    const onKey = (e) => { if (e.key === "Escape") { e.preventDefault(); cleanup(); } };
+    let refreshTimer = null;
+    const cleanup = () => {
+      document.removeEventListener("keydown", onKey);
+      if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+      overlay.remove();
+    };
+    const onKey = (e) => {
+      if (e.key !== "Escape") return;
+      // An overlaid confirm (e.g. remove-rival) owns Escape while it is up
+      // — don't also close the rivals modal underneath it.
+      if (document.querySelector(".gt-confirm-overlay")) return;
+      e.preventDefault(); cleanup();
+    };
     document.addEventListener("keydown", onKey);
     overlay.addEventListener("click", e => { if (e.target === overlay) cleanup(); });
     overlay.querySelector(".gt-rivals-modal-close").addEventListener("click", cleanup);
 
-    const renderTable = () => {
+    // Header line + active-filter note. Cheap; safe to run on every refresh.
+    const renderHeaderNote = () => {
       const metric = rivalMetric();
       subEl.textContent = `Wins compared by ${metric.toUpperCase()} \u00b7 sorted A\u2013Z`;
       const labels = activeRivalFilterLabels();
@@ -7737,6 +7814,135 @@ async function getExpRankByUsername(username) {
       } else {
         noteEl.style.display = "none";
       }
+    };
+
+    // Build one rival's row (name / wins / progress / next / remove). Shared by
+    // the full render and the live sync-refresh so both stay in step.
+    const buildRivalRow = (name, canRemove) => {
+      const { total, wins, worse, rivalDone, selfDone } = tallyStandings([name]);
+      const pct  = total > 0 ? Math.floor((wins / total) * 100) : 0;
+      const done = total > 0 && wins >= total;
+
+      const tr = document.createElement("tr");
+
+      const nameTd = document.createElement("td");
+      nameTd.className = "gt-rivals-name";
+      nameTd.textContent = name;
+
+      const winsTd = document.createElement("td");
+      winsTd.className = "gt-rivals-wins";
+      winsTd.textContent = rivalDone ? `${wins} / ${total}` : `${wins} / ${total} \u00b7 syncing\u2026`;
+
+      const progTd = document.createElement("td");
+      progTd.className = "gt-rivals-progress-cell";
+      const bar = document.createElement("div");
+      bar.className = "gt-rivals-bar";
+      const fill = document.createElement("div");
+      fill.className = "gt-rivals-bar-fill" + (done ? " done" : "");
+      fill.style.width = `${pct}%`;
+      bar.appendChild(fill);
+      const pctLine = document.createElement("div");
+      pctLine.className = "gt-rivals-pct";
+      pctLine.textContent = `${pct}%`;
+      if (done) {
+        const chk = document.createElement("span");
+        chk.className = "done-check";
+        chk.textContent = "\u2713";
+        pctLine.appendChild(chk);
+      }
+      progTd.appendChild(bar);
+      progTd.appendChild(pctLine);
+
+      // Per-rival "Next vs" -- jump to the next quote where THIS rival beats you
+      // (single-rival scope, not the goal's composite). Enabled only when this
+      // rival currently leads on some in-scope quote.
+      const nextTd = document.createElement("td");
+      nextTd.className = "gt-rivals-next-cell";
+      const nextBtn = document.createElement("button");
+      nextBtn.className = "gt-rivals-next";
+      nextBtn.textContent = "\u2694"; // crossed swords
+      const canNext = worse.length > 0;
+      nextBtn.disabled = !canNext;
+      if (canNext) {
+        nextBtn.title = `Next quote where ${name} beats you`;
+      } else if (!rivalDone || !selfDone) {
+        nextBtn.title = "Finding quotes\u2026";
+      } else if (total === 0) {
+        nextBtn.title = "No quotes match the current filters";
+      } else {
+        nextBtn.title = `You lead ${name} \ud83c\udf89`;
+      }
+      nextBtn.addEventListener("click", () => {
+        if (!nextBtn.disabled) onRivalRowNextClicked(goalId, name);
+      });
+      nextTd.appendChild(nextBtn);
+
+      const removeTd = document.createElement("td");
+      removeTd.className = "gt-rivals-remove-cell";
+      const x = document.createElement("button");
+      x.className = "gt-rivals-remove";
+      x.textContent = "\u2715";
+      x.disabled = !canRemove;
+      x.title = canRemove
+        ? `Remove ${name}`
+        : "A multiple-rivals goal needs at least one rival \u2014 delete the goal from its card instead.";
+      x.addEventListener("click", async () => {
+        if (x.disabled) return;
+        // Confirm first (mirrors goal deletion) instead of removing instantly.
+        const ok = await showConfirmModal({
+          title: "Remove rival?",
+          message: `Remove ${name} from this goal?`,
+          warning: "Their head-to-head results stop counting toward this goal. You can add them back later.",
+          confirmLabel: "Remove",
+          danger: true,
+        });
+        if (!ok) return;
+        // Re-check at confirm time: never strip the goal's last rival (a second
+        // open confirm could otherwise empty it), and no-op if already gone.
+        if (goalRivalNames(gd).length <= 1) return;
+        if (!goalRivalNames(gd).some(n => n.toLowerCase() === name.toLowerCase())) return;
+        gd.rivals = gd.rivals.filter(n => n.toLowerCase() !== name.toLowerCase());
+        saveGoals("rival");
+        renderAllGoals();
+        if (isLeader) ensureRivalSync(); // GC the dropped rival's store if now unreferenced
+        renderTable();
+      });
+      removeTd.appendChild(x);
+
+      tr.appendChild(nameTd);
+      tr.appendChild(winsTd);
+      tr.appendChild(progTd);
+      tr.appendChild(nextTd);
+      tr.appendChild(removeTd);
+      return tr;
+    };
+
+    // Live refresh of just the rival rows (Task 2): re-runs while the modal is
+    // open so wins / % / progress / syncing->final track stores arriving,
+    // WITHOUT rebuilding the add-rival row -- so a half-typed username + its
+    // focus survive a background sync. Replaces only the data rows, in place.
+    const syncRivalRows = () => {
+      renderHeaderNote();
+      const names = goalRivalNames(gd).slice().sort((a, b) =>
+        a.toLowerCase().localeCompare(b.toLowerCase()));
+      if (names.length === 0) { tableEl.style.display = "none"; emptyEl.style.display = ""; return; }
+      tableEl.style.display = ""; emptyEl.style.display = "none";
+      const canRemove = names.length > 1;
+      // Drop existing rival rows but keep the add + status rows untouched.
+      Array.from(tbody.children).forEach(tr => {
+        if (!tr.classList.contains("gt-rivals-add-row")
+          && !tr.classList.contains("gt-rivals-add-status-row")) tr.remove();
+      });
+      const addRow = tbody.querySelector(".gt-rivals-add-row");
+      for (const name of names) {
+        const row = buildRivalRow(name, canRemove);
+        if (addRow) tbody.insertBefore(row, addRow);
+        else tbody.appendChild(row);
+      }
+    };
+
+    const renderTable = () => {
+      renderHeaderNote();
       const names = goalRivalNames(gd).slice().sort((a, b) =>
         a.toLowerCase().localeCompare(b.toLowerCase()));
       tbody.innerHTML = "";
@@ -7744,64 +7950,7 @@ async function getExpRankByUsername(username) {
       tableEl.style.display = ""; emptyEl.style.display = "none";
       const canRemove = names.length > 1;
       for (const name of names) {
-        const { total, wins, rivalDone } = tallyStandings([name]);
-        const pct  = total > 0 ? Math.floor((wins / total) * 100) : 0;
-        const done = total > 0 && wins >= total;
-
-        const tr = document.createElement("tr");
-
-        const nameTd = document.createElement("td");
-        nameTd.className = "gt-rivals-name";
-        nameTd.textContent = name;
-
-        const winsTd = document.createElement("td");
-        winsTd.className = "gt-rivals-wins";
-        winsTd.textContent = rivalDone ? `${wins} / ${total}` : `${wins} / ${total} \u00b7 syncing\u2026`;
-
-        const progTd = document.createElement("td");
-        progTd.className = "gt-rivals-progress-cell";
-        const bar = document.createElement("div");
-        bar.className = "gt-rivals-bar";
-        const fill = document.createElement("div");
-        fill.className = "gt-rivals-bar-fill" + (done ? " done" : "");
-        fill.style.width = `${pct}%`;
-        bar.appendChild(fill);
-        const pctLine = document.createElement("div");
-        pctLine.className = "gt-rivals-pct";
-        pctLine.textContent = `${pct}%`;
-        if (done) {
-          const chk = document.createElement("span");
-          chk.className = "done-check";
-          chk.textContent = "\u2713";
-          pctLine.appendChild(chk);
-        }
-        progTd.appendChild(bar);
-        progTd.appendChild(pctLine);
-
-        const removeTd = document.createElement("td");
-        removeTd.className = "gt-rivals-remove-cell";
-        const x = document.createElement("button");
-        x.className = "gt-rivals-remove";
-        x.textContent = "\u2715";
-        x.disabled = !canRemove;
-        x.title = canRemove
-          ? `Remove ${name}`
-          : "A multiple-rivals goal needs at least one rival \u2014 delete the goal from its card instead.";
-        x.addEventListener("click", () => {
-          if (!canRemove) return;
-          gd.rivals = gd.rivals.filter(n => n.toLowerCase() !== name.toLowerCase());
-          saveGoals("rival");
-          renderAllGoals();
-          if (isLeader) ensureRivalSync(); // GC the dropped rival's store if now unreferenced
-          renderTable();
-        });
-        removeTd.appendChild(x);
-
-        tr.appendChild(nameTd);
-        tr.appendChild(winsTd);
-        tr.appendChild(progTd);
-        tr.appendChild(removeTd);
-        tbody.appendChild(tr);
+        tbody.appendChild(buildRivalRow(name, canRemove));
       }
 
       // ── Add-rival row ────────────────────────────────────────
@@ -7824,7 +7973,7 @@ async function getExpRankByUsername(username) {
       addInputTd.appendChild(addInput);
       const addBtnTd = document.createElement("td");
       addBtnTd.className = "gt-rivals-add-btn-cell";
-      addBtnTd.colSpan = 3;
+      addBtnTd.colSpan = 4;
       const addBtn = document.createElement("button");
       addBtn.type = "button";
       addBtn.className = "gt-rivals-add-btn";
@@ -7837,7 +7986,7 @@ async function getExpRankByUsername(username) {
       const statusTr = document.createElement("tr");
       statusTr.className = "gt-rivals-add-status-row";
       const statusTd = document.createElement("td");
-      statusTd.colSpan = 4;
+      statusTd.colSpan = 5;
       statusTd.className = "gt-rivals-add-status";
       statusTd.style.display = "none";
       statusTr.appendChild(statusTd);
@@ -7892,6 +8041,16 @@ async function getExpRankByUsername(username) {
     };
 
     renderTable();
+    // Keep the rows live while the modal is open: the rival-store epoch bumps on
+    // local sync progress AND incoming cross-tab broadcasts, so poll it and
+    // re-sync the rows (only) whenever it changes. Torn down in cleanup().
+    let lastEpoch = rivalStoreEpoch;
+    refreshTimer = setInterval(() => {
+      if (rivalStoreEpoch !== lastEpoch) {
+        lastEpoch = rivalStoreEpoch;
+        syncRivalRows();
+      }
+    }, 500);
   }
 
   function renderRivalSections() {
@@ -8147,6 +8306,95 @@ async function getExpRankByUsername(username) {
     // "/vs/<rival>" page instead of the quote on its own.
     const url = (rivalSettings.nextUsesVsLink && gd.rival)
       ? `${base}/vs/${encodeURIComponent(gd.rival)}`
+      : base;
+    window.location.href = url;
+  }
+
+  // The single-rival analogue of rivalWorseSortedByGap: given an explicit names
+  // list (here always one rival) and its already-computed "worse" set, order the
+  // pool by gap on the goal's metric. Kept separate from the card path so the
+  // composite cursor logic stays untouched.
+  function rivalRowWorseSortedByGap(names, worse, sort) {
+    const metric = rivalMetric();
+    const composite = buildRivalComposite(names, metric);
+    const sq = loadRivalStore(RIVAL_SELF_NAME).quotes;
+    const withGap = worse.map(qid => {
+      const rv = composite[qid] ? composite[qid].v : 0;
+      const sv = sq[qid] ? sq[qid][metric] : 0;
+      return { qid, gap: rv - sv };
+    });
+    withGap.sort((a, b) => sort === "biggest" ? b.gap - a.gap : a.gap - b.gap);
+    return withGap.map(x => x.qid);
+  }
+
+  // Per-(goal, rival) Next-vs cursors. Own localStorage key: the composite keys
+  // here aren't goal ids, so saveRivalNextCursors would GC them. Same served-map
+  // semantics as the card cursor; keyed by goalId + NUL + lower(name).
+  const RIVAL_ROW_NEXT_CURSOR_KEY = "gt-rival-row-next-cursor";
+  function rivalRowCursorKey(goalId, name) { return goalId + "\u0000" + String(name).toLowerCase(); }
+  function loadRivalRowNextCursors() {
+    try { const o = JSON.parse(localStorage.getItem(RIVAL_ROW_NEXT_CURSOR_KEY) || "{}"); return (o && typeof o === "object") ? o : {}; }
+    catch { return {}; }
+  }
+  function saveRivalRowNextCursors(map) {
+    // Drop cursors whose owning goal no longer exists so the key can't grow forever.
+    const live = new Set((goalData.rival || []).map(g => g.id));
+    for (const k of Object.keys(map)) {
+      const gid = k.split("\u0000")[0];
+      if (!live.has(gid)) delete map[k];
+    }
+    try { localStorage.setItem(RIVAL_ROW_NEXT_CURSOR_KEY, JSON.stringify(map)); } catch {}
+  }
+
+  // Per-rival "Next vs" (manage-rivals modal row). Mirrors onRivalNextClicked but
+  // scoped to ONE rival: navigates to the next quote where that rival beats you.
+  // Honors the global nextSort + nextUsesVsLink settings; sorted modes walk a
+  // per-(goal, rival) cursor (a full page nav wipes in-memory state).
+  function onRivalRowNextClicked(goalId, name) {
+    const gd = (goalData.rival || []).find(g => g.id === goalId);
+    if (!gd) return;
+    const liveQid = getCurrentQuoteIdLive();
+    const sort = rivalNextSort();
+    const { worse } = tallyStandings([name]);
+    if (worse.length === 0) return;
+
+    let pick;
+    if (sort === "random") {
+      let pool = worse;
+      if (liveQid && worse.length > 1) pool = worse.filter(q => q !== liveQid);
+      pick = pool[Math.floor(Math.random() * pool.length)];
+    } else {
+      const sorted = rivalRowWorseSortedByGap([name], worse, sort);
+      if (sorted.length === 0) return;
+      const metric = rivalMetric();
+      const sq = loadRivalStore(RIVAL_SELF_NAME).quotes;
+      const selfVal = (qid) => (sq[qid] ? sq[qid][metric] : 0);
+      const cursors = loadRivalRowNextCursors();
+      const ckey = rivalRowCursorKey(goalId, name);
+      const cur = cursors[ckey];
+      // Fresh cycle on first use, on a sort switch, or for any legacy shape.
+      let served = (cur && cur.sort === sort && cur.served
+        && typeof cur.served === "object" && !Array.isArray(cur.served))
+        ? cur.served : {};
+      const isParked = (q) => Object.prototype.hasOwnProperty.call(served, q);
+      // Re-eligibility: a served quote you've since IMPROVED re-enters the cycle.
+      for (const qid of Object.keys(served)) {
+        if (selfVal(qid) > served[qid] + RIVAL_PP_EPS) delete served[qid];
+      }
+      pick = sorted.find(q => q !== liveQid && !isParked(q));
+      if (!pick) {                         // whole cycle served -> wrap, start fresh
+        served = {};
+        pick = sorted.find(q => q !== liveQid);
+      }
+      if (!pick) return;                   // only the current quote is a target
+      served[pick] = selfVal(pick);        // record serve-time self value
+      cursors[ckey] = { sort, served };
+      saveRivalRowNextCursors(cursors);
+    }
+
+    const base = `https://typegg.io/solo/${encodeURIComponent(pick)}`;
+    const url = rivalSettings.nextUsesVsLink
+      ? `${base}/vs/${encodeURIComponent(name)}`
       : base;
     window.location.href = url;
   }
@@ -8976,6 +9224,107 @@ async function getExpRankByUsername(username) {
   // Wrap with inFlight so concurrent triggers (rapid quote-finishes) coalesce
   const evaluateRaceRequirementsGuarded = inFlight(evaluateRaceRequirements);
 
+  // ── Improvement-goal evaluator (its own type) ─────────────
+  // Decoupled from evaluateRaceRequirements: scoped to goalData.improvement and
+  // contains only the per-quote gain logic (best + average tracks) that used to
+  // live inline in the races evaluator. Same S1 semantics — a race counts only
+  // against a baseline seeded BEFORE it (at quote-start). Leader-only; reads the
+  // shared recent-races cache. Both tracks are monotonic (never negative).
+  async function evaluateImprovementGoals({ deferRender = false } = {}) {
+    if (!isLeader) return;
+    const goals = goalData.improvement;
+    if (!goals || goals.length === 0) return;
+    if (currentStats.races == null) return;
+    const racesSnapshot = currentStats.races;
+
+    const targets = goals
+      .map((g, i) => ({ g, i }))
+      .filter(({ g }) => goalIsImprovement(g) && racesSnapshot > (g.lastEvalRaces ?? 0));
+    if (targets.length === 0) return;
+
+    let recentRaces;
+    try { recentRaces = await getRecentRacesData(); }
+    catch (err) { console.error("Improvement eval fetch failed:", err); return; }
+    if (!Array.isArray(recentRaces) || recentRaces.length === 0) return;
+
+    let changed = false;
+    for (const { i } of targets) {
+      const gd = goals[i];
+      if (!gd || !goalIsImprovement(gd)) continue;
+      const lastEval = gd.lastEvalRaces ?? 0;
+      const delta = racesSnapshot - lastEval;
+      if (delta <= 0) continue;
+
+      // New races are the most recent `delta`; reverse to chronological order.
+      const window = recentRaces.slice(0, Math.min(delta, recentRaces.length));
+      const chronological = window.slice().reverse();
+
+      const metric = gd.improvementMetric || "wpm";   // "wpm" | "pp"
+      let accumulatedGain = gd.accumulatedGain ?? 0;
+      let impChanged = false;
+
+      if (gd.improvementTrack === "average") {
+        const W = Math.max(2, gd.improvementAvgWindow || 5);
+        const quoteAvgs = { ...(gd.quoteAvgs || {}) };
+        for (const race of chronological) {
+          if (!raceMatchesFilter(race, gd.filter)) continue;
+          const val = Number(race[metric]);
+          if (!isFinite(val)) continue;
+          const qid = race.quoteId;
+          if (!qid) continue;
+          const st = quoteAvgs[qid];
+          if (!st) continue;                  // not seeded -> unmeasurable (S1)
+          const w = Array.isArray(st.window) ? st.window.slice() : [];
+          w.push(val);
+          while (w.length > W) w.shift();
+          const avg = w.reduce((a, b) => a + b, 0) / w.length;
+          let baseline = (st.baseline == null) ? null : st.baseline;
+          let peak = st.peak ?? 0;
+          if (baseline == null) {
+            if (w.length >= W) { baseline = avg; peak = 0; }
+          } else {
+            const lift = avg - baseline;
+            if (lift > peak) { accumulatedGain += (lift - peak); peak = lift; }
+          }
+          quoteAvgs[qid] = { window: w, baseline, peak };
+          impChanged = true;
+        }
+        if (impChanged || lastEval !== racesSnapshot) {
+          goals[i] = { ...gd, quoteAvgs, accumulatedGain, lastEvalRaces: racesSnapshot };
+          changed = true;
+        }
+        continue;
+      }
+
+      // Best track (default)
+      const quoteBests = { ...(gd.quoteBests || {}) };
+      for (const race of chronological) {
+        if (!raceMatchesFilter(race, gd.filter)) continue;
+        const val = Number(race[metric]);
+        if (!isFinite(val)) continue;
+        const qid = race.quoteId;
+        if (!qid) continue;
+        if (!(qid in quoteBests)) continue; // no pre-race baseline -> unmeasurable
+        const prev = quoteBests[qid];
+        if (val > prev) {
+          accumulatedGain += (val - prev);
+          quoteBests[qid]  = val;            // ratchet the stored best up
+          impChanged = true;
+        }
+      }
+      if (impChanged || lastEval !== racesSnapshot) {
+        goals[i] = { ...gd, quoteBests, accumulatedGain, lastEvalRaces: racesSnapshot };
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      saveGoals("improvement");
+      if (!deferRender) renderAllGoals();
+    }
+  }
+  const evaluateImprovementGuarded = inFlight(evaluateImprovementGoals);
+
   // ── Max quotes goal target computation ────────────────────────
   async function updateMaxQuotesGoals() {
     try {
@@ -9041,6 +9390,7 @@ async function getExpRankByUsername(username) {
     setTimeout(() => runIfAnyTabVisible(inFlight(updatePlayerGoals))(),    9_000);
     setTimeout(() => runIfAnyTabVisible(inFlight(updateMaxQuotesGoals))(), 12_000);
     setTimeout(() => runIfAnyTabVisible(evaluateRaceRequirementsGuarded)(), 15_000);
+    setTimeout(() => runIfAnyTabVisible(evaluateImprovementGuarded)(), 16_000);
     // EXP-rank tracking paginates the /leaders board; it used to fire
     // synchronously at leader start, landing right on top of the other
     // kickoffs. Stagger it too. (Internally gated on having EXP rank goals.)
@@ -9062,6 +9412,7 @@ async function getExpRankByUsername(username) {
     // and the 20s stats poll). This interval just catches edge cases where
     // a quote-finish was missed and stats were already in sync on next render.
     setInterval(runIfAnyTabVisible(evaluateRaceRequirementsGuarded), POLL_SLOW_MS);
+    setInterval(runIfAnyTabVisible(evaluateImprovementGuarded), POLL_SLOW_MS);
   }
 
   // ── Channel listener (followers receive stats from leader) ──
@@ -9146,6 +9497,7 @@ async function getExpRankByUsername(username) {
           if (t === 'exp')    inFlight(updateExpRankGoals)();
           if (t === 'quotes') inFlight(updateMaxQuotesGoals)();
           if (t === 'races')  evaluateRaceRequirementsGuarded();
+          if (t === 'improvement') evaluateImprovementGuarded();
           if (t === 'pp' || t === 'exp') inFlight(updatePlayerGoals)();
           if (t === 'rival')  ensureRivalSync();
         }
@@ -9211,6 +9563,7 @@ async function getExpRankByUsername(username) {
           if (type === 'exp')    inFlight(updateExpRankGoals)();
           if (type === 'quotes') inFlight(updateMaxQuotesGoals)();
           if (type === 'races')  evaluateRaceRequirementsGuarded();
+          if (type === 'improvement') evaluateImprovementGuarded();
           if (type === 'pp' || type === 'exp') inFlight(updatePlayerGoals)();
           if (type === 'rival')  ensureRivalSync();
         }
