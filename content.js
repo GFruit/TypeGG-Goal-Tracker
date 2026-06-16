@@ -426,6 +426,49 @@ function gtMain() {
       return section;
     }
 
+    // ── Improvement-Target card ─────────────────────────────────
+    // Same shape as the rival card (no progress bar): a value row showing
+    // "<your current-quote value> / <target>" (your number greens once you hit
+    // the target), a count sub-line ("quotes ≥ N METRIC: X / Y"), and the
+    // full-width "Next quote" button.
+    const tGoal = (goalData[type] || []).find(g => g.id === goalId);
+    if (type === "improvement" && tGoal && goalIsImprovementTarget(tGoal)) {
+      section.innerHTML = `
+        <div class="gt-gain-header">
+          <div class="gt-goal-label-group">
+            <span id="${goalId}-label">Target</span>
+          </div>
+          <div class="gt-goal-actions">
+            <button id="${goalId}-remove-btn" class="gt-remove-btn" title="Remove goal">\u2715</button>
+          </div>
+        </div>
+        <div id="${goalId}-target-pool" class="gt-req-line" style="display:none;"></div>
+        <div id="${goalId}-target-band" class="gt-req-line gt-req-line-quote" style="display:none;"></div>
+        <div class="gt-rival-value-row">
+          <span id="${goalId}-target-value-wrap" class="gt-rival-value-wrap">
+            <span id="${goalId}-target-you" class="gt-rival-you"></span><span id="${goalId}-target-them" class="gt-rival-them"></span>
+          </span>
+          <span id="${goalId}-target-msg" class="gt-rival-msg" style="display:none;"></span>
+        </div>
+        <div id="${goalId}-target-count" class="gt-rival-wins">quotes \u2026</div>
+        <button id="${goalId}-target-next" class="gt-rival-next-btn" disabled>\u23ed Next quote</button>
+      `;
+      (parentContent || container.querySelector(".gt-content")).appendChild(section);
+
+      document.getElementById(`${goalId}-remove-btn`).addEventListener("click", async () => {
+        const gd = (goalData.improvement || []).find(g => g.id === goalId);
+        const metricLbl = gd && gd.metric === "pp" ? "PP" : "WPM";
+        const labelText = gd ? `Target \u00b7 ${metricLbl} \u2265 ${gd.target}` : "Target goal";
+        if (await confirmDeleteGoal(labelText)) removeGoal("improvement", goalId);
+      });
+      document.getElementById(`${goalId}-target-next`).addEventListener("click", () => {
+        onTargetNextClicked(goalId);
+      });
+
+      wireGoalDrag(section, goalId);
+      return section;
+    }
+
     section.innerHTML = `
       <div class="gt-gain-header">
         <div class="gt-goal-label-group">
@@ -1238,6 +1281,16 @@ function gtMain() {
           <button id="gt-avg-unique-btn" class="gt-req-strict-btn gt-avg-unique-btn" type="button" title="Unique-quote mode — each race in the rolling window must be on a different quote">✨</button>
         </div>
       </div>
+      <!-- Improvement sub-mode (Gain | Target). Bespoke toggle shown only for
+           the improvement type; independent of the cumulative Mode row (which
+           stays hidden via supportsTarget:false). -->
+      <div id="gt-improvement-mode-row" style="display:none;">
+        <div class="gt-section-label">Mode</div>
+        <div class="gt-mode-selector gt-improvement-mode-group">
+          <button class="gt-mode-btn active" data-imp-mode="gain"   type="button">Gain</button>
+          <button class="gt-mode-btn"        data-imp-mode="target" type="button">Target</button>
+        </div>
+      </div>
       <!-- Improvement-mode controls (races + improvement only). A small
            WPM/PP metric selector chooses which stat's per-quote gain is
            accumulated, plus a right-aligned toggle (∞). Off by default:
@@ -1277,6 +1330,52 @@ function gtMain() {
           <input id="gt-improvement-avgwindow-input" class="gt-improvement-avgwindow-input" type="number" min="2" placeholder="e.g. 5" />
         </div>
       </div>
+      <!-- Improvement-Target controls (improvement type, Target sub-mode).
+           Status + played filter the catalog set; the difficulty/length dual
+           sliders narrow it further; Next pick orders the "Next quote" button.
+           Solo/quickplay, track/window and recurrence are gain-only — hidden
+           here. -->
+      <div id="gt-target-status-row" style="display:none;">
+        <div class="gt-section-label">Status</div>
+        <div class="gt-mode-selector gt-target-status-group">
+          <button class="gt-mode-btn active" data-target-status="all"      type="button">All</button>
+          <button class="gt-mode-btn"        data-target-status="ranked"   type="button">Ranked</button>
+          <button class="gt-mode-btn"        data-target-status="unranked" type="button">Unranked</button>
+        </div>
+      </div>
+      <div id="gt-target-played-row" style="display:none;">
+        <div class="gt-section-label">Quotes</div>
+        <div class="gt-mode-selector gt-target-played-group">
+          <button class="gt-mode-btn active" data-target-played="all"    type="button">All</button>
+          <button class="gt-mode-btn"        data-target-played="played" type="button">Played only</button>
+        </div>
+      </div>
+      <div id="gt-target-diff-row" style="display:none;">
+        <div class="gt-section-label">Difficulty filter<span class="gt-range-readout" id="gt-target-diff-readout"></span><span class="gt-mode-hint" id="gt-target-sync-hint" style="display:none;"></span></div>
+        <div class="gt-range-row" id="gt-target-diff-ticks">
+          <span class="gt-range-end gt-range-end-lo"></span>
+          <div class="gt-range" id="gt-target-diff-range">
+            <div class="gt-range-track"><div class="gt-range-fill"></div></div>
+            <input class="gt-range-input gt-range-lo" type="range" aria-label="Minimum difficulty" />
+            <input class="gt-range-input gt-range-hi" type="range" aria-label="Maximum difficulty" />
+          </div>
+          <span class="gt-range-end gt-range-end-hi"></span>
+        </div>
+      </div>
+      <div id="gt-target-len-row" style="display:none;">
+        <div class="gt-section-label">Quote length filter<span class="gt-range-readout" id="gt-target-len-readout"></span></div>
+        <div class="gt-range-row" id="gt-target-len-ticks">
+          <span class="gt-range-end gt-range-end-lo"></span>
+          <div class="gt-range" id="gt-target-len-range">
+            <div class="gt-range-track"><div class="gt-range-fill"></div></div>
+            <input class="gt-range-input gt-range-lo" type="range" aria-label="Minimum length" />
+            <input class="gt-range-input gt-range-hi" type="range" aria-label="Maximum length" />
+          </div>
+          <span class="gt-range-end gt-range-end-hi"></span>
+        </div>
+      </div>
+      <!-- The "Next quote" ordering (random / closest / biggest gap) is a global
+           preference now — see Settings → Improve — so it's not duplicated here. -->
       <!-- Rival-mode controls (type=rival only). The rival username is entered
            in the standard Amount-row input (reused as a text field, like Player
            mode). Metric (WPM/PP) and quote scope (all/ranked/unranked) are
@@ -1714,6 +1813,50 @@ function gtMain() {
     renderAllGoals();
   }
 
+  // ── Improve tab ───────────────────────────────────────────────
+  // Settings that apply globally to every improvement-Target goal. Currently:
+  // the order the "→ Next quote" button steps through the not-yet-hit pool.
+  const IMPROVE_NEXT_SORT_OPTIONS = [
+    { value: "random",  label: "Random",      hint: "Jumps to a random quote you haven't hit the target on yet." },
+    { value: "closest", label: "Closest",     hint: "Picks the quote you're closest to hitting — smallest gap first." },
+    { value: "biggest", label: "Biggest gap", hint: "Picks the quote you're furthest from hitting — largest gap first." },
+  ];
+
+  function renderImproveTab(contentEl, draft) {
+    const cur = IMPROVE_NEXT_SORT_VALUES.includes(draft.improveSettings.nextSort)
+      ? draft.improveSettings.nextSort : "random";
+    contentEl.innerHTML = `
+      <div class="gt-section-label">\u201c\u2192 Next quote\u201d button picks</div>
+      <div class="gt-mode-selector" id="gt-improve-nextsort-selector">
+        ${IMPROVE_NEXT_SORT_OPTIONS.map(o =>
+          `<button class="gt-mode-btn${o.value === cur ? " active" : ""}" data-improve-nextsort="${o.value}">${o.label}</button>`
+        ).join("")}
+      </div>
+      <div class="gt-mode-hint" id="gt-improve-nextsort-hint" style="display:block;">${
+        IMPROVE_NEXT_SORT_OPTIONS.find(o => o.value === cur)?.hint ?? ""
+      }</div>
+    `;
+    const hintEl = contentEl.querySelector("#gt-improve-nextsort-hint");
+    contentEl.querySelectorAll("[data-improve-nextsort]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const val = btn.dataset.improveNextsort;
+        draft.improveSettings.nextSort = val;
+        contentEl.querySelectorAll("[data-improve-nextsort]").forEach(b => b.classList.toggle("active", b === btn));
+        if (hintEl) hintEl.textContent = IMPROVE_NEXT_SORT_OPTIONS.find(o => o.value === val)?.hint ?? "";
+        applySettingsDraft();
+      });
+    });
+  }
+
+  function commitImproveTab(draft) {
+    if (draft.improveSettings.nextSort === improveSettings.nextSort) return; // no change
+    improveSettings = { ...draft.improveSettings };
+    saveImproveSettings();
+    // nextSort is read live at click time (onTargetNextClicked), so no
+    // re-render is needed. The served cursor self-heals on the next click:
+    // a sort mismatch starts a fresh map (same as the rival Next-vs sort).
+  }
+
   // ── Rival tab ─────────────────────────────────────────────────
   // Settings that apply globally to every rival goal: which quotes are tracked
   // (all / ranked / unranked) and where the "⚔ Next vs …" button navigates.
@@ -2116,6 +2259,7 @@ function gtMain() {
       recSettings:     JSON.parse(JSON.stringify(recSettings)),
       displaySettings: { ...displaySettings },
       rivalSettings:   { ...rivalSettings },
+      improveSettings: { ...improveSettings },
     };
   }
 
@@ -2159,6 +2303,7 @@ function gtMain() {
     if (payload.recSettings)     localStorage.setItem(REC_SETTINGS_KEY,     JSON.stringify(payload.recSettings));
     if (payload.displaySettings) localStorage.setItem(DISPLAY_SETTINGS_KEY, JSON.stringify(payload.displaySettings));
     if (payload.rivalSettings)   localStorage.setItem(RIVAL_SETTINGS_KEY,   JSON.stringify(payload.rivalSettings));
+    if (payload.improveSettings) localStorage.setItem(IMPROVE_SETTINGS_KEY, JSON.stringify(payload.improveSettings));
 
     // Reload in-memory state from storage
     for (const [type, cfg] of Object.entries(GOAL_CONFIG)) {
@@ -2171,6 +2316,7 @@ function gtMain() {
     recSettings     = loadRecSettings();
     displaySettings = loadDisplaySettings();
     rivalSettings   = loadRivalSettings();
+    improveSettings = loadImproveSettings();
 
     // Clear ephemeral state. prevGainMap would otherwise trigger
     // fake "+N gained!" pop-ups on the next render if any of the
@@ -2351,6 +2497,7 @@ function gtMain() {
     { id: "recurrence", label: "Recurrence", render: renderRecurrenceTab, commit: commitRecurrenceTab },
     { id: "display",    label: "Display",    render: renderDisplayTab,    commit: commitDisplayTab    },
     { id: "rival",      label: "Rival",      render: renderRivalTab,      commit: commitRivalTab      },
+    { id: "improve",    label: "Improve",    render: renderImproveTab,    commit: commitImproveTab    },
     { id: "backup",     label: "Backup",     render: renderBackupTab,     commit: commitBackupTab     },
   ];
 
@@ -2429,6 +2576,7 @@ function gtMain() {
       recSettings:     JSON.parse(JSON.stringify(recSettings)),
       displaySettings: { ...displaySettings },
       rivalSettings:   { ...rivalSettings },
+      improveSettings: { ...improveSettings },
       // future tabs seed their own draft slice here
     };
     if (!activeSettingsTabId || !SETTINGS_TABS.some(t => t.id === activeSettingsTabId)) activeSettingsTabId = SETTINGS_TABS[0].id;
@@ -2572,6 +2720,39 @@ function gtMain() {
   function saveDisplaySettings() {
     localStorage.setItem(DISPLAY_SETTINGS_KEY, JSON.stringify(displaySettings));
     channel?.postMessage({ type: "display-settings-changed" });
+  }
+
+  // ── Improve settings (global, apply to all improvement-Target goals) ──
+  // nextSort: order the Target card's "→ Next quote" button steps through the
+  // not-yet-hit pool — "random", "closest" (smallest gap first), or "biggest"
+  // (largest gap first). Global so it can be changed for all Target goals after
+  // creation (mirrors the rival Next-vs sort living in Rival settings).
+  const IMPROVE_SETTINGS_KEY = "gt-improve-settings";
+  const DEFAULT_IMPROVE_SETTINGS = { nextSort: "random" };
+  const IMPROVE_NEXT_SORT_VALUES = ["random", "closest", "biggest"];
+
+  function loadImproveSettings() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(IMPROVE_SETTINGS_KEY) || "null");
+      if (!saved || typeof saved !== "object") return { ...DEFAULT_IMPROVE_SETTINGS };
+      return {
+        nextSort: IMPROVE_NEXT_SORT_VALUES.includes(saved.nextSort) ? saved.nextSort : DEFAULT_IMPROVE_SETTINGS.nextSort,
+      };
+    } catch {
+      return { ...DEFAULT_IMPROVE_SETTINGS };
+    }
+  }
+
+  let improveSettings = loadImproveSettings();
+
+  function saveImproveSettings() {
+    localStorage.setItem(IMPROVE_SETTINGS_KEY, JSON.stringify(improveSettings));
+    channel?.postMessage({ type: "improve-settings-changed" });
+  }
+
+  // Live read of the global Target Next-quote ordering.
+  function improveNextSort() {
+    return IMPROVE_NEXT_SORT_VALUES.includes(improveSettings.nextSort) ? improveSettings.nextSort : "random";
   }
 
   // ── Rival settings (global, apply to all rival goals) ─────────
@@ -3156,6 +3337,17 @@ async function getExpRankByUsername(username) {
   const improvementWindowRow    = document.getElementById("gt-improvement-window-row");
   const improvementAvgWindowInput = document.getElementById("gt-improvement-avgwindow-input");
 
+  // Improvement-Target controls (improvement type, Target sub-mode).
+  const improvementModeRow  = document.getElementById("gt-improvement-mode-row");
+  const improvementModeBtns = document.querySelectorAll(".gt-improvement-mode-group .gt-mode-btn");
+  const targetStatusRow     = document.getElementById("gt-target-status-row");
+  const targetStatusBtns    = document.querySelectorAll(".gt-target-status-group .gt-mode-btn");
+  const targetPlayedRow     = document.getElementById("gt-target-played-row");
+  const targetPlayedBtns    = document.querySelectorAll(".gt-target-played-group .gt-mode-btn");
+  const targetDiffRow       = document.getElementById("gt-target-diff-row");
+  const targetLenRow        = document.getElementById("gt-target-len-row");
+  const targetSyncHintEl    = document.getElementById("gt-target-sync-hint");
+
   // Presets for the rolling-window size. Common values for typing-test
   // analytics — small enough that brand-new accounts can hit them, large
   // enough that the avg actually means something. Custom input handles
@@ -3168,6 +3360,15 @@ async function getExpRankByUsername(username) {
   const IMPROVEMENT_PRESETS = {
     wpm: [50, 100, 250, 500, 1000],
     pp:  [500, 1000, 2500, 5000, 10000],
+  };
+
+  // Improvement-Target threshold presets, per metric. The target is a flat
+  // per-quote value (not cumulative), so WPM is typical-speed magnitudes and PP
+  // is per-race PP magnitudes. The custom input handles anything outside these.
+  // (PP-per-race magnitudes are a guess — tune against live values.)
+  const TARGET_PRESETS = {
+    wpm: [60, 80, 100, 120, 150],
+    pp:  [50, 100, 150, 200, 300],
   };
 
   let selectedType  = "exp";
@@ -3205,6 +3406,15 @@ async function getExpRankByUsername(username) {
   // the warm-up length, and the baseline sample size.
   let selectedImprovementTrack     = "best";     // "best" | "average"
   let selectedImprovementAvgWindow = 5;          // rolling window / warm-up
+
+  // Improvement sub-mode (bespoke Gain/Target toggle) + Target-goal draft.
+  // selectedImprovementMode is "gain" (the existing accumulator) or "target"
+  // (the catalog threshold goal). Target handles are null = full range.
+  let selectedImprovementMode = "gain";
+  let selectedTargetStatus    = "all";          // "all" | "ranked" | "unranked"
+  let selectedTargetPlayed    = "all";          // "all" | "played"
+  let selectedTargetDiffMin = null, selectedTargetDiffMax = null;
+  let selectedTargetLenMin  = null, selectedTargetLenMax  = null;
 
   // rank mode state
   let rankFetchedPp     = null; // PP fetched for the entered rank
@@ -3364,6 +3574,20 @@ async function getExpRankByUsername(username) {
   // gain/avg goals (drives streak +1 and resets at period rollover).
   function goalIsImprovement(g) {
     return !!g && g.mode === "improvement";
+  }
+
+  // Drop 2: the improvement type's second sub-mode. A goal living in
+  // goalData.improvement with mode === "target" is a TARGET goal ("hit a flat
+  // metric threshold on every quote in a filtered catalog set"). Kept distinct
+  // from goalIsImprovement (the "Gain" behaviour, mode === "improvement") so the
+  // existing gain evaluator/seeds ignore target goals and vice-versa.
+  function goalIsImprovementTarget(g) {
+    return !!g && g.mode === "target";
+  }
+  // Whether any improvement-Target goal exists. Gates ALL catalog work: we never
+  // fetch the ~14k-quote catalog (nor mark self "wanted" for it) unless one does.
+  function haveImprovementTargetGoals() {
+    return (goalData.improvement || []).some(goalIsImprovementTarget);
   }
 
   // Does this goal need the racesEndpoint (for window math or req eval)?
@@ -3612,6 +3836,12 @@ async function getExpRankByUsername(username) {
       confirmBtn.disabled = false;
       return;
     }
+    if (selectedType === "improvement" && selectedImprovementMode === "target") {
+      // Target sub-mode: just a positive per-quote threshold. The filter/sliders
+      // are all optional (defaults = whole catalog).
+      confirmBtn.disabled = !(selectedValue != null && selectedValue > 0);
+      return;
+    }
     if (selectedMode === "improvement") {
       // Needs a positive target gain, and — for the average track — a rolling
       // window of at least 2 (a window of 1 is just "vs your last race").
@@ -3702,6 +3932,14 @@ async function getExpRankByUsername(username) {
     // Presets visible by default; the quotes+target branch hides them (they'd
     // otherwise claim flex space next to the max-quotes button row).
     presetsEl.style.display = "";
+
+    if (selectedType === "improvement" && selectedImprovementMode === "target") {
+      // Improvement-Target sub-mode: the Amount row hosts the per-quote
+      // threshold (presets + custom). The status/played/slider/next rows are
+      // owned by updateImprovementRowVisibility.
+      renderTargetValuePresets();
+      return;
+    }
 
     if (selectedMode === "improvement") {
       // ── Improvement mode (races only) ─────────────────────────
@@ -4162,8 +4400,9 @@ async function getExpRankByUsername(username) {
         RIVAL_SCOPE_OPTIONS.find(o => o.value === selectedRivalScope)?.hint ?? "";
     }
 
-    // Show filter row only for races
-    filterRow.style.display = (selectedType === "races" || selectedType === "improvement") ? "block" : "none";
+    // Show filter row only for races (the solo/quickplay split is a races-only
+    // concept; improvement goals ignore it — see the finish-path filter check).
+    filterRow.style.display = (selectedType === "races") ? "block" : "none";
 
     // Show rank button only for PP
     rankBtn.style.display = (selectedType === "pp" || selectedType === "exp") ? "" : "none";
@@ -4193,6 +4432,9 @@ async function getExpRankByUsername(username) {
     // sub-mode toggle arrives with target mode in the next drop.
     if (selectedType === "improvement") {
       selectedMode = "improvement";
+      // Reflect the bespoke Gain/Target sub-mode toggle (reset to gain on entry
+      // via resetTargetUI/updateImprovementRowVisibility's leave-reset).
+      improvementModeBtns.forEach(b => b.classList.toggle("active", b.dataset.impMode === selectedImprovementMode));
     } else if (selectedMode === "improvement") {
       selectedMode = "gain";
       modeBtns.forEach(b => b.classList.toggle("active", b.dataset.mode === "gain"));
@@ -4488,26 +4730,293 @@ async function getExpRankByUsername(username) {
     improvementWindowRow.style.display = "none";
   }
 
-  // Improvement-mode rows (metric + track, and conditionally the rolling
-  // window) are only meaningful for races + improvement. Mirror
-  // updateAvgRowVisibility().
+  // Improvement rows. Shown only for the improvement type, split by the bespoke
+  // Gain/Target sub-mode:
+  //   common  : the Gain/Target toggle + the WPM/PP metric row.
+  //   gain    : Track row (+ rolling-window when Average), the 🌱 toggle, the
+  //             solo/quickplay filter row, and recurrence.
+  //   target  : Status / Played / Difficulty / Length / Next-pick rows. No
+  //             filter, no recurrence (catalog goals are non-recurring).
   function updateImprovementRowVisibility() {
-    const visible = selectedMode === "improvement";
-    improvementMetricRow.style.display = visible ? "block" : "none";
-    improvementTrackRow.style.display  = visible ? "block" : "none";
-    if (!visible) { resetImprovementUI(); return; }
-    updateImprovementWindowRowVisibility();
+    const isImp = selectedType === "improvement";
+    const isTarget = isImp && selectedImprovementMode === "target";
+    // Common rows.
+    improvementModeRow.style.display   = isImp ? "block" : "none";
+    improvementMetricRow.style.display = isImp ? "block" : "none";
+    // Gain-only rows.
+    improvementTrackRow.style.display  = (isImp && !isTarget) ? "block" : "none";
+    // Target-only rows.
+    targetStatusRow.style.display   = isTarget ? "block" : "none";
+    targetPlayedRow.style.display   = isTarget ? "block" : "none";
+    targetDiffRow.style.display     = isTarget ? "block" : "none";
+    targetLenRow.style.display      = isTarget ? "block" : "none";
+    if (!isImp) { resetImprovementUI(); resetTargetUI(); return; }
+    // The solo/quickplay filter is a races-only concept — hidden for the whole
+    // improvement type. Force "all" so a gain goal counts every race.
+    filterRow.style.display = "none";
+    selectedFilter = "all";
+    filterBtns.forEach(b => b.classList.toggle("active", b.dataset.filter === "all"));
+    if (isTarget) {
+      // Hide gain-only bits that live in shared rows (the 🌱 first-time toggle
+      // sits in the metric row; the rolling-window row is gain/Average only).
+      improvementFirstTimeBtn.style.display = "none";
+      improvementWindowRow.style.display = "none";
+      // No recurrence for catalog goals.
+      selectedRec = "none";
+      recBtns.forEach(b => b.classList.toggle("active", b.dataset.rec === "none"));
+      recRow.style.display = "none";
+      renderTargetSliders();
+    } else {
+      recRow.style.display = "block";
+      updateImprovementWindowRowVisibility();
+    }
   }
 
   // The rolling-window row applies only to the Average track. The 🌱
   // first-time toggle applies only to the Best track (Average's warm-up
   // handles new quotes), so it's hidden for Average.
   function updateImprovementWindowRowVisibility() {
-    const avg = selectedMode === "improvement"
-                && selectedImprovementTrack === "average";
+    const isGain = selectedType === "improvement" && selectedImprovementMode === "gain";
+    const avg = isGain && selectedImprovementTrack === "average";
     improvementWindowRow.style.display = avg ? "block" : "none";
-    improvementFirstTimeBtn.style.display = avg ? "none" : "";
+    // 🌱 applies to the gain Best track only (hidden for Average and Target).
+    improvementFirstTimeBtn.style.display = (isGain && !avg) ? "" : "none";
   }
+
+  // ── Improvement-Target sub-mode wiring ──────────────────────────
+  // Standalone dual-handle range for the creation modal (the rival one is bound
+  // to the settings modal's contentEl/applySettingsDraft, so it isn't reusable
+  // here). Feature-matched to the rival slider: decimal steps, "N+" end ticks,
+  // and click-to-edit lo/hi numbers. Commits lo/hi to the target draft via
+  // set(); a handle at the axis end stores null (= unconstrained on that side).
+  // Handlers on the persistent <input>/track elements are ASSIGNED (not
+  // addEventListener) so re-running on an axis change replaces them cleanly; the
+  // readout number spans are rebuilt each call, so their listeners can't stack.
+  function setupTargetRange(rangeId, readoutId, ticksId, opts) {
+    const root = document.getElementById(rangeId);
+    if (!root) return;
+    const loIn = root.querySelector(".gt-range-lo");
+    const hiIn = root.querySelector(".gt-range-hi");
+    const fill = root.querySelector(".gt-range-fill");
+    const readout = document.getElementById(readoutId);
+    const ticksEl = document.getElementById(ticksId);
+    const { min, max, step, decimals, ticks, lo, hi, set } = opts;
+    const snap = (v) => {
+      const n = Math.round(v / step) * step;
+      return decimals ? Math.round(n * 10) / 10 : Math.round(n);
+    };
+    const numStr = (v) => (decimals ? (Number.isInteger(v) ? String(v) : v.toFixed(1)) : String(v));
+    for (const inp of [loIn, hiIn]) { inp.min = min; inp.max = max; inp.step = step; }
+    loIn.value = snap(Math.max(min, Math.min(max, lo)));
+    hiIn.value = snap(Math.max(min, Math.min(max, hi)));
+    if (ticksEl) {
+      const loEnd = ticksEl.querySelector(".gt-range-end-lo");
+      const hiEnd = ticksEl.querySelector(".gt-range-end-hi");
+      if (loEnd) loEnd.textContent = ticks ? ticks[0] : numStr(min);
+      if (hiEnd) hiEnd.textContent = ticks ? ticks[ticks.length - 1] : numStr(max);
+    }
+    let loNum = null, hiNum = null, capEl = null;
+    if (readout) {
+      readout.innerHTML =
+        `<span class="gt-range-num" data-side="lo" spellcheck="false"></span>` +
+        `<span class="gt-range-dash"> - </span>` +
+        `<span class="gt-range-num" data-side="hi" spellcheck="false"></span>` +
+        `<span class="gt-range-cap">+</span>`;
+      loNum = readout.querySelector('[data-side="lo"]');
+      hiNum = readout.querySelector('[data-side="hi"]');
+      capEl = readout.querySelector(".gt-range-cap");
+    }
+    const paint = (skip) => {
+      const lv = +loIn.value, hv = +hiIn.value;
+      const lp = ((lv - min) / (max - min)) * 100;
+      const hp = ((hv - min) / (max - min)) * 100;
+      fill.style.left = lp + "%";
+      fill.style.width = Math.max(0, hp - lp) + "%";
+      if (loNum && loNum !== skip) loNum.textContent = numStr(lv);
+      if (hiNum && hiNum !== skip) hiNum.textContent = numStr(hv);
+      if (capEl) capEl.style.display = (hv >= max) ? "" : "none";
+    };
+    const commit = () => {
+      const lv = +loIn.value, hv = +hiIn.value;
+      set(lv <= min ? null : lv, hv >= max ? null : hv);
+    };
+    const onInput = (which) => {
+      let lv = +loIn.value, hv = +hiIn.value;
+      if (which === "lo" && lv > hv) { lv = hv; loIn.value = lv; }
+      if (which === "hi" && hv < lv) { hv = lv; hiIn.value = hv; }
+      paint(); commit(); validateConfirm();
+    };
+    loIn.oninput = () => onInput("lo");
+    hiIn.oninput = () => onInput("hi");
+    root.onpointerdown = (e) => {
+      const rect = root.getBoundingClientRect();
+      if (!rect.width) return;
+      const x = e.clientX - rect.left;
+      const loX = ((+loIn.value - min) / (max - min)) * rect.width;
+      const hiX = ((+hiIn.value - min) / (max - min)) * rect.width;
+      const loCloser = Math.abs(x - loX) <= Math.abs(x - hiX);
+      loIn.style.zIndex = loCloser ? 5 : 4;
+      hiIn.style.zIndex = loCloser ? 4 : 5;
+      if (e.target === loIn || e.target === hiIn) return;
+      const moveLo = Math.abs(x - loX) < Math.abs(x - hiX);
+      const frac = Math.min(1, Math.max(0, x / rect.width));
+      let v = Math.min(max, Math.max(min, snap(min + frac * (max - min))));
+      if (moveLo) { if (v > +hiIn.value) v = +hiIn.value; loIn.value = v; loIn.style.zIndex = 5; hiIn.style.zIndex = 4; }
+      else        { if (v < +loIn.value) v = +loIn.value; hiIn.value = v; hiIn.style.zIndex = 5; loIn.style.zIndex = 4; }
+      paint(); commit(); validateConfirm();
+    };
+
+    // Inline-edit the lo/hi numbers like a text field (mirrors the rival
+    // sliders). Fresh spans each call, so handler assignment is safe.
+    const selectAllText = (el) => {
+      const r = document.createRange(); r.selectNodeContents(el);
+      const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+    };
+    const commitEdit = (el, side) => {
+      const v0 = parseFloat((el.textContent || "").replace(/[^0-9.]/g, ""));
+      if (Number.isFinite(v0)) {
+        let v = Math.min(max, Math.max(min, snap(v0)));
+        if (side === "lo") { if (v > +hiIn.value) v = +hiIn.value; loIn.value = v; }
+        else               { if (v < +loIn.value) v = +loIn.value; hiIn.value = v; }
+        paint(); commit(); validateConfirm();
+      } else {
+        paint(); // revert junk entry to the live value
+      }
+    };
+    const wireEdit = (el, side) => {
+      if (!el) return;
+      // First click takes over focus, makes it editable, and selects the value
+      // so a keystroke replaces it. A click while already editing is left alone
+      // so the caret can be placed between digits.
+      el.onmousedown = (e) => {
+        if (el.getAttribute("contenteditable") === "true") return;
+        e.preventDefault();
+        el.setAttribute("contenteditable", "true");
+        el.focus();
+        setTimeout(() => selectAllText(el), 0);
+      };
+      el.onkeydown = (e) => {
+        if (e.key === "Enter")  { e.preventDefault(); el.blur(); return; }
+        if (e.key === "Escape") { e.preventDefault(); paint(); el.blur(); return; }
+        const k = e.key;
+        if (k.length === 1 && !/[0-9]/.test(k) && !(decimals && k === ".") && !e.ctrlKey && !e.metaKey) {
+          e.preventDefault();
+        }
+      };
+      el.onblur = () => {
+        el.removeAttribute("contenteditable"); // back to plain text until next click
+        commitEdit(el, side);
+      };
+    };
+    wireEdit(loNum, "lo");
+    wireEdit(hiNum, "hi");
+
+    paint();
+  }
+
+  // (Re)build the difficulty + length sliders for the current status/played
+  // filter, resolving stored handles against the live catalog axis (null = end).
+  function renderTargetSliders() {
+    const axis = catalogAxis(selectedTargetStatus, selectedTargetPlayed);
+    const clampD = (v) => Math.max(axis.diffMin, Math.min(axis.diffMax, v));
+    const clampL = (v) => Math.max(axis.lenMin,  Math.min(axis.lenMax,  v));
+    const dLo = selectedTargetDiffMin == null ? axis.diffMin : clampD(selectedTargetDiffMin);
+    const dHi = selectedTargetDiffMax == null ? axis.diffMax : clampD(selectedTargetDiffMax);
+    const lLo = selectedTargetLenMin  == null ? axis.lenMin  : clampL(selectedTargetLenMin);
+    const lHi = selectedTargetLenMax  == null ? axis.lenMax  : clampL(selectedTargetLenMax);
+    setupTargetRange("gt-target-diff-range", "gt-target-diff-readout", "gt-target-diff-ticks", {
+      min: axis.diffMin, max: axis.diffMax, step: 0.1, decimals: true,
+      ticks: [String(axis.diffMin), `${axis.diffMax}+`], lo: dLo, hi: dHi,
+      set: (lo, hi) => { selectedTargetDiffMin = lo; selectedTargetDiffMax = hi; },
+    });
+    setupTargetRange("gt-target-len-range", "gt-target-len-readout", "gt-target-len-ticks", {
+      min: axis.lenMin, max: axis.lenMax, step: 1, decimals: false,
+      ticks: [String(axis.lenMin), `${axis.lenMax}+`], lo: lLo, hi: lHi,
+      set: (lo, hi) => { selectedTargetLenMin = lo; selectedTargetLenMax = hi; },
+    });
+    if (targetSyncHintEl) {
+      const syncing = !catalogFullySynced();
+      targetSyncHintEl.textContent = syncing ? " syncing catalog\u2026 (reopen for full bounds)" : "";
+      targetSyncHintEl.style.display = syncing ? "inline" : "none";
+    }
+  }
+
+  // Threshold value picker (reuses the Amount row: presets + custom). The metric
+  // label/presets follow selectedImprovementMetric; the custom input's generic
+  // numeric path already sets selectedValue.
+  function renderTargetValuePresets() {
+    const metric = selectedImprovementMetric;
+    const lbl = metric === "pp" ? "PP" : "WPM";
+    amountRow.style.display = "";
+    customInput.style.display = "";
+    customInput.type = "number";
+    customInput.removeAttribute("max");
+    customInput.removeAttribute("step");
+    customInput.placeholder = "Custom";
+    customInput.classList.remove("gt-custom-input--grow");
+    nextRankRow.style.display = "none";
+    maxQuotesRow.style.display = "none";
+    avgWindowRow.style.display = "none";
+    presetsEl.style.display = "";
+    amountLabel.textContent = `Target ${lbl}`;
+    modeHint.style.display = "none";
+    presetsEl.innerHTML = (TARGET_PRESETS[metric] || TARGET_PRESETS.wpm).map(v =>
+      `<button class="gt-preset-chip" data-value="${v}">${formatPreset(v)}</button>`
+    ).join("");
+    presetsEl.querySelectorAll(".gt-preset-chip").forEach(chip => {
+      chip.addEventListener("click", () => {
+        presetsEl.querySelectorAll(".gt-preset-chip").forEach(c => c.classList.remove("selected"));
+        chip.classList.add("selected"); customInput.value = "";
+        selectedValue = parseFloat(chip.dataset.value);
+        validateConfirm();
+      });
+    });
+  }
+
+  // Reset the Target draft + its UI. Called on modal open, and on type/mode
+  // changes that leave the Target sub-mode.
+  function resetTargetUI() {
+    selectedImprovementMode = "gain";
+    selectedTargetStatus = "all";
+    selectedTargetPlayed = "all";
+    selectedTargetDiffMin = null; selectedTargetDiffMax = null;
+    selectedTargetLenMin  = null; selectedTargetLenMax  = null;
+    improvementModeBtns.forEach(b => b.classList.toggle("active", b.dataset.impMode === "gain"));
+    targetStatusBtns.forEach(b => b.classList.toggle("active", b.dataset.targetStatus === "all"));
+    targetPlayedBtns.forEach(b => b.classList.toggle("active", b.dataset.targetPlayed === "all"));
+    if (improvementModeRow) improvementModeRow.style.display = "none";
+    for (const r of [targetStatusRow, targetPlayedRow, targetDiffRow, targetLenRow]) {
+      if (r) r.style.display = "none";
+    }
+  }
+
+  // Bespoke Gain/Target toggle (improvement type only).
+  improvementModeBtns.forEach(btn => btn.addEventListener("click", () => {
+    improvementModeBtns.forEach(b => b.classList.remove("active")); btn.classList.add("active");
+    selectedImprovementMode = btn.dataset.impMode; // "gain" | "target"
+    updateImprovementRowVisibility();
+    renderPresets();
+    validateConfirm();
+  }));
+
+  // Target Status / Played: both change the catalog axis (and the played pool),
+  // so reset the diff/len handles to full range and rebuild the sliders.
+  targetStatusBtns.forEach(btn => btn.addEventListener("click", () => {
+    targetStatusBtns.forEach(b => b.classList.remove("active")); btn.classList.add("active");
+    selectedTargetStatus = btn.dataset.targetStatus;
+    selectedTargetDiffMin = selectedTargetDiffMax = null;
+    selectedTargetLenMin  = selectedTargetLenMax  = null;
+    renderTargetSliders();
+    validateConfirm();
+  }));
+  targetPlayedBtns.forEach(btn => btn.addEventListener("click", () => {
+    targetPlayedBtns.forEach(b => b.classList.remove("active")); btn.classList.add("active");
+    selectedTargetPlayed = btn.dataset.targetPlayed;
+    selectedTargetDiffMin = selectedTargetDiffMax = null;
+    selectedTargetLenMin  = selectedTargetLenMax  = null;
+    renderTargetSliders();
+    validateConfirm();
+  }));
 
   function openModal() {
     overlay.classList.add("open");
@@ -4545,6 +5054,7 @@ async function getExpRankByUsername(username) {
     improvementMetricRow.style.display = "none"; // hide improvement rows initially
     improvementTrackRow.style.display = "none";
     improvementWindowRow.style.display = "none";
+    resetTargetUI(); // hides the sub-mode toggle + all Target rows
     modeRow.style.display = "block"; recRow.style.display = "block";
     renderPresets();
   }
@@ -4556,6 +5066,7 @@ async function getExpRankByUsername(username) {
     resetRequirementsUI();
     resetAverageUI();
     resetImprovementUI();
+    resetTargetUI();
     clearTimeout(rankDebounce);
     customInput.value = "";
   }
@@ -4705,6 +5216,7 @@ async function getExpRankByUsername(username) {
     delete prevAvgMap[goalId];
     delete prevBestMap[goalId];
     delete prevRivalYouMap[goalId];
+    targetStandingsCache.delete(goalId);
 
     // Remove from its owning group. If that empties a detached widget,
     // destroy it. Main group is allowed to be empty.
@@ -4777,6 +5289,40 @@ async function getExpRankByUsername(username) {
       if (isLeader) ensureRivalSync();
       return;
     }
+
+    // ── Improvement-Target goal ─────────────────────────────────
+    // Catalog-based; needs no user-stats fetch. Build + store directly, then
+    // return (bypasses the cumulative gain-goal construction below). Stored in
+    // goalData.improvement with mode:"target" so goalIsImprovementTarget() picks
+    // it up; recurrence is always "none". Handles are numbers or null (= the
+    // axis end / unconstrained on that side).
+    if (selectedType === "improvement" && selectedImprovementMode === "target") {
+      if (selectedValue == null || selectedValue <= 0) return;
+      const goalId = generateGoalId("improvement");
+      const newGoal = {
+        id: goalId,
+        mode: "target",
+        metric: (selectedImprovementMetric === "pp") ? "pp" : "wpm",
+        target: selectedValue,
+        status: selectedTargetStatus,   // "all" | "ranked" | "unranked"
+        played: selectedTargetPlayed,   // "all" | "played"
+        diffMin: selectedTargetDiffMin, diffMax: selectedTargetDiffMax,
+        lenMin:  selectedTargetLenMin,  lenMax:  selectedTargetLenMax,
+        recurrence: "none",
+      };
+      goalData.improvement.push(newGoal);
+      saveGoals("improvement");
+      if (!groupData[MAIN_GROUP_ID].goalIds.includes(newGoal.id)) {
+        groupData[MAIN_GROUP_ID].goalIds.push(newGoal.id);
+        saveGroups();
+      }
+      closeModal();
+      renderAllGoals();
+      // Kick the catalog build/refresh now that a Target goal exists (leader).
+      if (isLeader) maybeRunQuoteCatalog();
+      return;
+    }
+
     try {
       const response = await gtApiFetch(userEndpoint(), { headers: authHeaders() });
       const data     = await response.json();
@@ -5021,7 +5567,7 @@ async function getExpRankByUsername(username) {
         // at races AFTER right now". So this kick-off is a no-op on
         // creation but ensures the eval cycle has a chance to wire up.
         if (usesEvaluator || isAvgMode) evaluateRaceRequirementsGuarded();
-        if (isImprovementMode) evaluateImprovementGuarded();
+        if (isImprovementMode) { evaluateImprovementGuarded(); maybeRunQuoteCatalog(); }
       }
     } catch (err) { console.error("Failed to set goal:", err); }
   });
@@ -5449,7 +5995,146 @@ async function getExpRankByUsername(username) {
     }
   }
 
-  // ── Next-rank reset scheduler ────────────────────────────────
+  // Improvement-Target card. Mirrors the rival card (no progress bar): a value
+  // row showing "<your current-quote value> / <target>" — your number greens
+  // once you hit the target — then a count sub-line ("quotes ≥ N METRIC: X / Y"
+  // over the filtered catalog) and the full-width "Next quote" button. The
+  // current-quote value reads the self store for the live quoteId (0 = never
+  // raced here), exactly like the rival "you" number.
+  function updateTargetGoalSection(goalId, type, cfg, gd) {
+    const metric = targetMetricOf(gd);
+    const metricLbl = metric === "pp" ? "PP" : "WPM";
+    const target = Number(gd.target) || 0;
+
+    const labelEl = document.getElementById(`${goalId}-label`);
+    if (labelEl) labelEl.textContent = `Target ${metricLbl} \u2265 ${target}`;
+
+    // ── Value row: your current-quote value / target ──
+    const wrapEl = document.getElementById(`${goalId}-target-value-wrap`);
+    const youEl  = document.getElementById(`${goalId}-target-you`);
+    const themEl = document.getElementById(`${goalId}-target-them`);
+    const msgEl  = document.getElementById(`${goalId}-target-msg`);
+    const showMsg = (text) => {
+      const gainPill = document.getElementById(`${goalId}-target-gain`);
+      if (gainPill) gainPill.remove();
+      if (wrapEl) wrapEl.style.display = "none";
+      if (msgEl) { msgEl.textContent = text; msgEl.style.display = ""; }
+    };
+
+    const liveQid = getCurrentQuoteIdLive();
+    const selfStore = loadRivalStore(RIVAL_SELF_NAME);
+    // When we have catalog metadata for the live quote and it fails the goal's
+    // status/difficulty/length filters, racing it can never move this goal's
+    // count (progress is scoped to the filtered pool), so say so instead of
+    // showing a value that looks comparable. The "played" axis is intentionally
+    // not checked here: an as-yet-unplayed quote that matches the metadata
+    // filters does count once raced. Missing meta (catalog not synced yet) falls
+    // through to the value row rather than asserting a mismatch.
+    const liveMeta = liveQid ? quoteCatalog[liveQid] : null;
+    if (!liveQid) {
+      showMsg("Race a quote to compare");
+    } else if (liveMeta && !targetQuotePassesMeta(liveMeta, gd)) {
+      showMsg("Quote doesn't match filters");
+    } else {
+      const sEntry = selfStore.quotes[liveQid];
+      const sv = sEntry ? (Number(sEntry[metric]) || 0) : 0;
+      if (msgEl)  msgEl.style.display = "none";
+      if (wrapEl) wrapEl.style.display = "";
+      if (youEl) {
+        youEl.textContent = rivalFmt(sv);
+        // Green once you've met or beaten the target on this quote.
+        youEl.className = "gt-rival-you" + (sv >= target - RIVAL_PP_EPS ? " gt-rival-you-done" : "");
+      }
+      if (themEl) themEl.textContent = ` / ${rivalFmt(target)}`;
+
+      // +X gain pill when your value on THIS quote rises (mirrors the rival
+      // card). Only baseline/compare once self is settled so a 0→real fill
+      // never flashes a phantom gain; re-baseline on a quote change.
+      const settledSelf = !!sEntry || rivalBulkDone(selfStore);
+      if (settledSelf && wrapEl) {
+        const prev = prevRivalYouMap[goalId];
+        if (prev && prev.quoteId === liveQid && prev.metric === metric && prev.value > RIVAL_PP_EPS && sv > prev.value + RIVAL_PP_EPS) {
+          const delta = sv - prev.value;
+          if (Number(delta.toFixed(2)) > 0) {
+            const existing = document.getElementById(`${goalId}-target-gain`);
+            if (existing) existing.remove();
+            const ind = document.createElement("span");
+            ind.id = `${goalId}-target-gain`;
+            ind.className = "gt-gain-indicator";
+            ind.textContent = `+${delta.toFixed(2)}`;
+            wrapEl.appendChild(ind);
+            ind.addEventListener("animationend", () => ind.remove());
+          }
+        }
+        prevRivalYouMap[goalId] = { quoteId: liveQid, value: sv, metric };
+      }
+    }
+
+    // ── Filter display lines (mirror the requirement-goal req lines) ──
+    // Line 1 (cyan): "Quote Pool: <Played?>, <Ranked|Unranked?>" → "All" if both open.
+    const poolParts = [];
+    if (gd.played === "played")        poolParts.push("Played");
+    if (gd.status === "ranked")        poolParts.push("Ranked");
+    else if (gd.status === "unranked") poolParts.push("Unranked");
+    const poolEl = document.getElementById(`${goalId}-target-pool`);
+    if (poolEl) {
+      poolEl.textContent = `Quote Pool: ${poolParts.length ? poolParts.join(", ") : "All"}`;
+      poolEl.style.display = "block";
+    }
+
+    // Line 2 (darker blue): "<lo> - <hi> LEN, <lo> - <hi> DIFF" — only the
+    // constrained axes. Open lower = "≤hi", open upper = "lo+", matching the
+    // requirement goals' "+ " convention. Hidden entirely when both are open.
+    const band = (lo, hi, unit) => {
+      if (lo == null && hi == null) return null;
+      if (lo != null && hi != null) return `${lo} - ${hi} ${unit}`;
+      if (hi == null) return `${lo}+ ${unit}`;
+      return `\u2264${hi} ${unit}`;
+    };
+    const bandParts = [];
+    const lenStr  = band(gd.lenMin,  gd.lenMax,  "LEN");
+    const diffStr = band(gd.diffMin, gd.diffMax, "DIFF");
+    if (lenStr)  bandParts.push(lenStr);
+    if (diffStr) bandParts.push(diffStr);
+    const bandEl = document.getElementById(`${goalId}-target-band`);
+    if (bandEl) {
+      bandEl.textContent = bandParts.join(", ");
+      bandEl.style.display = bandParts.length ? "block" : "none";
+    }
+
+    // ── Count sub-line: Quotes ≥ N METRIC: X / Y (filters shown above) ──
+    const { hit, total, catalogSynced, selfDone } = computeTargetStanding(gd);
+    const settled = catalogSynced && selfDone;
+    const countEl = document.getElementById(`${goalId}-target-count`);
+    if (countEl) {
+      const xy = (total === 0 && !catalogSynced)
+        ? "syncing\u2026"
+        : `${hit.toLocaleString()} / ${total.toLocaleString()}`;
+      countEl.textContent = `Quotes \u2265 ${target} ${metricLbl}: ${xy}`
+        + (settled || (total === 0 && !catalogSynced) ? "" : "  \u00b7 syncing\u2026");
+    }
+
+    // ── Next button ──
+    const nextBtn = document.getElementById(`${goalId}-target-next`);
+    if (nextBtn) {
+      const remaining = total - hit;
+      if (total === 0 && !settled) {
+        nextBtn.textContent = "\u23ed Finding quotes\u2026";
+        nextBtn.disabled = true;
+      } else if (total > 0 && remaining <= 0) {
+        nextBtn.textContent = "\u2713 All hit \ud83c\udf89";
+        nextBtn.disabled = true;
+      } else if (remaining <= 0) {
+        nextBtn.textContent = "No quotes match filters";
+        nextBtn.disabled = true;
+      } else {
+        nextBtn.textContent = settled ? "\u23ed Next quote" : "\u23ed Next quote (syncing\u2026)";
+        nextBtn.disabled = false;
+      }
+    }
+  }
+
+  // \u2500\u2500 Next-rank reset scheduler \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500────────────────
   // Runs in every tab (renderAllGoals runs everywhere), but only the
   // leader actually fires the reset. The Set prevents double-scheduling
   // across multiple renders while the timeout is pending.
@@ -5722,6 +6407,7 @@ async function getExpRankByUsername(username) {
         const hasReq = type === "races" && goalIsGated(gd);
         const isAvg  = type === "races" && goalIsAverage(gd);
         const isImprovement = goalIsImprovement(gd);
+        const isTarget = goalIsImprovementTarget(gd);
 
         // Period reset check
         if (isRecurring) {
@@ -5792,6 +6478,13 @@ async function getExpRankByUsername(username) {
             goals[i] = gd;
             saveGoals(type);
           }
+        }
+
+        // Improvement-Target goals (X/Y over the catalog) have their own
+        // catalog-driven renderer and share no gain-delta machinery.
+        if (isTarget) {
+          updateTargetGoalSection(goalId, type, cfg, gd);
+          continue;
         }
 
         // Average goals take a completely separate render path — they
@@ -6102,7 +6795,7 @@ async function getExpRankByUsername(username) {
       // immediately and let the rival card catch up when the fetch lands (the
       // old decoupled behaviour). renderAllGoals() reads the live store, so in
       // the synced case it shows the freshly merged rival bests too.
-      if (racesChanged && (goalData.rival || []).length > 0) {
+      if (racesChanged && ((goalData.rival || []).length > 0 || haveImprovementTargetGoals())) {
         const gtPerfSession = gtPerf.startRivalLag(gtStatsFetchMs); // [GT-PERF] anchor: rival fetch kicked
         // selfRender=false → the caller owns the render in this path.
         const maintainPromise = maintainSelfStoreFromRaces(gtPerfSession, false)
@@ -6450,15 +7143,16 @@ async function getExpRankByUsername(username) {
       const improvementGoals = goalData.improvement;
       const hasImprovement = improvementGoals && improvementGoals.some(g => goalIsImprovement(g));
       const hasRival = (goalData.rival || []).length > 0;
-      if (!hasImprovement && !hasRival) return; // cheap no-op when irrelevant
+      const hasTarget = haveImprovementTargetGoals();
+      if (!hasImprovement && !hasRival && !hasTarget) return; // cheap no-op when irrelevant
       const qid = getCurrentQuoteIdLive();
       if (qid && qid !== lastSeenQuoteId) {
         lastSeenQuoteId = qid;
         if (hasImprovement) onQuoteStarted(qid);
-        // Rival goals: the compare line tracks the quote you're on, so a new
-        // quote means re-render (which on-demand-fetches the new quote's
-        // bests if they're not in the stores yet).
-        if (hasRival) renderAllGoals();
+        // Rival + Target goals: the compare / current-value line tracks the
+        // quote you're on, so a new quote means re-render (rival on-demand-
+        // fetches the new quote's bests; target just reads the self store).
+        if (hasRival || hasTarget) renderAllGoals();
       }
     }
     // 500ms latency is irrelevant — we have the whole attempt to seed.
@@ -6557,6 +7251,23 @@ async function getExpRankByUsername(username) {
   let rivalStoreEpoch = 0;
   const rivalStandingsCache = new Map(); // goalId → { epoch, metric, result }
 
+  // ── Quote catalog (the COMPLETE site quote set) ───────────────
+  // Drop 2 (improvement Target mode) needs every quote's difficulty/length/
+  // ranked, not just the ones seen via rival/self history. This is a SEPARATE
+  // table from rivalQuoteMeta (which only covers quotes some store has seen):
+  // the catalog is the full ~14k-quote universe, fetched once (status=any) and
+  // delta-refreshed. Stored lean as qid → { d, l, r } (NO text). Built
+  // leader-only and ONLY when at least one improvement-Target goal exists —
+  // never fetch 14k quotes for users without one.
+  let quoteCatalog = Object.create(null);   // qid → { d, l, r }
+  // Persisted sync state (resume cursor + counts). phase: "idle"|"bulk"|"done".
+  let quoteCatalogMeta = { totalCount: 0, totalPages: null, nextPage: 1, phase: "idle", lastFullSync: null };
+  let catalogReady = false;     // hydrated from IDB? (mirrors rivalIdbReady)
+  let catalogBulkActive = false; // exactly one catalog driver runs at a time
+  // Monotonic version bumped whenever the catalog changes — the render/eval
+  // memo invalidator, mirroring rivalStoreEpoch.
+  let catalogEpoch = 0;
+
   // ── IndexedDB persistence (replaces localStorage) ────────────
   // Rival/self stores live in IndexedDB now, not localStorage: a few rivals
   // could blow past localStorage's ~5 MB origin cap, while IDB has orders of
@@ -6571,6 +7282,21 @@ async function getExpRankByUsername(username) {
   const RIVAL_IDB_STORE    = "kv";
   const RIVAL_META_KEY     = "gt-rivalq-meta";          // shared quote-meta record
   const RIVAL_MIGRATED_KEY = "gt-rivalq-idb-migrated";  // one-time LS→IDB marker
+  // Quote-catalog IDB records (same DB/store as the rival data — reuses idbGet/
+  // idbPut). The catalog map and its sync/count meta are two separate records.
+  const CATALOG_KEY        = "gt-quote-catalog";        // qid → { d, l, r }
+  const CATALOG_META_KEY   = "gt-quote-catalog-meta";   // { totalCount, totalPages, nextPage, phase, lastFullSync }
+  const CATALOG_PAGE_SIZE  = 250;   // same as RIVAL_PAGE_SIZE — 1000 flakes server-side
+  // Delta refresh pages newest-first until it reaches an already-stored quote.
+  // This caps a pathological run (e.g. if the created-DESC sort assumption is
+  // wrong); exceeding it forces a full re-sync. ~250×40 = 10k newest quotes.
+  const CATALOG_DELTA_MAX_PAGES = 40;
+  // Fallback slider bounds before the catalog has synced (the real axis is
+  // derived from the catalog once present). Difficulty is a small float scale;
+  // length is char count. Mirrors the rival axis fallbacks but catalog-scoped.
+  const CATALOG_DIFF_MIN = 0, CATALOG_DIFF_MAX = 15;
+  const CATALOG_LEN_MIN  = 0, CATALOG_LEN_MAX  = 1000;
+  const CATALOG_LEN_ROUND = 50; // length axis ends floored/ceiled to this
   let rivalIdb = null;
   function idbOpen() {
     if (rivalIdb) return Promise.resolve(rivalIdb);
@@ -6808,6 +7534,19 @@ async function getExpRankByUsername(username) {
       for (const { key, value } of all) {
         if (key === RIVAL_META_KEY) { if (value && typeof value === "object") rivalQuoteMeta = value; continue; }
         if (key === RIVAL_MIGRATED_KEY) continue;
+        if (key === CATALOG_KEY) { if (value && typeof value === "object") quoteCatalog = value; continue; }
+        if (key === CATALOG_META_KEY) {
+          if (value && typeof value === "object") {
+            quoteCatalogMeta = {
+              totalCount:  Number(value.totalCount) || 0,
+              totalPages:  (value.totalPages == null) ? null : Number(value.totalPages),
+              nextPage:    Number(value.nextPage) || 1,
+              phase:       (value.phase === "bulk" || value.phase === "done") ? value.phase : "idle",
+              lastFullSync: value.lastFullSync || null,
+            };
+          }
+          continue;
+        }
         if (value && typeof value === "object" && typeof value.quotes === "object") {
           if (!value.fetch) value.fetch = freshRivalFetch();
           trimStoreIntoMeta(value);    // tolerate any still-fat entries
@@ -6819,9 +7558,11 @@ async function getExpRankByUsername(username) {
       console.warn("[Goal Tracker] IndexedDB unavailable — rival data won't persist this session:", e);
     } finally {
       rivalIdbReady = true;
+      catalogReady = true;       // catalog hydrated from IDB (empty map if none)
       rivalStoreEpoch++;
+      catalogEpoch++;            // a render computed on an empty catalog is stale now
       renderAllGoals();
-      if (isLeader) ensureRivalSync();
+      if (isLeader) { ensureRivalSync(); maybeRunQuoteCatalog(); }
     }
   }
   // ── Scope (all / ranked / unranked) ──────────────────────────
@@ -7126,7 +7867,7 @@ async function getExpRankByUsername(username) {
       // Hand each completed store to its incremental refresh — but only when a
       // rival goal exists. In the self-prefetch state (logged in, no rival
       // goal) the bulk is the whole job; don't kick an ongoing self refresh.
-      const haveRivalGoals = (goalData.rival || []).length > 0;
+      const haveRivalGoals = (goalData.rival || []).length > 0 || haveImprovementTargetGoals();
       if (!stillPending && isLeader && !apiThrottled() && haveRivalGoals) {
         for (const name of rivalManaged.keys()) {
           if (rivalBulkDone(loadRivalStore(name))) rivalIncrementalSync(name);
@@ -7240,10 +7981,11 @@ async function getExpRankByUsername(username) {
     for (const n of rivalManaged.keys()) {
       if (pendingBulkStreamFor(n)) { runRivalBulkDriver(); return; }
     }
-    // All bulk complete. The ongoing incremental refresh is rival-goal-only
-    // machinery — in the self-prefetch state (logged in, no rival goal) the
-    // one-time bulk is the whole job, so there's no ongoing refresh.
-    if ((goalData.rival || []).length === 0) return;
+    // All bulk complete. The ongoing incremental refresh runs when a rival OR
+    // an improvement-Target goal exists (Target goals need the self store kept
+    // current so X/Y tracks new PBs). In the bare self-prefetch state (logged
+    // in, no rival/target goal) the one-time bulk is the whole job.
+    if ((goalData.rival || []).length === 0 && !haveImprovementTargetGoals()) return;
     // Round-robin: refresh exactly ONE managed store per tick. Self is included
     // (its PBs need refreshing too); the cursor wraps and tolerates the set
     // changing between ticks.
@@ -7268,11 +8010,10 @@ async function getExpRankByUsername(username) {
     for (const n of rivalManaged.keys()) {
       if (pendingBulkStreamFor(n)) { runRivalBulkDriver(); return; }
     }
-    // No bulk pending. The ongoing incremental refresh is rival-goal-only
-    // machinery — in the self-prefetch state (logged in, no rival goal) the
-    // one-time bulk is the whole job, so don't start an ongoing self refresh.
+    // No bulk pending. The ongoing incremental refresh runs when a rival OR an
+    // improvement-Target goal exists (the latter needs the self store fresh).
     // The poll still ran the driver above, so an interrupted bulk resumes.
-    if ((goalData.rival || []).length === 0) return;
+    if ((goalData.rival || []).length === 0 && !haveImprovementTargetGoals()) return;
     rivalIncrementalSync(name);
   }
 
@@ -7460,7 +8201,378 @@ async function getExpRankByUsername(username) {
     }
   }
 
-  // ── Rendering ────────────────────────────────────────────────
+  // ══════════════════════════════════════════════════════════════
+  // Quote catalog: fetch + sync (leader-only; built only for Target goals)
+  // ══════════════════════════════════════════════════════════════
+  // Mirrors the rival bulk subsystem: one paged build (status=any, 250/page)
+  // through the shared gtApiFetch backoff gate, persisted-per-page so a
+  // pause/lost-leadership resumes from the stored cursor, then an ongoing
+  // newest-first delta refresh. Everything is gated on at least one
+  // improvement-Target goal existing (haveImprovementTargetGoals) so users
+  // without one never trigger a 14k-quote fetch.
+
+  // Fetch ONE catalog page. status=any so we get ranked + unranked together and
+  // read each row's own `ranked` flag (the API default is ranked-only). Quotes
+  // are public, so no auth header (matches getTypeGGTotalQuotes). Throws on a
+  // non-2xx so the caller's catch pauses + persists the cursor.
+  async function fetchQuoteCatalogPage({ page, perPage = CATALOG_PAGE_SIZE }) {
+    const params = new URLSearchParams({ status: "any", perPage: String(perPage), page: String(page) });
+    const url = `https://api.typegg.io/v1/quotes?${params.toString()}`;
+    const res = await gtApiFetch(url, { headers: { Accept: "application/json" } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    return {
+      page:       Number(data.page) || page,
+      perPage:    Number(data.perPage) || perPage,
+      totalPages: Number(data.totalPages) || 0,
+      totalCount: Number(data.totalCount) || 0,
+      quotes:     Array.isArray(data.quotes) ? data.quotes : [],
+    };
+  }
+
+  // Merge one catalog row into the lean qid → { d, l, r } map. NO text stored.
+  // Returns true iff the entry was added or changed. A missing `ranked` defaults
+  // to true (the API's ranked-only default), but status=any rows always carry it.
+  function mergeCatalogQuote(q) {
+    const qid = q && q.quoteId;
+    if (!qid) return false;
+    const cur = quoteCatalog[qid];
+    const dn = Number(q.difficulty);
+    const ln = Number(q.length);
+    const d = Number.isFinite(dn) ? dn : (cur ? cur.d : undefined);
+    const l = Number.isFinite(ln) ? ln : (cur ? cur.l : undefined);
+    const r = (typeof q.ranked === "boolean") ? q.ranked : (cur ? cur.r : true);
+    if (cur && cur.d === d && cur.l === l && cur.r === r) return false;
+    quoteCatalog[qid] = { d, l, r };
+    return true;
+  }
+
+  // Persist both catalog records, bump the epoch (invalidates render/eval memos),
+  // and broadcast so follower tabs reload. Async (IDB); on failure we keep the
+  // in-memory copy for the session.
+  function saveQuoteCatalog({ broadcast = true } = {}) {
+    catalogEpoch++;
+    const mapSnap = quoteCatalog, metaSnap = quoteCatalogMeta;
+    idbPut(CATALOG_KEY, mapSnap)
+      .then(() => idbPut(CATALOG_META_KEY, metaSnap))
+      .then(() => { if (broadcast) channel?.postMessage({ type: "quote-catalog" }); })
+      .catch(e => console.warn("[Goal Tracker] quote-catalog IDB save failed:", e));
+  }
+
+  // Follower path: the leader changed the catalog → reload both records + render.
+  function reloadQuoteCatalogFromDisk() {
+    Promise.all([idbGet(CATALOG_KEY), idbGet(CATALOG_META_KEY)]).then(([map, meta]) => {
+      if (map && typeof map === "object") quoteCatalog = map;
+      if (meta && typeof meta === "object") quoteCatalogMeta = { ...quoteCatalogMeta, ...meta };
+      catalogEpoch++;
+      renderAllGoals();
+    }).catch(() => {});
+  }
+
+  // Has the one-time full build finished? Drives the render "syncing catalog…"
+  // state and the slider-bounds fallback.
+  function catalogFullySynced() {
+    return catalogReady && quoteCatalogMeta.phase === "done";
+  }
+
+  // Full build: page 1..totalPages at 250/page, persisting the resume cursor
+  // every page (cheap next to multi-second page latency). Runs to completion in
+  // one call; a throttle / lost leadership breaks the loop and the cursor + the
+  // 5-min poll resume it. Like the rival bulk, no internal visibility re-check —
+  // the START is visibility-gated by maybeRunQuoteCatalog.
+  async function runCatalogFullSync() {
+    let lastRender = 0, firstFetch = true;
+    while (isLeader && !apiThrottled() && haveImprovementTargetGoals()) {
+      if (!firstFetch) {
+        await new Promise(r => setTimeout(r, RIVAL_PAGE_DELAY_MS));
+        if (!isLeader || apiThrottled()) break;
+      }
+      firstFetch = false;
+      const page = quoteCatalogMeta.nextPage || 1;
+      let data;
+      try { data = await fetchQuoteCatalogPage({ page }); }
+      catch (e) {
+        console.warn("[Goal Tracker] quote-catalog page failed (paused):", e);
+        saveQuoteCatalog(); // persist cursor so we resume from here
+        break;
+      }
+      let changed = false;
+      for (const q of data.quotes) { if (mergeCatalogQuote(q)) changed = true; }
+      quoteCatalogMeta.totalCount = data.totalCount;
+      quoteCatalogMeta.totalPages = data.totalPages;
+      quoteCatalogMeta.phase = "bulk";
+      if (data.totalPages === 0 || page >= data.totalPages) {
+        quoteCatalogMeta.phase = "done";
+        quoteCatalogMeta.nextPage = (data.totalPages || 0) + 1;
+        quoteCatalogMeta.lastFullSync = new Date().toISOString();
+        saveQuoteCatalog();
+        renderAllGoals();
+        break;
+      }
+      quoteCatalogMeta.nextPage = page + 1;
+      saveQuoteCatalog();
+      const now = Date.now();
+      if (changed && now - lastRender > 1000) { renderAllGoals(); lastRender = now; }
+    }
+  }
+
+  // Delta refresh (post-build): a cheap perPage=1 probe reads totalCount; if it
+  // grew, page newest-first until a page is entirely already-known, then stop.
+  // ⚠ ASSUMES the default sort is `created` DESC (page 1 = newest) — VERIFY in
+  // the live build. The page cap is the safety net: exceeding it without
+  // reaching known data forces a full re-sync (covers a wrong sort assumption).
+  async function runCatalogDeltaRefresh() {
+    let probe;
+    try { probe = await fetchQuoteCatalogPage({ page: 1, perPage: 1 }); }
+    catch (e) { return; }
+    const serverCount = probe.totalCount;
+    if (!(serverCount > (quoteCatalogMeta.totalCount || 0))) {
+      if (serverCount && serverCount !== quoteCatalogMeta.totalCount) {
+        quoteCatalogMeta.totalCount = serverCount; // shrank (deletions) — just record
+        saveQuoteCatalog({ broadcast: false });
+      }
+      return;
+    }
+    let page = 1, learned = 0, firstFetch = true, reachedKnown = false;
+    while (isLeader && !apiThrottled() && page <= CATALOG_DELTA_MAX_PAGES) {
+      if (!firstFetch) {
+        await new Promise(r => setTimeout(r, RIVAL_PAGE_DELAY_MS));
+        if (!isLeader || apiThrottled()) break;
+      }
+      firstFetch = false;
+      let data;
+      try { data = await fetchQuoteCatalogPage({ page }); }
+      catch (e) { break; }
+      if (data.quotes.length === 0) { reachedKnown = true; break; }
+      let pageHadNew = false;
+      for (const q of data.quotes) {
+        const isNew = !(q.quoteId in quoteCatalog);
+        if (mergeCatalogQuote(q) && isNew) learned++;
+        if (isNew) pageHadNew = true;
+      }
+      quoteCatalogMeta.totalPages = data.totalPages;
+      if (!pageHadNew) { reachedKnown = true; break; } // reached the synced region
+      page++;
+    }
+    quoteCatalogMeta.totalCount = serverCount;
+    if (learned > 0 || reachedKnown) saveQuoteCatalog();
+    if (learned > 0) renderAllGoals();
+    if (!reachedKnown) {
+      console.warn("[Goal Tracker] quote-catalog delta hit page cap without reaching known quotes — forcing full re-sync (verify the API sort is created-DESC)");
+      quoteCatalogMeta.phase = "bulk";
+      quoteCatalogMeta.nextPage = 1;
+      saveQuoteCatalog();
+    }
+  }
+
+  // The single catalog driver: full-build if not done, else a delta refresh.
+  // catalogBulkActive keeps exactly one running at a time (mirrors
+  // rivalBulkActive). Self-gates on leader / login / throttle / a Target goal.
+  async function runQuoteCatalogDriver() {
+    if (!isLeader) return;
+    if (!catalogReady) return;
+    if (!isLoggedIn()) return;
+    if (apiThrottled()) return;
+    if (catalogBulkActive) return;
+    if (!haveImprovementTargetGoals()) return;
+    catalogBulkActive = true;
+    try {
+      if (quoteCatalogMeta.phase !== "done") await runCatalogFullSync();
+      else await runCatalogDeltaRefresh();
+    } finally {
+      catalogBulkActive = false;
+    }
+  }
+
+  // Visibility-gated guarded kick. Callers (hydration, ensureRivalSync, goal
+  // creation, the slow poll) use this; runIfAnyTabVisible supplies the
+  // visible + not-throttled + logged-in gate that §4c wants for the build.
+  function maybeRunQuoteCatalog() {
+    if (!isLeader || !catalogReady) return;
+    if (!haveImprovementTargetGoals()) return;
+    runIfAnyTabVisible(runQuoteCatalogDriver)();
+  }
+
+  // Difficulty/length axis over the catalog, filtered by a goal's status (and,
+  // when played==="played", restricted to quotes in the self store). Drives the
+  // creation-modal slider bounds. Cached by catalogEpoch + status + played
+  // (mirrors rivalFilterAxis). Falls back to fixed bounds until the catalog has
+  // some data. Difficulty floored/ceiled to integers; length to CATALOG_LEN_ROUND.
+  let catalogAxisCache = null;
+  function catalogAxis(status, played) {
+    const key = `${catalogEpoch}:${status}:${played}`;
+    if (catalogAxisCache && catalogAxisCache.key === key) return catalogAxisCache;
+    const sq = (played === "played") ? loadRivalStore(RIVAL_SELF_NAME).quotes : null;
+    let dLo = Infinity, dHi = -Infinity, lLo = Infinity, lHi = -Infinity;
+    for (const qid in quoteCatalog) {
+      const m = quoteCatalog[qid];
+      if (status === "ranked"   && m.r === false) continue;
+      if (status === "unranked" && m.r !== false) continue;
+      if (sq && !(qid in sq)) continue;
+      const d = Number(m.d), l = Number(m.l);
+      if (Number.isFinite(d)) { if (d < dLo) dLo = d; if (d > dHi) dHi = d; }
+      if (Number.isFinite(l)) { if (l < lLo) lLo = l; if (l > lHi) lHi = l; }
+    }
+    const floorTo = (v, s) => Math.floor(v / s) * s;
+    const ceilTo  = (v, s) => Math.ceil(v / s) * s;
+    const axis = {
+      key,
+      diffMin: Number.isFinite(dLo) ? Math.floor(dLo) : CATALOG_DIFF_MIN,
+      diffMax: Number.isFinite(dHi) ? Math.ceil(dHi)  : CATALOG_DIFF_MAX,
+      lenMin:  Number.isFinite(lLo) ? floorTo(lLo, CATALOG_LEN_ROUND) : CATALOG_LEN_MIN,
+      lenMax:  Number.isFinite(lHi) ? ceilTo(lHi, CATALOG_LEN_ROUND)  : CATALOG_LEN_MAX,
+    };
+    if (axis.diffMax <= axis.diffMin) axis.diffMax = axis.diffMin + 1;
+    if (axis.lenMax  <= axis.lenMin)  axis.lenMax  = axis.lenMin + CATALOG_LEN_ROUND;
+    catalogAxisCache = axis;
+    return axis;
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // Improvement-Target evaluation + Next-quote
+  // ══════════════════════════════════════════════════════════════
+  // "Hit a flat metric threshold on every quote in a filtered catalog set."
+  //   Y (total)  = catalog quotes passing the goal's {status, diff, len} filter
+  //                (and, if played==="played", present in the self store).
+  //   X (hit)    = of those, where your best metric value >= target.
+  //   best       = self store entry's wpm/pp; a never-raced quote = 0 (not hit).
+  // Memoized by (catalogEpoch, selfEpoch=rivalStoreEpoch, filterSig) like
+  // computeRivalStandings, since it scans the whole catalog.
+
+  // Does a catalog meta entry pass a target goal's status + diff/len band?
+  // A null diff/len handle = that bound is open (axis end). A CONSTRAINED axis
+  // excludes a quote whose meta is unknown (defensive; catalog rows always carry
+  // d/l). Status: missing `r` is treated as ranked (matches rivalQuoteInScope).
+  function targetQuotePassesMeta(m, gd) {
+    if (!m) return false;
+    if (gd.status === "ranked"   && m.r === false) return false;
+    if (gd.status === "unranked" && m.r !== false) return false;
+    if (gd.diffMin != null || gd.diffMax != null) {
+      const d = Number(m.d);
+      if (!Number.isFinite(d)) return false;
+      if (gd.diffMin != null && d < gd.diffMin) return false;
+      if (gd.diffMax != null && d > gd.diffMax) return false;
+    }
+    if (gd.lenMin != null || gd.lenMax != null) {
+      const l = Number(m.l);
+      if (!Number.isFinite(l)) return false;
+      if (gd.lenMin != null && l < gd.lenMin) return false;
+      if (gd.lenMax != null && l > gd.lenMax) return false;
+    }
+    return true;
+  }
+
+  function targetMetricOf(gd) { return gd && gd.metric === "pp" ? "pp" : "wpm"; }
+
+  // Full tally over the catalog. Returns { hit, total, catalogSynced, selfDone }.
+  function tallyTarget(gd) {
+    const metric = targetMetricOf(gd);
+    const target = Number(gd.target) || 0;
+    const sq = loadRivalStore(RIVAL_SELF_NAME).quotes;
+    const playedOnly = gd.played === "played";
+    let total = 0, hit = 0;
+    for (const qid in quoteCatalog) {
+      if (!targetQuotePassesMeta(quoteCatalog[qid], gd)) continue;
+      const se = sq[qid];
+      if (playedOnly && !se) continue;
+      total++;
+      const best = se ? (Number(se[metric]) || 0) : 0;
+      if (best >= target) hit++;
+    }
+    return {
+      hit, total,
+      catalogSynced: catalogFullySynced(),
+      selfDone: rivalBulkDone(loadRivalStore(RIVAL_SELF_NAME)),
+    };
+  }
+
+  function targetFilterSig(gd) {
+    return [gd.metric, gd.target, gd.status, gd.played,
+            gd.diffMin, gd.diffMax, gd.lenMin, gd.lenMax].join("|");
+  }
+  const targetStandingsCache = new Map(); // goalId → { catEpoch, selfEpoch, sig, result }
+  function computeTargetStanding(gd) {
+    const catEpoch = catalogEpoch, selfEpoch = rivalStoreEpoch, sig = targetFilterSig(gd);
+    const cached = targetStandingsCache.get(gd.id);
+    if (cached && cached.catEpoch === catEpoch && cached.selfEpoch === selfEpoch && cached.sig === sig) {
+      return cached.result;
+    }
+    const result = tallyTarget(gd);
+    targetStandingsCache.set(gd.id, { catEpoch, selfEpoch, sig, result });
+    return result;
+  }
+
+  // The not-yet-hit pool for "Next quote": catalog quotes passing the filter
+  // with best < target, each with its gap (= target - best). Recomputed per
+  // click off the live stores (cheap enough; not cached).
+  function targetCandidates(gd) {
+    const metric = targetMetricOf(gd);
+    const target = Number(gd.target) || 0;
+    const sq = loadRivalStore(RIVAL_SELF_NAME).quotes;
+    const playedOnly = gd.played === "played";
+    const out = [];
+    for (const qid in quoteCatalog) {
+      if (!targetQuotePassesMeta(quoteCatalog[qid], gd)) continue;
+      const se = sq[qid];
+      if (playedOnly && !se) continue;
+      const best = se ? (Number(se[metric]) || 0) : 0;
+      if (best < target) out.push({ qid, gap: target - best });
+    }
+    return out;
+  }
+
+  // Per-goal Next cursor (own localStorage key). Same served-map semantics as
+  // the rival Next cursor: a quote stays parked until the cycle wraps UNLESS
+  // you've improved your score on it since it was served (re-eligible). Keyed by
+  // goal id; GC'd against the live improvement-target goals.
+  const TARGET_NEXT_CURSOR_KEY = "gt-target-next-cursor";
+  function loadTargetNextCursors() {
+    try { const o = JSON.parse(localStorage.getItem(TARGET_NEXT_CURSOR_KEY) || "{}"); return (o && typeof o === "object") ? o : {}; }
+    catch { return {}; }
+  }
+  function saveTargetNextCursors(map) {
+    const live = new Set((goalData.improvement || []).filter(goalIsImprovementTarget).map(g => g.id));
+    for (const id of Object.keys(map)) if (!live.has(id)) delete map[id];
+    try { localStorage.setItem(TARGET_NEXT_CURSOR_KEY, JSON.stringify(map)); } catch {}
+  }
+
+  function onTargetNextClicked(goalId) {
+    const gd = (goalData.improvement || []).find(g => g.id === goalId && goalIsImprovementTarget(g));
+    if (!gd) return;
+    const cands = targetCandidates(gd);
+    if (cands.length === 0) return;
+    const sort = improveNextSort();
+    const liveQid = getCurrentQuoteIdLive();
+
+    let pick;
+    if (sort === "random") {
+      let pool = cands.map(c => c.qid);
+      if (liveQid && pool.length > 1) pool = pool.filter(q => q !== liveQid);
+      pick = pool[Math.floor(Math.random() * pool.length)];
+    } else {
+      cands.sort((a, b) => sort === "biggest" ? b.gap - a.gap : a.gap - b.gap);
+      const sorted = cands.map(c => c.qid);
+      const metric = targetMetricOf(gd);
+      const sq = loadRivalStore(RIVAL_SELF_NAME).quotes;
+      const selfVal = (qid) => (sq[qid] ? (Number(sq[qid][metric]) || 0) : 0);
+      const cursors = loadTargetNextCursors();
+      const cur = cursors[goalId];
+      let served = (cur && cur.sort === sort && cur.served
+        && typeof cur.served === "object" && !Array.isArray(cur.served)) ? cur.served : {};
+      for (const qid of Object.keys(served)) {
+        if (selfVal(qid) > served[qid] + RIVAL_PP_EPS) delete served[qid];
+      }
+      pick = sorted.find(q => q !== liveQid && !Object.prototype.hasOwnProperty.call(served, q));
+      if (!pick) { served = {}; pick = sorted.find(q => q !== liveQid); }
+      if (!pick) return;
+      served[pick] = selfVal(pick);
+      cursors[goalId] = { sort, served };
+      saveTargetNextCursors(cursors);
+    }
+    window.location.href = `https://typegg.io/solo/${encodeURIComponent(pick)}`;
+  }
+
+  // ── Rendering ───────────────────────────────────────────────────────────────────
   // Values are shown with two decimals to match how TypeGG displays WPM/PP.
   function rivalFmt(v) {
     return Number.isFinite(v) ? Number(v).toFixed(2) : "0.00";
@@ -9401,6 +10513,10 @@ async function getExpRankByUsername(username) {
     // leaderboard polls. ensureRivalSync is leader-gated and its fetches
     // self-gate on visibility + the global rival backoff.
     setTimeout(() => ensureRivalSync(), 21_000);
+    // Quote catalog (improvement-Target goals only): one-time full build /
+    // resume, else a delta refresh. Self-gates on a Target goal existing, so
+    // this is a cheap no-op for everyone else. Last in the stagger.
+    setTimeout(() => maybeRunQuoteCatalog(), 24_000);
 
     setInterval(runIfAnyTabVisible(inFlight(updateRankGoals)),       POLL_SLOW_MS);
     setInterval(runIfAnyTabVisible(inFlight(updateExpRankGoals)),    POLL_SLOW_MS);
@@ -9413,6 +10529,7 @@ async function getExpRankByUsername(username) {
     // a quote-finish was missed and stats were already in sync on next render.
     setInterval(runIfAnyTabVisible(evaluateRaceRequirementsGuarded), POLL_SLOW_MS);
     setInterval(runIfAnyTabVisible(evaluateImprovementGuarded), POLL_SLOW_MS);
+    setInterval(runIfAnyTabVisible(runQuoteCatalogDriver), POLL_SLOW_MS);
   }
 
   // ── Channel listener (followers receive stats from leader) ──
@@ -9435,6 +10552,13 @@ async function getExpRankByUsername(username) {
     if (msg.type === 'display-settings-changed') {
       displaySettings = loadDisplaySettings();
       renderAllGoals();
+      return;
+    }
+
+    if (msg.type === 'improve-settings-changed') {
+      // Target Next-quote ordering is read live at click time, so just refresh
+      // the cached value for this tab.
+      improveSettings = loadImproveSettings();
       return;
     }
 
@@ -9483,6 +10607,12 @@ async function getExpRankByUsername(username) {
       return;
     }
 
+    if (msg.type === 'quote-catalog') {
+      // The leader grew / re-synced the quote catalog. Reload + re-render.
+      reloadQuoteCatalogFromDisk();
+      return;
+    }
+
     if (msg.type === 'goals-changed') {
       // Another tab modified goals. Reload from localStorage + re-render.
       const t = msg.goalType;
@@ -9497,7 +10627,7 @@ async function getExpRankByUsername(username) {
           if (t === 'exp')    inFlight(updateExpRankGoals)();
           if (t === 'quotes') inFlight(updateMaxQuotesGoals)();
           if (t === 'races')  evaluateRaceRequirementsGuarded();
-          if (t === 'improvement') evaluateImprovementGuarded();
+          if (t === 'improvement') { evaluateImprovementGuarded(); maybeRunQuoteCatalog(); }
           if (t === 'pp' || t === 'exp') inFlight(updatePlayerGoals)();
           if (t === 'rival')  ensureRivalSync();
         }
@@ -9527,6 +10657,12 @@ async function getExpRankByUsername(username) {
     if (e.key === DISPLAY_SETTINGS_KEY) {
       displaySettings = loadDisplaySettings();
       renderAllGoals();
+      return;
+    }
+
+    // Improve settings change? (Next-quote ordering — read live, no re-render.)
+    if (e.key === IMPROVE_SETTINGS_KEY) {
+      improveSettings = loadImproveSettings();
       return;
     }
 
@@ -9563,7 +10699,7 @@ async function getExpRankByUsername(username) {
           if (type === 'exp')    inFlight(updateExpRankGoals)();
           if (type === 'quotes') inFlight(updateMaxQuotesGoals)();
           if (type === 'races')  evaluateRaceRequirementsGuarded();
-          if (type === 'improvement') evaluateImprovementGuarded();
+          if (type === 'improvement') { evaluateImprovementGuarded(); maybeRunQuoteCatalog(); }
           if (type === 'pp' || type === 'exp') inFlight(updatePlayerGoals)();
           if (type === 'rival')  ensureRivalSync();
         }
