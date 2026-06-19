@@ -524,6 +524,20 @@
   margin-bottom: 7px;
 }
 
+/* Build/sync status, shown on its own line under the wins/count line while
+   a rival store or the quote catalog is still paging in. Smaller and dimmer
+   than the count above it; negative top margin pairs it tightly to that
+   line. Hidden (display:none) once the relevant build is done. */
+.gt-sync-line {
+  font-size: 10px;
+  font-weight: 500;
+  color: #6b7280;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.3px;
+  margin-top: -4px;
+  margin-bottom: 7px;
+}
+
 .gt-rival-next-btn {
   width: 100%;
   border-radius: 7px;
@@ -710,13 +724,15 @@
    target goals. Lives inside .gt-target-row and grows to fill the space to
    the left of the custom input (which keeps its fixed width on the right).
    Buttons inherit flex:1 from .gt-mode-btn so they split evenly. */
-#gt-max-quotes-row {
+#gt-max-quotes-row,
+#gt-max-chars-row {
   display: flex;
   gap: 5px;
   flex: 1;
   min-width: 0;
 }
-#gt-max-quotes-row .gt-mode-btn { white-space: nowrap; padding-left: 4px; padding-right: 4px; }
+#gt-max-quotes-row .gt-mode-btn,
+#gt-max-chars-row .gt-mode-btn { white-space: nowrap; padding-left: 4px; padding-right: 4px; }
 
 #gt-next-rank-btn {
   width: auto; /* Overrides the previous 100% width */

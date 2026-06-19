@@ -402,6 +402,7 @@ function gtMain() {
           <span id="${goalId}-rival-msg" class="gt-rival-msg" style="display:none;"></span>
         </div>
         <div id="${goalId}-rival-wins" class="gt-rival-wins">Wins: …</div>
+        <div id="${goalId}-rival-sync" class="gt-sync-line" style="display:none;"></div>
         <button id="${goalId}-rival-next" class="gt-rival-next-btn" disabled>⚔ Next</button>
       `;
       (parentContent || container.querySelector(".gt-content")).appendChild(section);
@@ -451,6 +452,7 @@ function gtMain() {
           <span id="${goalId}-target-msg" class="gt-rival-msg" style="display:none;"></span>
         </div>
         <div id="${goalId}-target-count" class="gt-rival-wins">quotes \u2026</div>
+        <div id="${goalId}-target-sync" class="gt-sync-line" style="display:none;"></div>
         <button id="${goalId}-target-next" class="gt-rival-next-btn" disabled>\u23ed Next quote</button>
       `;
       (parentContent || container.querySelector(".gt-content")).appendChild(section);
@@ -1448,6 +1450,11 @@ function gtMain() {
             <button id="gt-max-all-btn"      class="gt-mode-btn">⚡ Max all</button>
             <button id="gt-max-ranked-btn"   class="gt-mode-btn">⚡ Max ranked</button>
             <button id="gt-max-unranked-btn" class="gt-mode-btn">⚡ Max unranked</button>
+          </div>
+          <div id="gt-max-chars-row" style="display:none;">
+            <button id="gt-max-chars-all-btn"      class="gt-mode-btn">⚡ Max all</button>
+            <button id="gt-max-chars-ranked-btn"   class="gt-mode-btn">⚡ Max ranked</button>
+            <button id="gt-max-chars-unranked-btn" class="gt-mode-btn">⚡ Max unranked</button>
           </div>
           <div id="gt-next-rank-row" style="display:none; margin-bottom: 6px;">
             <button id="gt-next-rank-btn" class="gt-mode-btn" style="width:100%;">⚡ Next Rank</button>
@@ -3427,10 +3434,15 @@ async function getExpRankByUsername(username) {
   const nextRankToggleBtn  = document.getElementById("gt-next-rank-btn");
 
   const maxQuotesRow       = document.getElementById("gt-max-quotes-row");
+  const maxCharsRow        = document.getElementById("gt-max-chars-row");
   const maxAllBtn          = document.getElementById("gt-max-all-btn");
   const maxRankedBtn       = document.getElementById("gt-max-ranked-btn");
   const maxUnrankedBtn     = document.getElementById("gt-max-unranked-btn");
   const maxQuotesBtns = { all: maxAllBtn, ranked: maxRankedBtn, unranked: maxUnrankedBtn };
+  const maxCharsAllBtn      = document.getElementById("gt-max-chars-all-btn");
+  const maxCharsRankedBtn   = document.getElementById("gt-max-chars-ranked-btn");
+  const maxCharsUnrankedBtn = document.getElementById("gt-max-chars-unranked-btn");
+  const maxCharsBtns = { all: maxCharsAllBtn, ranked: maxCharsRankedBtn, unranked: maxCharsUnrankedBtn };
 
   // Rival-mode controls (type=rival).
   const rivalMetricRow  = document.getElementById("gt-rival-metric-row");
@@ -3496,6 +3508,8 @@ async function getExpRankByUsername(username) {
   let maxQuotesKind = null;  // "ranked" | "unranked" | "all" when active
   let maxQuotesFetched = null; // total quotes count for the selected kind
   let maxQuotesBaseline = null; // user's currently-typed count for the selected kind (becomes the goal baseline)
+  let maxCharsMode = false; // "max" toggle for chars (distinct-quote chars; any kind active)
+  let maxCharsKind = null;  // "ranked" | "unranked" | "all" when active
 
   function formatPreset(n) {
     if (n >= 1000) return (n/1000)%1===0 ? `${n/1000}k` : `${(n/1000).toFixed(1)}k`;
@@ -3588,6 +3602,12 @@ async function getExpRankByUsername(username) {
   // fetch the ~14k-quote catalog (nor mark self "wanted" for it) unless one does.
   function haveImprovementTargetGoals() {
     return (goalData.improvement || []).some(goalIsImprovementTarget);
+  }
+  // Max-chars goals read the self store (Σ length of raced quotes), so they need
+  // the same finish-time self-store sync as rival / improvement-target goals --
+  // otherwise their gain pill lags the stat-driven Max-quotes pill by a fetch.
+  function haveMaxCharsGoals() {
+    return (goalData.chars || []).some(g => g && g.maxChars);
   }
 
   // Does this goal need the racesEndpoint (for window math or req eval)?
@@ -3813,6 +3833,7 @@ async function getExpRankByUsername(username) {
     // count fetch (see renderPresets). Don't let the generic target-value
     // checks below re-disable it — selectedValue is intentionally null here.
     if (selectedType === "quotes" && selectedMode === "target" && maxQuotesMode && maxQuotesKind) return;
+    if (selectedType === "chars" && selectedMode === "target" && maxCharsMode && maxCharsKind) return;
     if (selectedMode === "rank") {
       // If Next Rank is toggled, allow setting immediately unless already #1
       if (nextRankMode) {
@@ -3890,6 +3911,7 @@ async function getExpRankByUsername(username) {
       customInput.placeholder   = "Username";
       nextRankRow.style.display = "none";
       maxQuotesRow.style.display = "none";
+      maxCharsRow.style.display = "none";
       avgWindowRow.style.display = "none";
       if (rivalAddBtn) { rivalAddBtn.style.display = rivalMultiMode ? "" : "none"; rivalAddBtn.disabled = true; }
       customInput.classList.add("gt-custom-input--grow"); // wider field for usernames
@@ -3918,6 +3940,7 @@ async function getExpRankByUsername(username) {
       presetsEl.innerHTML = "";
       nextRankRow.style.display = "none";
       maxQuotesRow.style.display = "none";
+      maxCharsRow.style.display = "none";
       modeHint.style.display = "none";
       return;
     }
@@ -3929,6 +3952,7 @@ async function getExpRankByUsername(username) {
     customInput.removeAttribute("step");
     // Hidden by default; only the quotes+target branch turns it on.
     maxQuotesRow.style.display = "none";
+    maxCharsRow.style.display = "none";
     // Presets visible by default; the quotes+target branch hides them (they'd
     // otherwise claim flex space next to the max-quotes button row).
     presetsEl.style.display = "";
@@ -4122,6 +4146,35 @@ async function getExpRankByUsername(username) {
         customInput.style.display = "";
         updateModeHint();
       }
+    } else if (isTargetMode && selectedType === "chars") {
+      // ── Max chars mode (chars + target) ──────────────
+      // Distinct-quote CHARACTER totals from the catalog (Σ length over the
+      // quotes you've raced vs over every quote in the scope). The three ⚡
+      // buttons mirror Max quotes; the custom input stays for a plain
+      // cumulative chars target when no kind is active.
+      customInput.type          = "number";
+      amountLabel.textContent   = "Target chars";
+      customInput.placeholder   = "Custom";
+      customInput.style.display = "";
+      nextRankRow.style.display = "none";
+      maxCharsRow.style.display = "flex";
+      presetsEl.innerHTML       = "";
+      for (const [k, b] of Object.entries(maxCharsBtns)) {
+        b.classList.toggle("active", maxCharsMode && maxCharsKind === k);
+      }
+      if (maxCharsMode && maxCharsKind) {
+        presetsEl.style.display = "none";
+        const pv = previewMaxChars(maxCharsKind);
+        modeHint.textContent = pv.ready
+          ? `${pv.typed.toLocaleString()} / ${pv.total.toLocaleString()} unique-quote chars`
+          : "Catalog still syncing — the goal fills in once it's ready";
+        modeHint.className     = "gt-mode-hint";
+        modeHint.style.display = "block";
+        confirmBtn.disabled    = false;
+      } else {
+        presetsEl.style.display = "none";
+        updateModeHint();
+      }
     } else {
       customInput.style.display = "";
       customInput.type          = "number";
@@ -4227,6 +4280,11 @@ async function getExpRankByUsername(username) {
       maxQuotesFetched  = null;
       maxQuotesBaseline = null;
       for (const btn of Object.values(maxQuotesBtns)) btn.classList.remove("active");
+    }
+    if (selectedType === "chars" && selectedMode === "target" && maxCharsMode && customInput.value !== "") {
+      maxCharsMode = false;
+      maxCharsKind = null;
+      for (const btn of Object.values(maxCharsBtns)) btn.classList.remove("active");
     }
 
     if (selectedMode === "rank") {
@@ -4343,6 +4401,23 @@ async function getExpRankByUsername(username) {
       }
       maxQuotesFetched  = null;
       maxQuotesBaseline = null;
+      customInput.value = "";
+      renderPresets();
+    });
+  }
+
+  // Max-chars kind buttons (chars + target mode). Same toggle behaviour as the
+  // Max-quotes buttons; no API fetch -- totals come from the catalog at render.
+  for (const [kind, btn] of Object.entries(maxCharsBtns)) {
+    btn.addEventListener("click", () => {
+      if (selectedMode !== "target" || selectedType !== "chars") return;
+      if (maxCharsMode && maxCharsKind === kind) {
+        maxCharsMode = false;
+        maxCharsKind = null;
+      } else {
+        maxCharsMode = true;
+        maxCharsKind = kind;
+      }
       customInput.value = "";
       renderPresets();
     });
@@ -4956,6 +5031,7 @@ async function getExpRankByUsername(username) {
     customInput.classList.remove("gt-custom-input--grow");
     nextRankRow.style.display = "none";
     maxQuotesRow.style.display = "none";
+    maxCharsRow.style.display = "none";
     avgWindowRow.style.display = "none";
     presetsEl.style.display = "";
     amountLabel.textContent = `Target ${lbl}`;
@@ -5027,6 +5103,7 @@ async function getExpRankByUsername(username) {
     selectedType = "exp"; selectedRec = "none"; selectedMode = "gain"; selectedFilter = "all";
     rankFetchedPp = null; rankFetchedRank = null; nextRankMode = false;
     maxQuotesMode = false; maxQuotesKind = null; maxQuotesFetched = null; maxQuotesBaseline = null;
+    maxCharsMode = false; maxCharsKind = null;
     // Rival defaults: metric=wpm, scope from the global setting, no resolved username yet.
     selectedRivalMetric = "wpm"; rivalFetchedName = null; clearTimeout(rivalDebounce);
     rivalMultiMode = false; selectedRivalList = []; rivalPendingName = null;
@@ -5047,6 +5124,7 @@ async function getExpRankByUsername(username) {
     improvementBtn.style.display = "none";
     nextRankRow.style.display = "none";
     maxQuotesRow.style.display = "none";
+    maxCharsRow.style.display = "none";
     filterRow.style.display = "none"; // hide filter row initially (only show for races)
     reqRow.style.display = "none";    // hide req row initially (only show for races + gain)
     avgTargetRow.style.display = "none"; // hide avg rows initially (only show for races + average)
@@ -5062,6 +5140,7 @@ async function getExpRankByUsername(username) {
     overlay.classList.remove("open");
     selectedValue = null; rankFetchedPp = null; rankFetchedRank = null; nextRankMode = false;
     maxQuotesMode = false; maxQuotesKind = null; maxQuotesFetched = null; maxQuotesBaseline = null;
+    maxCharsMode = false; maxCharsKind = null;
     rivalFetchedName = null; rivalPendingName = null; clearTimeout(rivalDebounce);
     resetRequirementsUI();
     resetAverageUI();
@@ -5348,6 +5427,8 @@ async function getExpRankByUsername(username) {
       let isMaxQuotes = false;
       let maxQuotesBaselineOverride = null; // kind-appropriate typed count for unranked/all
       let maxQuotesKindForGoal = null;      // captured kind written onto the goal
+      let isMaxChars = false;
+      let maxCharsKindForGoal = null;
       
       if (selectedMode === "rank") {
         if (rankFetchedRank == null) return;
@@ -5408,6 +5489,12 @@ async function getExpRankByUsername(username) {
           maxQuotesKindForGoal      = kind;
           gainTarget = Math.max(0, maxQuotesFetched - baseline);
           isMaxQuotes = true;
+        } else if (selectedType === "chars" && maxCharsMode && maxCharsKind) {
+          // Max chars: a computed catalog goal (no cumulative target). Store the
+          // kind; the render tallies Σ length live off the catalog + self store.
+          isMaxChars = true;
+          maxCharsKindForGoal = maxCharsKind;
+          gainTarget = 0;
         } else {
           // Regular target mode
           if (selectedValue == null || selectedValue <= currentVal) return;
@@ -5484,6 +5571,8 @@ async function getExpRankByUsername(username) {
         targetUsername: selectedMode === "player" ? playerFetchedName : undefined,
         maxQuotes: isMaxQuotes || undefined,
         maxQuotesKind: maxQuotesKindForGoal || undefined,
+        maxChars: isMaxChars || undefined,
+        maxCharsKind: maxCharsKindForGoal || undefined,
         filter: (selectedType === "races" || selectedType === "improvement") ? selectedFilter : undefined,
         targetLoaded: selectedMode === "rank" ? false : true, // false for rank goals — target is loaded async by updateRankGoals/updateExpRankGoals
         [cfg.baselineKey]: maxQuotesBaselineOverride != null ? maxQuotesBaselineOverride : currentVal,
@@ -6105,13 +6194,21 @@ async function getExpRankByUsername(username) {
     // ── Count sub-line: Quotes ≥ N METRIC: X / Y (filters shown above) ──
     const { hit, total, catalogSynced, selfDone } = computeTargetStanding(gd);
     const settled = catalogSynced && selfDone;
+    // Combined catalog + self-store sync progress: one bar that only climbs.
+    const syncPct = targetSyncPercent();
+    const syncLbl = syncPct == null ? "syncing\u2026" : `syncing\u2026 (${syncPct}%)`;
     const countEl = document.getElementById(`${goalId}-target-count`);
     if (countEl) {
       const xy = (total === 0 && !catalogSynced)
-        ? "syncing\u2026"
+        ? "\u2026"
         : `${hit.toLocaleString()} / ${total.toLocaleString()}`;
-      countEl.textContent = `Quotes \u2265 ${target} ${metricLbl}: ${xy}`
-        + (settled || (total === 0 && !catalogSynced) ? "" : "  \u00b7 syncing\u2026");
+      countEl.textContent = `Quotes \u2265 ${target} ${metricLbl}: ${xy}`;
+    }
+    // Build status on its own muted line below the count (hidden once settled).
+    const syncEl = document.getElementById(`${goalId}-target-sync`);
+    if (syncEl) {
+      syncEl.textContent = settled ? "" : syncLbl;
+      syncEl.style.display = settled ? "none" : "block";
     }
 
     // ── Next button ──
@@ -6128,7 +6225,7 @@ async function getExpRankByUsername(username) {
         nextBtn.textContent = "No quotes match filters";
         nextBtn.disabled = true;
       } else {
-        nextBtn.textContent = settled ? "\u23ed Next quote" : "\u23ed Next quote (syncing\u2026)";
+        nextBtn.textContent = "\u23ed Next quote";
         nextBtn.disabled = false;
       }
     }
@@ -6280,6 +6377,115 @@ async function getExpRankByUsername(username) {
     return out;
   }
 
+  // ── Max-chars goals (chars + target) ─────────────
+  // Distinct-quote CHARACTER totals over the catalog -- the char-weighted
+  // analog of Max quotes: total = Σ length of every quote in scope; typed =
+  // Σ length of the ones you've raced (present in the self store). Lengths are
+  // already in the catalog (`l`) so there's NO extra fetch -- it rides the
+  // catalog driver and recomputes whenever the catalog or self store changes
+  // (epoch-memoized, like computeTargetStanding).
+  function maxCharsScopeOk(r, kind) {
+    if (kind === "ranked")   return r !== false;
+    if (kind === "unranked") return r === false;
+    return true; // "all"
+  }
+  function tallyMaxChars(kind) {
+    const sq = loadRivalStore(RIVAL_SELF_NAME).quotes;
+    let total = 0, typed = 0;
+    for (const qid in quoteCatalog) {
+      const m = quoteCatalog[qid];
+      if (!maxCharsScopeOk(m.r, kind)) continue;
+      const len = Number(m.l);
+      if (!Number.isFinite(len) || len <= 0) continue;
+      total += len;
+      if (sq[qid]) typed += len;
+    }
+    return { typed, total };
+  }
+  function maxCharsReady() {
+    return catalogFullySynced() && rivalBulkDone(loadRivalStore(RIVAL_SELF_NAME));
+  }
+  // Modal preview for the creation flow.
+  function previewMaxChars(kind) {
+    const { typed, total } = tallyMaxChars(kind);
+    return { typed, total, ready: maxCharsReady() };
+  }
+  const maxCharsCache = new Map(); // goalId -> { catEpoch, selfEpoch, kind, typed, total }
+  function computeMaxChars(gd) {
+    const kind = gd.maxCharsKind || "all";
+    const catEpoch = catalogEpoch, selfEpoch = rivalStoreEpoch;
+    const c = maxCharsCache.get(gd.id);
+    if (c && c.catEpoch === catEpoch && c.selfEpoch === selfEpoch && c.kind === kind) return c;
+    const { typed, total } = tallyMaxChars(kind);
+    const res = { catEpoch, selfEpoch, kind, typed, total };
+    maxCharsCache.set(gd.id, res);
+    return res;
+  }
+  // Render a max-chars goal into the standard gain-row + progress-bar layout --
+  // visually identical to a Max quotes goal, just chars instead of a count.
+  function updateMaxCharsGoalSection(goalId, type, cfg, gd) {
+    const bestRow   = document.getElementById(`${goalId}-avg-best-row`);
+    const liveRow   = document.getElementById(`${goalId}-avg-live-row`);
+    const bottomRow = document.getElementById(`${goalId}-avg-bottom-row`);
+    if (bestRow)   bestRow.style.display   = "none";
+    if (liveRow)   liveRow.style.display   = "none";
+    if (bottomRow) bottomRow.style.display = "none";
+    const gainRowEl = document.querySelector(`#${goalId}-goal-section .gt-gain-row`);
+    const progBarEl = document.querySelector(`#${goalId}-goal-section .gt-progress-bar`);
+    if (gainRowEl) gainRowEl.style.display = "";
+    if (progBarEl) progBarEl.style.display = "";
+
+    const kind   = gd.maxCharsKind || "all";
+    const suffix = kind === "unranked" ? "max unranked" : kind === "all" ? "max all" : "max ranked";
+    document.getElementById(`${goalId}-label`).textContent = `${cfg.label} → ${suffix}`;
+
+    const gainTextEl = document.getElementById(`${goalId}-gain-text`);
+    const fillEl     = document.getElementById(`${goalId}-progress-fill`);
+    const doneBadge  = document.getElementById(`${goalId}-done-badge`);
+
+    let isComplete = false;
+    if (!maxCharsReady()) {
+      const syncPct = targetSyncPercent();
+      if (gainTextEl) gainTextEl.textContent = syncPct == null ? "Syncing\u2026" : `Syncing\u2026 (${syncPct}%)`;
+      if (fillEl) { fillEl.style.width = `${syncPct == null ? 0 : syncPct}%`; fillEl.style.background = "#60a5fa"; }
+    } else {
+      const { typed, total } = computeMaxChars(gd);
+      const pct = total > 0 ? Math.min(Math.floor((typed / total) * 100), 100) : 0;
+      isComplete = total > 0 && typed >= total;
+      if (gainTextEl) gainTextEl.textContent = `${Math.round(typed).toLocaleString()} / ${Math.round(total).toLocaleString()}`;
+      if (fillEl) { fillEl.style.width = `${pct}%`; fillEl.style.background = isComplete ? "#4ade80" : "#60a5fa"; }
+      // Gain pill: +N pop when distinct-quote chars climb (a new in-scope quote
+      // raced). Mirrors the Max-quotes indicator; reuses prevGainMap (cleared on
+      // goal removal). Skip the first ready render (prev == null) so the goal
+      // doesn't flash its whole total when it first settles.
+      const prev = prevGainMap[goalId];
+      if (prev != null && typed > prev) {
+        const delta = Math.round(typed - prev);
+        if (delta > 0) {
+          const existing = document.getElementById(`${goalId}-gain-indicator`);
+          if (existing) existing.remove();
+          const indicator = document.createElement("span");
+          indicator.id = `${goalId}-gain-indicator`;
+          indicator.className = "gt-gain-indicator";
+          indicator.textContent = `+${delta.toLocaleString()}`;
+          const gainRow = gainTextEl ? gainTextEl.parentElement : null;
+          if (gainRow) gainRow.appendChild(indicator);
+          indicator.addEventListener("animationend", () => indicator.remove());
+        }
+      }
+      prevGainMap[goalId] = typed;
+    }
+    if (doneBadge) doneBadge.style.display = isComplete ? "inline" : "none";
+
+    // Max goals aren't recurring -- keep the recurrence/streak/countdown hidden.
+    const recBadge    = document.getElementById(`${goalId}-rec-badge`);
+    const streakEl    = document.getElementById(`${goalId}-streak`);
+    const countdownEl = document.getElementById(`${goalId}-countdown`);
+    if (recBadge)    recBadge.style.display    = "none";
+    if (streakEl)    streakEl.style.display    = "none";
+    if (countdownEl) countdownEl.style.display = "none";
+  }
+
   function renderAllGoals() {
     if (applyLoginGate()) return; // logged out → show panel, skip goal rendering
     const statValues = {
@@ -6354,6 +6560,9 @@ async function getExpRankByUsername(username) {
           } else {
             currentVal = currentStats.quotes; // ranked (and legacy)
           }
+        }
+        if (type === "chars" && gd.maxChars) {
+          currentVal = currentStats.chars ?? 0; // non-null so the goal reaches its section; value unused
         }
 
         // Skip if stat unavailable for this specific goal
@@ -6484,6 +6693,10 @@ async function getExpRankByUsername(username) {
         // catalog-driven renderer and share no gain-delta machinery.
         if (isTarget) {
           updateTargetGoalSection(goalId, type, cfg, gd);
+          continue;
+        }
+        if (type === "chars" && gd.maxChars) {
+          updateMaxCharsGoalSection(goalId, type, cfg, gd);
           continue;
         }
 
@@ -6795,7 +7008,7 @@ async function getExpRankByUsername(username) {
       // immediately and let the rival card catch up when the fetch lands (the
       // old decoupled behaviour). renderAllGoals() reads the live store, so in
       // the synced case it shows the freshly merged rival bests too.
-      if (racesChanged && ((goalData.rival || []).length > 0 || haveImprovementTargetGoals())) {
+      if (racesChanged && ((goalData.rival || []).length > 0 || haveImprovementTargetGoals() || haveMaxCharsGoals())) {
         const gtPerfSession = gtPerf.startRivalLag(gtStatsFetchMs); // [GT-PERF] anchor: rival fetch kicked
         // selfRender=false → the caller owns the render in this path.
         const maintainPromise = maintainSelfStoreFromRaces(gtPerfSession, false)
@@ -7261,7 +7474,7 @@ async function getExpRankByUsername(username) {
   // never fetch 14k quotes for users without one.
   let quoteCatalog = Object.create(null);   // qid → { d, l, r }
   // Persisted sync state (resume cursor + counts). phase: "idle"|"bulk"|"done".
-  let quoteCatalogMeta = { totalCount: 0, totalPages: null, nextPage: 1, phase: "idle", lastFullSync: null };
+  let quoteCatalogMeta = { totalCount: 0, totalPages: null, nextPage: 1, phase: "idle", lastFullSync: null, lastReconcile: null };
   let catalogReady = false;     // hydrated from IDB? (mirrors rivalIdbReady)
   let catalogBulkActive = false; // exactly one catalog driver runs at a time
   // Monotonic version bumped whenever the catalog changes — the render/eval
@@ -7285,12 +7498,20 @@ async function getExpRankByUsername(username) {
   // Quote-catalog IDB records (same DB/store as the rival data — reuses idbGet/
   // idbPut). The catalog map and its sync/count meta are two separate records.
   const CATALOG_KEY        = "gt-quote-catalog";        // qid → { d, l, r }
-  const CATALOG_META_KEY   = "gt-quote-catalog-meta";   // { totalCount, totalPages, nextPage, phase, lastFullSync }
+  const CATALOG_META_KEY   = "gt-quote-catalog-meta";   // { totalCount, totalPages, nextPage, phase, lastFullSync, lastReconcile }
   const CATALOG_PAGE_SIZE  = 250;   // same as RIVAL_PAGE_SIZE — 1000 flakes server-side
   // Delta refresh pages newest-first until it reaches an already-stored quote.
   // This caps a pathological run (e.g. if the created-DESC sort assumption is
   // wrong); exceeding it forces a full re-sync. ~250×40 = 10k newest quotes.
   const CATALOG_DELTA_MAX_PAGES = 40;
+  // Catalog reconcile (post-build maintenance): a cheap count-probe (site ranked
+  // + unranked vs the live catalog) triggers a full re-page when existing quotes
+  // were ranked-flipped or deleted -- changes the append-only delta can't see.
+  // The probe is throttled by lastReconcile so a persistent mismatch can't loop;
+  // a low-frequency unconditional sweep is the safety net for offsetting changes
+  // (a flip + its opposite net the same counts, so the count-probe is blind to it).
+  const RECONCILE_MIN_INTERVAL_MS = 60 * 60 * 1000;       // 1 h between triggered reconciles
+  const RECONCILE_BACKSTOP_MS     = 24 * 60 * 60 * 1000;  // daily unconditional sweep (count-blind net)
   // Fallback slider bounds before the catalog has synced (the real axis is
   // derived from the catalog once present). Difficulty is a small float scale;
   // length is char count. Mirrors the rival axis fallbacks but catalog-scoped.
@@ -7375,6 +7596,10 @@ async function getExpRankByUsername(username) {
     for (const qid in q) {
       const e = q[qid];
       if (e == null) { delete q[qid]; continue; }
+      // Self-heal phantom entries: drop only those with NEITHER a positive PP
+      // nor a positive WPM (a DNF / null row). A valid unranked result has PP 0
+      // but a real WPM, so it's kept -- gating on PP alone dropped all unranked.
+      if (!((Number(e.pp) > 0) || (Number(e.wpm) > 0))) { delete q[qid]; continue; }
       if (e.r !== undefined || e.d !== undefined || e.l !== undefined) {
         rivalMetaMerge(qid, e.r, e.d, e.l);
         q[qid] = { wpm: e.wpm, pp: e.pp };
@@ -7395,16 +7620,18 @@ async function getExpRankByUsername(username) {
   //   v2: single status=any build (ranked + unranked + `r` in one stream).
   // A store below the current version gets a one-time re-bulk (backfillMeta-
   // IfNeeded) under status=any, which captures everything v2 needs at once.
-  const RIVAL_META_V = 2;
+  const RIVAL_META_V = 3;
   function freshRivalStore() {
     return { quotes: {}, fetch: freshRivalFetch(), metaV: RIVAL_META_V, lastSync: null };
   }
-  // Pre-v2 stores were built ranked-only (or as two separate ranked/unranked
-  // streams). Re-bulk ONCE under status=any so a single pass backfills the
-  // unranked quotes plus each entry's d/l/r, then drop the obsolete unranked
-  // cursor. Existing quotes stay (merges are idempotent); the user just sees the
-  // normal "syncing…" state until the re-bulk finishes, after which metaV is
-  // stamped current (fetchOneRivalBulkPage) and this never fires again.
+  // Re-bulk ONCE under status=any when a store predates the current schema:
+  //  - v1 stores were ranked-only (or two ranked/unranked streams).
+  //  - v2 stores DID page status=any, but the old rivalMergeEntry rejected every
+  //    pp<=0 row, so unranked results (0 PP) never made it in -- v3 re-bulks them
+  //    under the fixed merge guard.
+  // Existing quotes stay (merges are idempotent); the user just sees the normal
+  // "syncing…" state until the re-bulk finishes, after which metaV is stamped
+  // current and this never fires again.
   function backfillMetaIfNeeded(store) {
     if (store.metaV === RIVAL_META_V) return;
     store.fetch = freshRivalFetch(); // re-page from the start under status=any
@@ -7543,6 +7770,7 @@ async function getExpRankByUsername(username) {
               nextPage:    Number(value.nextPage) || 1,
               phase:       (value.phase === "bulk" || value.phase === "done") ? value.phase : "idle",
               lastFullSync: value.lastFullSync || null,
+              lastReconcile: value.lastReconcile || null,
             };
           }
           continue;
@@ -7591,6 +7819,43 @@ async function getExpRankByUsername(username) {
     return !!(store && store.fetch && store.fetch.phase === "done");
   }
 
+  // Aggregate bulk-build progress (integer 0..99) across THIS goal's rival
+  // stores while any are still paging; 0 while syncing before any page count is
+  // known (show "(0%)" rather than a bare hint), and null once they're all done
+  // or when there are no rivals -- so the "syncing..." hints can read "(N%)"
+  // and tick up as pages load. Work is measured in pages
+  // (fetch.nextPage / fetch.totalPages); a store whose page count isn't known
+  // yet (page 1 in flight) contributes to neither side. The self store has no
+  // comparable page count, so it is not folded in: when only the self store is
+  // left to finish, every rival store reads done and this returns null.
+  function rivalSyncPercent(gd) {
+    const names = goalRivalNames(gd);
+    if (!names.length) return null;
+    let donePages = 0, totalPages = 0, known = false, anyPending = false;
+    // Self store is a leg too: a rival goal's wins depend on YOUR PBs as much as
+    // the rival's, so the bar spans both (self + rival pages) -- otherwise it
+    // would read "done" and drop the % while the self store is still paging in.
+    // A finished leg counts full/full, so the combined bar only ever climbs.
+    for (const n of [RIVAL_SELF_NAME, ...names]) {
+      const f = loadRivalStore(n).fetch || {};
+      const tp = Number(f.totalPages);
+      const haveTp = Number.isFinite(tp) && tp > 0;
+      if (f.phase === "done") {
+        if (haveTp) { donePages += tp; totalPages += tp; known = true; }
+        continue;
+      }
+      anyPending = true;
+      if (haveTp) {
+        known = true;
+        totalPages += tp;
+        donePages += Math.max(0, Math.min(tp, (Number(f.nextPage) || 1) - 1));
+      }
+    }
+    if (!anyPending) return null;            // all rival stores done
+    if (!known || totalPages <= 0) return 0;    // syncing, nothing measurable yet -> 0%
+    return Math.max(0, Math.min(99, Math.floor((donePages / totalPages) * 100)));
+  }
+
   // PP-keyed idempotent merge. Returns true iff anything changed (store entry OR
   // shared quote-meta). The per-store entry is just `{ wpm, pp }`; the quote's
   // ranked/difficulty/length go to the shared meta table (identical across all
@@ -7600,14 +7865,23 @@ async function getExpRankByUsername(username) {
   function rivalMergeEntry(store, quoteId, wpm, pp, ranked, d, l) {
     if (!quoteId) return false;
     const p = Number(pp);
-    if (!Number.isFinite(p)) return false;
+    const w = Number(wpm);
+    // A real completion is either a ranked result (PP > 0) or an UNRANKED result
+    // (ranked === false) with a real WPM. Unranked quotes award 0 PP, so gating
+    // on PP alone wrongly dropped every unranked result (cause of "0 unranked
+    // chars typed"). Ranked / untagged rows still require PP > 0 -- that keeps
+    // the phantom DNF / null-pp guard (a DNF coerces to pp 0 via Number(null)).
+    const realRanked   = Number.isFinite(p) && p > 0;
+    const realUnranked = ranked === false && Number.isFinite(w) && w > 0;
+    if (!(realRanked || realUnranked)) return false;
     const metaTouched = rivalMetaMerge(quoteId, ranked, d, l);
     const cur = store.quotes[quoteId];
-    if (cur && !(p > cur.pp + RIVAL_PP_EPS)) {
-      return metaTouched; // no PP improvement; entry unchanged
+    // Ranked entries ratchet their best on PP; unranked (PP always 0) on WPM.
+    if (cur) {
+      const better = realRanked ? (p > cur.pp + RIVAL_PP_EPS) : (w > (cur.wpm || 0));
+      if (!better) return metaTouched; // no improvement; entry unchanged
     }
-    const w = Number(wpm);
-    store.quotes[quoteId] = { wpm: Number.isFinite(w) ? w : (cur ? cur.wpm : 0), pp: p };
+    store.quotes[quoteId] = { wpm: Number.isFinite(w) ? w : (cur ? cur.wpm : 0), pp: realRanked ? p : 0 };
     return true;
   }
   function entryFromQuoteRecord(q) {
@@ -8202,14 +8476,14 @@ async function getExpRankByUsername(username) {
   }
 
   // ══════════════════════════════════════════════════════════════
-  // Quote catalog: fetch + sync (leader-only; built only for Target goals)
+  // Quote catalog: fetch + sync (leader-only; prefetched for any logged-in user)
   // ══════════════════════════════════════════════════════════════
   // Mirrors the rival bulk subsystem: one paged build (status=any, 250/page)
   // through the shared gtApiFetch backoff gate, persisted-per-page so a
   // pause/lost-leadership resumes from the stored cursor, then an ongoing
-  // newest-first delta refresh. Everything is gated on at least one
-  // improvement-Target goal existing (haveImprovementTargetGoals) so users
-  // without one never trigger a 14k-quote fetch.
+  // newest-first delta refresh. The build is prefetched for any logged-in user
+  // (no longer gated on a Target goal) so the catalog is ready ahead of time --
+  // useful for Target goals and any future catalog-backed feature.
 
   // Fetch ONE catalog page. status=any so we get ranked + unranked together and
   // read each row's own `ranked` flag (the API default is ranked-only). Quotes
@@ -8275,14 +8549,45 @@ async function getExpRankByUsername(username) {
     return catalogReady && quoteCatalogMeta.phase === "done";
   }
 
+  // Combined sync progress for a Target goal as an integer 0..99, spanning the
+  // TWO builds it depends on -- the shared quote catalog and your own self-race
+  // store -- measured in pages so they sum into one bar. A finished leg counts
+  // its full page span on BOTH sides, so the bar only ever climbs: it never
+  // resets to 0 when one leg finishes while the other is still paging. Returns
+  // 0 while syncing before any page count is known, and null once BOTH are done
+  // (the caller hides the line on `settled`, so null is just belt-and-braces).
+  function targetSyncPercent() {
+    let donePages = 0, totalPages = 0, known = false, anyPending = false;
+    const addLeg = (done, tp, nextPage) => {
+      if (!done) anyPending = true;
+      if (tp > 0) {
+        known = true;
+        totalPages += tp;
+        donePages += done ? tp : Math.max(0, Math.min(tp, (Number(nextPage) || 1) - 1));
+      }
+    };
+    // Catalog leg (page cursor on quoteCatalogMeta).
+    addLeg(catalogFullySynced(), Number(quoteCatalogMeta.totalPages) || 0, quoteCatalogMeta.nextPage);
+    // Self-race store leg (same page cursor as any rival store).
+    const selfStore = loadRivalStore(RIVAL_SELF_NAME);
+    const sf = selfStore.fetch || {};
+    addLeg(rivalBulkDone(selfStore), Number(sf.totalPages) || 0, sf.nextPage);
+
+    if (!anyPending) return null;            // both legs done -> settled
+    if (!known || totalPages <= 0) return 0; // syncing, nothing measurable yet
+    return Math.max(0, Math.min(99, Math.floor((donePages / totalPages) * 100)));
+  }
+
+
   // Full build: page 1..totalPages at 250/page, persisting the resume cursor
   // every page (cheap next to multi-second page latency). Runs to completion in
   // one call; a throttle / lost leadership breaks the loop and the cursor + the
-  // 5-min poll resume it. Like the rival bulk, no internal visibility re-check —
-  // the START is visibility-gated by maybeRunQuoteCatalog.
+  // 5-min poll resume it. Like the rival bulk, this runs even while every tab
+  // is hidden (no visibility gate on the build); the cursor resumes after any
+  // browser-level freeze of a long-hidden tab.
   async function runCatalogFullSync() {
     let lastRender = 0, firstFetch = true;
-    while (isLeader && !apiThrottled() && haveImprovementTargetGoals()) {
+    while (isLeader && !apiThrottled() && isLoggedIn()) {
       if (!firstFetch) {
         await new Promise(r => setTimeout(r, RIVAL_PAGE_DELAY_MS));
         if (!isLeader || apiThrottled()) break;
@@ -8316,17 +8621,26 @@ async function getExpRankByUsername(username) {
     }
   }
 
-  // Delta refresh (post-build): a cheap perPage=1 probe reads totalCount; if it
-  // grew, page newest-first until a page is entirely already-known, then stop.
-  // ⚠ ASSUMES the default sort is `created` DESC (page 1 = newest) — VERIFY in
-  // the live build. The page cap is the safety net: exceeding it without
-  // reaching known data forces a full re-sync (covers a wrong sort assumption).
+  // Delta refresh (post-build): a cheap perPage=1 probe reads the newest quote +
+  // totalCount. Page newest-first until a page is entirely already-known when
+  // EITHER the count grew OR the newest quote's qid is unknown (the latter also
+  // catches a net-zero add+delete the count alone would hide). Default sort is
+  // created-DESC (page 1 = newest), confirmed against the live endpoint. The page
+  // cap is the safety net: exceeding it without reaching known data forces a full
+  // re-sync.
   async function runCatalogDeltaRefresh() {
     let probe;
     try { probe = await fetchQuoteCatalogPage({ page: 1, perPage: 1 }); }
     catch (e) { return; }
     const serverCount = probe.totalCount;
-    if (!(serverCount > (quoteCatalogMeta.totalCount || 0))) {
+    // Default sort is created-DESC, so quotes[0] is the newest quote; if its qid
+    // isn't in the catalog there's been an addition even when the count didn't
+    // grow (one added + one deleted in the same window nets zero). Page anyway so
+    // the newcomer is folded in -- the resulting catalog overshoot then trips
+    // maybeReconcileCatalog into evicting the deleted ghost.
+    const newest = probe.quotes[0];
+    const newestUnknown = !!(newest && newest.quoteId && !(String(newest.quoteId) in quoteCatalog));
+    if (!(serverCount > (quoteCatalogMeta.totalCount || 0)) && !newestUnknown) {
       if (serverCount && serverCount !== quoteCatalogMeta.totalCount) {
         quoteCatalogMeta.totalCount = serverCount; // shrank (deletions) — just record
         saveQuoteCatalog({ broadcast: false });
@@ -8365,32 +8679,105 @@ async function getExpRankByUsername(username) {
     }
   }
 
+  // Full reconcile (rare): re-page ALL quotes (status=any) over the existing
+  // catalog. mergeCatalogQuote heals ranked-flips for free -- a re-delivered
+  // quote whose `ranked` changed overwrites its entry. We also record every qid
+  // seen across the whole pass and, ONLY after a COMPLETE pass, evict catalog
+  // entries never seen -- those are deletions. A partial/aborted pass (lost
+  // leadership, throttle, fetch error) evicts NOTHING (never wipe the catalog on
+  // a half-finished sweep). Stamps lastReconcile on a complete pass so the probe
+  // and the daily backstop throttle off it.
+  async function runCatalogReconcile() {
+    const seen = new Set();
+    let page = 1, firstFetch = true, changed = false, complete = false;
+    while (isLeader && !apiThrottled() && isLoggedIn()) {
+      if (!firstFetch) {
+        await new Promise(r => setTimeout(r, RIVAL_PAGE_DELAY_MS));
+        if (!isLeader || apiThrottled()) break;
+      }
+      firstFetch = false;
+      let data;
+      try { data = await fetchQuoteCatalogPage({ page }); }
+      catch (e) { break; } // aborted mid-pass -> evict nothing
+      for (const q of data.quotes) {
+        if (q && q.quoteId) seen.add(String(q.quoteId));
+        if (mergeCatalogQuote(q)) changed = true;
+      }
+      quoteCatalogMeta.totalCount = data.totalCount;
+      quoteCatalogMeta.totalPages = data.totalPages;
+      if (data.totalPages === 0 || page >= data.totalPages) { complete = true; break; }
+      page++;
+    }
+    if (!complete) {                 // partial pass: keep any heals, evict nothing
+      if (changed) saveQuoteCatalog();
+      return;
+    }
+    const toEvict = [];              // complete pass: unseen qids are deletions
+    for (const qid in quoteCatalog) if (!seen.has(qid)) toEvict.push(qid);
+    for (const qid of toEvict) delete quoteCatalog[qid];
+    quoteCatalogMeta.lastReconcile = new Date().toISOString();
+    if (changed || toEvict.length > 0) { saveQuoteCatalog(); renderAllGoals(); }
+    else saveQuoteCatalog({ broadcast: false }); // nothing changed; still stamp lastReconcile
+  }
+
+  // Cheap probe (piggybacks the 5-min catalog poll, AFTER the delta refresh):
+  // compare the site's ranked + unranked counts against the catalog's. New
+  // additions are already absorbed by the delta, so a *residual* mismatch means
+  // ranked-flips and/or deletions on existing quotes -> run a full reconcile.
+  // catRanked/catTotal come from the live map (not the stored count) so a delta
+  // that merely recorded a shrunk totalCount can't hide a ghost entry. A daily
+  // backstop runs the reconcile UNCONDITIONALLY (skipping the probe) to catch
+  // offsetting changes the count-probe is blind to. Throttled via lastReconcile
+  // so a persistent mismatch can't loop the expensive pass. Catalog-only: self/
+  // rival stores are intentionally left untouched.
+  async function maybeReconcileCatalog() {
+    if (quoteCatalogMeta.phase !== "done") return; // don't fight the build / a forced re-sync
+    const last = Date.parse(quoteCatalogMeta.lastReconcile || quoteCatalogMeta.lastFullSync || "") || 0;
+    const sinceLast = Date.now() - last;
+    if (sinceLast < RECONCILE_BACKSTOP_MS) {           // backstop not due -> probe first
+      if (sinceLast < RECONCILE_MIN_INTERVAL_MS) return; // throttle: reconciled recently
+      const [siteRanked, siteUnranked] = await Promise.all([
+        getTypeGGTotalQuotes(), getTypeGGTotalUnrankedQuotes()
+      ]);
+      if (siteRanked == null || siteUnranked == null) return; // probe failed -> skip this cycle
+      let catRanked = 0, catTotal = 0;
+      for (const qid in quoteCatalog) { catTotal++; if (quoteCatalog[qid].r !== false) catRanked++; }
+      if (siteRanked === catRanked && (siteRanked + siteUnranked) === catTotal) return; // counts agree
+    }
+    await runCatalogReconcile();
+  }
+
   // The single catalog driver: full-build if not done, else a delta refresh.
   // catalogBulkActive keeps exactly one running at a time (mirrors
-  // rivalBulkActive). Self-gates on leader / login / throttle / a Target goal.
+  // rivalBulkActive). Self-gates on leader / login / throttle; the build runs
+  // even while hidden, the delta refresh only while a tab is visible.
   async function runQuoteCatalogDriver() {
     if (!isLeader) return;
     if (!catalogReady) return;
     if (!isLoggedIn()) return;
     if (apiThrottled()) return;
     if (catalogBulkActive) return;
-    if (!haveImprovementTargetGoals()) return;
     catalogBulkActive = true;
     try {
+      // The one-time build runs to completion even while every tab is hidden
+      // (mirrors the rival bulk: tab away and it keeps loading). The recurring
+      // delta refresh stays visibility-gated, matching rivalIncrementalSync.
       if (quoteCatalogMeta.phase !== "done") await runCatalogFullSync();
-      else await runCatalogDeltaRefresh();
+      else if (anyTabVisibleRecently()) {
+        await runCatalogDeltaRefresh();
+        await maybeReconcileCatalog();
+      }
     } finally {
       catalogBulkActive = false;
     }
   }
 
-  // Visibility-gated guarded kick. Callers (hydration, ensureRivalSync, goal
-  // creation, the slow poll) use this; runIfAnyTabVisible supplies the
-  // visible + not-throttled + logged-in gate that §4c wants for the build.
+  // Guarded kick. The driver self-gates on leader / login / throttle, so no
+  // visibility wrapper here -- the one-time build must run even while hidden
+  // (the delta-refresh branch inside the driver stays visibility-gated).
   function maybeRunQuoteCatalog() {
     if (!isLeader || !catalogReady) return;
-    if (!haveImprovementTargetGoals()) return;
-    runIfAnyTabVisible(runQuoteCatalogDriver)();
+    runQuoteCatalogDriver();
   }
 
   // Difficulty/length axis over the catalog, filtered by a goal's status (and,
@@ -8943,7 +9330,10 @@ async function getExpRankByUsername(username) {
 
       const winsTd = document.createElement("td");
       winsTd.className = "gt-rivals-wins";
-      winsTd.textContent = rivalDone ? `${wins} / ${total}` : `${wins} / ${total} \u00b7 syncing\u2026`;
+      // Wins depend on YOUR PBs too, so they stay provisional until the self
+      // store is done as well -- not just this rival's store (matches the card).
+      const rowSynced = rivalDone && selfDone;
+      winsTd.textContent = rowSynced ? `${wins} / ${total}` : `${wins} / ${total} \u00b7 syncing\u2026`;
 
       const progTd = document.createElement("td");
       progTd.className = "gt-rivals-progress-cell";
@@ -9280,6 +9670,10 @@ async function getExpRankByUsername(username) {
 
     // ── Wins + Next button ──
     const { total, wins, worse, rivalDone, selfDone } = computeRivalStandings(gd);
+    // Live combined self + rival bulk-build %, shared by the wins line and the
+    // Next button. Climbs until BOTH your history and the rival store(s) sync.
+    const rivalPct = rivalSyncPercent(gd);
+    const rivalSyncLbl = rivalPct == null ? "syncing…" : `syncing… (${rivalPct}%)`;
     const winsEl = document.getElementById(`${goalId}-rival-wins`);
     if (winsEl) {
       const sc = rivalScope();
@@ -9287,9 +9681,17 @@ async function getExpRankByUsername(username) {
       if (sc !== "all") tags.push(sc);               // "ranked" / "unranked"
       if (rivalSettings.requireBoth) tags.push("shared"); // both-raced denominator
       const scopeTag = tags.length ? ` ${tags.join(", ")}` : "";
-      winsEl.textContent = rivalDone
-        ? `Wins: ${wins} / ${total}${scopeTag}`
-        : `Wins: ${wins} / ${total}${scopeTag}  · syncing…`;
+      winsEl.textContent = `Wins: ${wins} / ${total}${scopeTag}`;
+    }
+    // Build status on its own muted line below the wins (hidden once synced).
+    const rivalSyncEl = document.getElementById(`${goalId}-rival-sync`);
+    if (rivalSyncEl) {
+      // Settle on BOTH legs: the wins stay provisional while the self store is
+      // still paging in, even after every rival store is done, so keep the live
+      // % visible until self is done too (matches the Target card + Next button).
+      const settled = rivalDone && selfDone;
+      rivalSyncEl.textContent = settled ? "" : rivalSyncLbl;
+      rivalSyncEl.style.display = settled ? "none" : "block";
     }
     const nextBtn = document.getElementById(`${goalId}-rival-next`);
     if (nextBtn) {
@@ -10529,7 +10931,7 @@ async function getExpRankByUsername(username) {
     // a quote-finish was missed and stats were already in sync on next render.
     setInterval(runIfAnyTabVisible(evaluateRaceRequirementsGuarded), POLL_SLOW_MS);
     setInterval(runIfAnyTabVisible(evaluateImprovementGuarded), POLL_SLOW_MS);
-    setInterval(runIfAnyTabVisible(runQuoteCatalogDriver), POLL_SLOW_MS);
+    setInterval(runQuoteCatalogDriver, POLL_SLOW_MS); // build runs hidden; delta self-gates inside
   }
 
   // ── Channel listener (followers receive stats from leader) ──
