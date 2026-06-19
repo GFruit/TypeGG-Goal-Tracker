@@ -369,6 +369,12 @@ function gtMain() {
   // parentContent: the .gt-content element of whichever widget owns this goal.
   // Callers look it up via contentElForGroup(findGroupIdOfGoal(goalId)) — or
   // pass explicitly when creating a goal into a known group.
+  // Feather "repeat" glyph — the per-goal display-view toggle (swap between
+  // "X / Y" and "Z to go"). Deliberately NOT a cog: the rival card already uses
+  // a cog for "manage rivals", so a swap glyph keeps the two affordances
+  // distinct and reads as "switch how this number is shown".
+  const VIEW_TOGGLE_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>';
+
   function createGoalSection(goalId, type, cfg, parentContent) {
     const section = document.createElement("div");
     section.id = `${goalId}-goal-section`;
@@ -392,6 +398,7 @@ function gtMain() {
           </div>
           <div class="gt-goal-actions">
             <button id="${goalId}-rival-gear" class="gt-icon-btn gt-rival-gear-btn" title="Manage rivals" aria-label="Manage rivals" style="display:none;"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
+            <button id="${goalId}-view-toggle" class="gt-icon-btn gt-view-toggle-btn" title="Display: X / Y or Z to go" aria-label="Display options">${VIEW_TOGGLE_SVG}</button>
             <button id="${goalId}-remove-btn" class="gt-remove-btn" title="Remove goal">✕</button>
           </div>
         </div>
@@ -417,6 +424,13 @@ function gtMain() {
       const rivalGearBtn = document.getElementById(`${goalId}-rival-gear`);
       if (rivalGearBtn) rivalGearBtn.addEventListener("click", () => openRivalsModal(goalId));
 
+      // Display-view toggle (Wins: X / Y ↔ Z to go).
+      const rivalViewToggle = document.getElementById(`${goalId}-view-toggle`);
+      if (rivalViewToggle) {
+        rivalViewToggle.addEventListener("mousedown", (e) => e.stopPropagation());
+        rivalViewToggle.addEventListener("click", (e) => { e.stopPropagation(); openCountViewPopover("rival", goalId, rivalViewToggle); });
+      }
+
       // Clicking the challenge button jumps to a random quote where the rival
       // currently beats you. Handler reads live state at click time.
       document.getElementById(`${goalId}-rival-next`).addEventListener("click", () => {
@@ -440,6 +454,7 @@ function gtMain() {
             <span id="${goalId}-label">Target</span>
           </div>
           <div class="gt-goal-actions">
+            <button id="${goalId}-view-toggle" class="gt-icon-btn gt-view-toggle-btn" title="Display: X / Y or Z to go" aria-label="Display options">${VIEW_TOGGLE_SVG}</button>
             <button id="${goalId}-remove-btn" class="gt-remove-btn" title="Remove goal">\u2715</button>
           </div>
         </div>
@@ -467,9 +482,22 @@ function gtMain() {
         onTargetNextClicked(goalId);
       });
 
+      // Display-view toggle (count sub-line X / Y ↔ Z to go).
+      const targetViewToggle = document.getElementById(`${goalId}-view-toggle`);
+      if (targetViewToggle) {
+        targetViewToggle.addEventListener("mousedown", (e) => e.stopPropagation());
+        targetViewToggle.addEventListener("click", (e) => { e.stopPropagation(); openCountViewPopover("improvement", goalId, targetViewToggle); });
+      }
+
       wireGoalDrag(section, goalId);
       return section;
     }
+
+    // Per-goal display-view toggle (X / Y ↔ Z to go) lives in the header.
+    // Gated to goals with at least one monotonic "remaining" line — everything
+    // except pure average goals (which fluctuate, so a remainder is meaningless).
+    const curGoal = (goalData[type] || []).find(g => g.id === goalId);
+    const showCountToggle = goalHasToggleableLine(type, curGoal);
 
     section.innerHTML = `
       <div class="gt-gain-header">
@@ -479,6 +507,7 @@ function gtMain() {
         </div>
         <div class="gt-goal-actions">
           <span id="${goalId}-streak" class="gt-streak" style="display:none;"></span>
+          <button id="${goalId}-view-toggle" class="gt-icon-btn gt-view-toggle-btn" title="Display: X / Y or Z to go" aria-label="Display options"${showCountToggle ? "" : ' style="display:none;"'}>${VIEW_TOGGLE_SVG}</button>
           <button id="${goalId}-remove-btn" class="gt-remove-btn" title="Remove goal">✕</button>
         </div>
       </div>
@@ -541,10 +570,117 @@ function gtMain() {
       }
     });
 
+    // Wire the display-view toggle (present only when showCountToggle gated it in).
+    const viewToggleBtn = document.getElementById(`${goalId}-view-toggle`);
+    if (viewToggleBtn) {
+      viewToggleBtn.addEventListener("mousedown", (e) => e.stopPropagation());
+      viewToggleBtn.addEventListener("click", (e) => { e.stopPropagation(); openCountViewPopover(type, goalId, viewToggleBtn); });
+    }
+
     // Wire goal-level drag
     wireGoalDrag(section, goalId);
 
     return section;
+  }
+
+  // ── Per-goal count-view popover ──────────────────────────────────
+  // The header toggle opens this small anchored popover to flip a goal between
+  // "X / Y" (progress) and "Z to go" (remaining). Body-level + position:fixed
+  // so it can't be clipped by a widget's stacking context / overflow. Only one
+  // popover is open at a time.
+  let countViewPopoverEl = null;
+  function closeCountViewPopover() {
+    if (countViewPopoverEl) {
+      countViewPopoverEl.remove();
+      countViewPopoverEl = null;
+    }
+    document.removeEventListener("mousedown", onCountViewDocDown, true);
+    document.removeEventListener("keydown", onCountViewKey, true);
+    window.removeEventListener("scroll", closeCountViewPopover, true);
+    window.removeEventListener("resize", closeCountViewPopover, true);
+  }
+  function onCountViewDocDown(e) {
+    if (!countViewPopoverEl) return;
+    if (countViewPopoverEl.contains(e.target)) return;          // inside the popover
+    // A click on any toggle button is handled by its own click listener (which
+    // closes/reopens as a toggle), so don't also close from here — otherwise the
+    // popover would close then immediately reopen on the same gear.
+    if (e.target.closest && e.target.closest(".gt-view-toggle-btn")) return;
+    closeCountViewPopover();
+  }
+  function onCountViewKey(e) {
+    if (e.key === "Escape") closeCountViewPopover();
+  }
+  function setGoalCountView(type, goalId, view) {
+    const goals = goalData[type];
+    if (!goals) return;
+    const gd = goals.find(g => g.id === goalId);
+    if (!gd) return;
+    gd.countView = (view === "remaining") ? "remaining" : "progress";
+    saveGoals(type);
+    renderAllGoals();
+  }
+  function openCountViewPopover(type, goalId, anchorBtn) {
+    // Same gear while open → toggle closed.
+    const sameOpen = countViewPopoverEl && countViewPopoverEl.dataset.goalId === goalId;
+    closeCountViewPopover();
+    if (sameOpen) return;
+
+    const gd = (goalData[type] || []).find(g => g.id === goalId);
+    if (!gd) return;
+    const cur = goalCountView(gd);
+
+    const pop = document.createElement("div");
+    pop.className = "gt-view-popover";
+    pop.dataset.goalId = goalId;
+    pop.innerHTML = `
+      <div class="gt-view-popover-title">Display</div>
+      <button class="gt-view-popover-opt${cur === "progress" ? " active" : ""}" data-view="progress">Progress · X / Y</button>
+      <button class="gt-view-popover-opt${cur === "remaining" ? " active" : ""}" data-view="remaining">Remaining · Z to go</button>
+    `;
+    pop.querySelectorAll(".gt-view-popover-opt").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const view = btn.dataset.view;
+        closeCountViewPopover();
+        setGoalCountView(type, goalId, view);
+      });
+    });
+
+    document.body.appendChild(pop);
+    countViewPopoverEl = pop;
+
+    // Anchor (fixed) BESIDE the whole card, not below the button. Dropping the
+    // popover down would cover the very count line the user is trying to preview,
+    // so it opens in the side margin instead and the card stays fully visible
+    // (you can watch the number flip live). Prefer the card's right side; flip to
+    // the left if there's no room; keep the top level with the toggle button.
+    const btnRect = anchorBtn.getBoundingClientRect();
+    const cardEl = anchorBtn.closest(".gt-goal-section");
+    const cardRect = cardEl ? cardEl.getBoundingClientRect() : btnRect;
+    const pw = pop.offsetWidth, ph = pop.offsetHeight;
+    const gap = 8;
+    let left;
+    if (cardRect.right + gap + pw <= window.innerWidth - 8) {
+      left = cardRect.right + gap;                       // room on the right
+    } else if (cardRect.left - gap - pw >= 8) {
+      left = cardRect.left - gap - pw;                   // else the left margin
+    } else {
+      // No room either side — sit against whichever edge has more space.
+      left = (cardRect.left > window.innerWidth - cardRect.right)
+        ? Math.max(8, cardRect.left - gap - pw)
+        : Math.min(window.innerWidth - 8 - pw, cardRect.right + gap);
+    }
+    let top = btnRect.top;
+    if (top + ph > window.innerHeight - 8) top = window.innerHeight - 8 - ph;
+    if (top < 8) top = 8;
+    pop.style.left = `${Math.round(left)}px`;
+    pop.style.top = `${Math.round(top)}px`;
+
+    document.addEventListener("mousedown", onCountViewDocDown, true);
+    document.addEventListener("keydown", onCountViewKey, true);
+    window.addEventListener("scroll", closeCountViewPopover, true);
+    window.addEventListener("resize", closeCountViewPopover, true);
   }
 
   // ── Z-ordering for widgets ─────────────────────────────────────
@@ -3598,6 +3734,24 @@ async function getExpRankByUsername(username) {
   function goalIsImprovementTarget(g) {
     return !!g && g.mode === "target";
   }
+
+  // ── Per-goal count-view ─────────────────────────────────────────
+  // A purely cosmetic per-goal preference: show a count line as "X / Y"
+  // (progress, default) or "Z to go" (remaining, Z = Y − X). Stored as a
+  // string so it stays extensible; any unknown/absent value reads as
+  // "progress". Round-trips through saveGoals' JSON.stringify untouched.
+  function goalCountView(g) {
+    return (g && g.countView === "remaining") ? "remaining" : "progress";
+  }
+  // Whether a goal has at least one monotonic count line that "Z to go" can
+  // sensibly describe — i.e. anything that builds toward a fixed target. Only
+  // pure average goals are excluded (a rolling average fluctuates, so there's
+  // no meaningful "remaining"). Drives the header toggle's visibility. The
+  // per-LINE decision (a single-value comparison row never flips) lives inside
+  // the Target / rival renderers, not here.
+  function goalHasToggleableLine(type, g) {
+    return !goalIsAverage(g);
+  }
   // Whether any improvement-Target goal exists. Gates ALL catalog work: we never
   // fetch the ~14k-quote catalog (nor mark self "wanted" for it) unless one does.
   function haveImprovementTargetGoals() {
@@ -5927,8 +6081,11 @@ async function getExpRankByUsername(username) {
     // Label
     document.getElementById(`${goalId}-label`).textContent = cfg.label;
 
-    // Progress text — always gain / target
+    // Progress text — gain / target, or "Z to go" (Z = target − gain) when this
+    // goal's per-goal count view is flipped to "remaining" (via the header
+    // toggle). No PP carve-out: cumulative & next-rank are accumulations.
     const gainTextEl = document.getElementById(`${goalId}-gain-text`);
+    const remainingView = goalCountView(gd) === "remaining";
     if (gd.targetRank && !gd.targetLoaded) {
       // Any rank goal whose target hasn't been resolved by updateRankGoals /
       // updateExpRankGoals yet — show a type-specific loading message.
@@ -5939,13 +6096,23 @@ async function getExpRankByUsername(username) {
       // For max quotes, show total completed / total max instead of gain / remaining
       const currentQuotes = gd.baselineQuotes + gain;
       const totalQuotes = gd.baselineQuotes + gd.target;
-      gainTextEl.textContent = `${Math.round(currentQuotes).toLocaleString()} / ${totalQuotes.toLocaleString()}`;
+      gainTextEl.textContent = remainingView
+        ? `${Math.round(totalQuotes - currentQuotes).toLocaleString()} to go`
+        : `${Math.round(currentQuotes).toLocaleString()} / ${totalQuotes.toLocaleString()}`;
     } else if (cfg.isTime) {
-      gainTextEl.textContent = `${formatPlaytime(gain)} / ${formatPlaytime(gd.target)}`;
+      gainTextEl.textContent = remainingView
+        ? `${formatPlaytime(gd.target - gain)} to go`
+        : `${formatPlaytime(gain)} / ${formatPlaytime(gd.target)}`;
     } else {
       const gainStr   = cfg.decimals > 0 ? parseFloat(gain).toFixed(cfg.decimals)   : Math.round(gain).toLocaleString();
       const targetStr = cfg.decimals > 0 ? parseFloat(gd.target).toFixed(cfg.decimals) : gd.target.toLocaleString();
-      gainTextEl.textContent = `${gainStr} / ${targetStr}`;
+      if (remainingView) {
+        const rem = gd.target - gain;
+        const remStr = cfg.decimals > 0 ? parseFloat(rem).toFixed(cfg.decimals) : Math.round(rem).toLocaleString();
+        gainTextEl.textContent = `${remStr} to go`;
+      } else {
+        gainTextEl.textContent = `${gainStr} / ${targetStr}`;
+      }
     }
 
     document.getElementById(`${goalId}-progress-fill`).style.width      = `${pct}%`;
@@ -6052,18 +6219,26 @@ async function getExpRankByUsername(username) {
     // Positive delta = green "+N" indicator (a qualifying race).
     // Negative delta = red "−N ⚡" indicator (strict-mode reset on a miss).
     if (gainDelta !== 0) {
-      const positive = gainDelta > 0;
+      // `good` = progress was made → green; a strict-mode reset is the only
+      // bad case → red + ⚡. In remaining-view the DISPLAYED sign flips (a gain
+      // shows "−N" because Z drops toward 0), but the colour still tracks
+      // good/bad, so a normal gain reads "−N" green and a strict reset reads
+      // "+N ⚡" red (Z rose). `positive` keeps driving the colour class below.
+      const good = gainDelta > 0;
+      const positive = good;
+      const showPlus = remainingView ? !good : good;
+      const signChar = showPlus ? "+" : "−";
       const absDelta = Math.abs(gainDelta);
       let deltaStr;
       if (cfg.isTime) {
-        deltaStr = `${positive ? "+" : "−"}${formatPlaytime(absDelta)}`;
+        deltaStr = `${signChar}${formatPlaytime(absDelta)}`;
       } else if (cfg.decimals > 0) {
-        deltaStr = `${positive ? "+" : "−"}${parseFloat(absDelta).toFixed(cfg.decimals)}`;
+        deltaStr = `${signChar}${parseFloat(absDelta).toFixed(cfg.decimals)}`;
       } else {
-        deltaStr = `${positive ? "+" : "−"}${Math.round(absDelta).toLocaleString()}`;
+        deltaStr = `${signChar}${Math.round(absDelta).toLocaleString()}`;
       }
       // Append the lightning glyph for strict resets so the cause is obvious
-      if (!positive) deltaStr += " ⚡";
+      if (!good) deltaStr += " ⚡";
 
       // Remove any existing indicator so re-triggering restarts the animation
       const existing = document.getElementById(`${goalId}-gain-indicator`);
@@ -6199,10 +6374,17 @@ async function getExpRankByUsername(username) {
     const syncLbl = syncPct == null ? "syncing\u2026" : `syncing\u2026 (${syncPct}%)`;
     const countEl = document.getElementById(`${goalId}-target-count`);
     if (countEl) {
-      const xy = (total === 0 && !catalogSynced)
-        ? "\u2026"
-        : `${hit.toLocaleString()} / ${total.toLocaleString()}`;
-      countEl.textContent = `Quotes \u2265 ${target} ${metricLbl}: ${xy}`;
+      const loadingCount = (total === 0 && !catalogSynced);
+      if (goalCountView(gd) === "remaining") {
+        // "Z to go" flips the comparator: the count of quotes still BELOW the
+        // threshold (those left to conquer). Only this count line flips — the
+        // value row (your-value / target) always stays X / Y.
+        const z = loadingCount ? "\u2026" : `${(total - hit).toLocaleString()} to go`;
+        countEl.textContent = `Quotes < ${target} ${metricLbl}: ${z}`;
+      } else {
+        const xy = loadingCount ? "\u2026" : `${hit.toLocaleString()} / ${total.toLocaleString()}`;
+        countEl.textContent = `Quotes \u2265 ${target} ${metricLbl}: ${xy}`;
+      }
     }
     // Build status on its own muted line below the count (hidden once settled).
     const syncEl = document.getElementById(`${goalId}-target-sync`);
@@ -6452,7 +6634,9 @@ async function getExpRankByUsername(username) {
       const { typed, total } = computeMaxChars(gd);
       const pct = total > 0 ? Math.min(Math.floor((typed / total) * 100), 100) : 0;
       isComplete = total > 0 && typed >= total;
-      if (gainTextEl) gainTextEl.textContent = `${Math.round(typed).toLocaleString()} / ${Math.round(total).toLocaleString()}`;
+      if (gainTextEl) gainTextEl.textContent = (goalCountView(gd) === "remaining")
+        ? `${Math.round(total - typed).toLocaleString()} to go`
+        : `${Math.round(typed).toLocaleString()} / ${Math.round(total).toLocaleString()}`;
       if (fillEl) { fillEl.style.width = `${pct}%`; fillEl.style.background = isComplete ? "#4ade80" : "#60a5fa"; }
       // Gain pill: +N pop when distinct-quote chars climb (a new in-scope quote
       // raced). Mirrors the Max-quotes indicator; reuses prevGainMap (cleared on
@@ -6467,7 +6651,7 @@ async function getExpRankByUsername(username) {
           const indicator = document.createElement("span");
           indicator.id = `${goalId}-gain-indicator`;
           indicator.className = "gt-gain-indicator";
-          indicator.textContent = `+${delta.toLocaleString()}`;
+          indicator.textContent = `${goalCountView(gd) === "remaining" ? "−" : "+"}${delta.toLocaleString()}`;
           const gainRow = gainTextEl ? gainTextEl.parentElement : null;
           if (gainRow) gainRow.appendChild(indicator);
           indicator.addEventListener("animationend", () => indicator.remove());
@@ -9681,7 +9865,9 @@ async function getExpRankByUsername(username) {
       if (sc !== "all") tags.push(sc);               // "ranked" / "unranked"
       if (rivalSettings.requireBoth) tags.push("shared"); // both-raced denominator
       const scopeTag = tags.length ? ` ${tags.join(", ")}` : "";
-      winsEl.textContent = `Wins: ${wins} / ${total}${scopeTag}`;
+      winsEl.textContent = (goalCountView(gd) === "remaining")
+        ? `Wins: ${total - wins} to go${scopeTag}`
+        : `Wins: ${wins} / ${total}${scopeTag}`;
     }
     // Build status on its own muted line below the wins (hidden once synced).
     const rivalSyncEl = document.getElementById(`${goalId}-rival-sync`);

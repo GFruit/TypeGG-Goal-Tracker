@@ -1591,3 +1591,49 @@ body.gt-app-loggedout .gt-widget-detached { display: none !important; }
 .gt-range-num:hover  { background: rgba(59, 130, 246, 0.12); }
 .gt-range-num:focus  { background: rgba(59, 130, 246, 0.22); }
 .gt-range-dash, .gt-range-cap { color: #93c5fd; }
+
+/* ── Per-goal count-view toggle ──────────────────────────────────── */
+/* The header swap button reuses .gt-icon-btn; only the popover is new. */
+.gt-view-popover {
+  position: fixed;
+  z-index: 10002;
+  min-width: 180px;
+  padding: 6px;
+  background: #13172C;
+  border: 1px solid #374151;
+  border-radius: 10px;
+  box-shadow: 0 20px 40px -8px rgba(0, 0, 0, 0.6);
+  animation: gt-modal-in 0.16s ease;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.gt-view-popover-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #f3f4f6;
+  padding: 4px 8px 6px;
+}
+.gt-view-popover-opt {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: #9ca3af;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.gt-view-popover-opt:hover {
+  background: #374151;
+  color: #e5e7eb;
+}
+.gt-view-popover-opt.active {
+  background: #1e3a5f;
+  color: #93c5fd;
+}
