@@ -402,6 +402,8 @@ function gtMain() {
             <button id="${goalId}-remove-btn" class="gt-remove-btn" title="Remove goal">✕</button>
           </div>
         </div>
+        <div id="${goalId}-rival-pool" class="gt-req-line" style="display:none;"></div>
+        <div id="${goalId}-rival-band" class="gt-req-line gt-req-line-quote" style="display:none;"></div>
         <div class="gt-rival-value-row">
           <span id="${goalId}-rival-value-wrap" class="gt-rival-value-wrap">
             <span id="${goalId}-rival-you" class="gt-rival-you"></span><span id="${goalId}-rival-them" class="gt-rival-them"></span>
@@ -1381,6 +1383,18 @@ function gtMain() {
           <button class="gt-filter-btn active" data-filter="all">All</button>
           <button class="gt-filter-btn"        data-filter="solo">Solo</button>
           <button class="gt-filter-btn"        data-filter="quickplay">Quickplay</button>
+        </div>
+      </div>
+      <!-- Chars-kind toggle (chars type only): "Chars" = repeatable cumulative
+           characters (every race counts, same quote or not); "Quote Chars" =
+           characters from DISTINCT new quotes only (the metric Max chars uses).
+           Shown/hidden by the type handler; governs gain, custom target, and
+           whether the Max-chars buttons appear. -->
+      <div id="gt-chars-kind-row" style="display:none;">
+        <div class="gt-section-label">Chars type</div>
+        <div class="gt-mode-selector">
+          <button class="gt-mode-btn active" data-chars-kind="regular">Chars</button>
+          <button class="gt-mode-btn"        data-chars-kind="quote">Quote Chars</button>
         </div>
       </div>
       <div id="gt-mode-row">
@@ -3511,7 +3525,7 @@ async function getExpRankByUsername(username) {
   // (PP-per-race magnitudes are a guess — tune against live values.)
   const TARGET_PRESETS = {
     wpm: [60, 80, 100, 120, 150],
-    pp:  [50, 100, 150, 200, 300],
+    pp:  [400, 500, 600, 700, 800],
   };
 
   let selectedType  = "exp";
@@ -3579,6 +3593,8 @@ async function getExpRankByUsername(username) {
   const maxCharsRankedBtn   = document.getElementById("gt-max-chars-ranked-btn");
   const maxCharsUnrankedBtn = document.getElementById("gt-max-chars-unranked-btn");
   const maxCharsBtns = { all: maxCharsAllBtn, ranked: maxCharsRankedBtn, unranked: maxCharsUnrankedBtn };
+  const charsKindRow  = document.getElementById("gt-chars-kind-row");
+  const charsKindBtns = document.querySelectorAll("[data-chars-kind]");
 
   // Rival-mode controls (type=rival).
   const rivalMetricRow  = document.getElementById("gt-rival-metric-row");
@@ -3646,6 +3662,10 @@ async function getExpRankByUsername(username) {
   let maxQuotesBaseline = null; // user's currently-typed count for the selected kind (becomes the goal baseline)
   let maxCharsMode = false; // "max" toggle for chars (distinct-quote chars; any kind active)
   let maxCharsKind = null;  // "ranked" | "unranked" | "all" when active
+  // Chars-kind toggle (chars type): "regular" = repeatable cumulative chars
+  // (default), "quote" = distinct-new-quote chars. Governs the goal's metric and
+  // whether the Max-chars buttons show.
+  let selectedCharsKind = "regular";
 
   function formatPreset(n) {
     if (n >= 1000) return (n/1000)%1===0 ? `${n/1000}k` : `${(n/1000).toFixed(1)}k`;
@@ -3958,6 +3978,27 @@ async function getExpRankByUsername(username) {
       return;
     }
     if (!cfg.supportsTarget || selectedMode !== "target") { modeHint.style.display = "none"; return; }
+    // Quote-chars target mode measures DISTINCT-new-quote chars, so the "current"
+    // figure is the catalog tally — not currentStats.chars (the cumulative stat,
+    // which is always higher). Needs the catalog synced; show progress until then.
+    if (selectedType === "chars" && selectedCharsKind === "quote") {
+      if (!maxCharsReady()) {
+        const pct = targetSyncPercent();
+        modeHint.textContent = pct == null ? "Catalog still syncing\u2026" : `Catalog still syncing\u2026 (${pct}%)`;
+        modeHint.className = "gt-mode-hint"; modeHint.style.display = "block"; return;
+      }
+      const qcur = tallyMaxChars("all").typed;
+      const qfmt = Math.round(qcur).toLocaleString();
+      if (selectedValue !== null && selectedValue <= qcur) {
+        modeHint.textContent = `\u26a0 Must be above current Quote Chars (${qfmt})`;
+        modeHint.className   = "gt-mode-hint gt-mode-hint-error";
+      } else {
+        modeHint.textContent = `Current Quote Chars: ${qfmt}`;
+        modeHint.className   = "gt-mode-hint";
+      }
+      modeHint.style.display = "block";
+      return;
+    }
     const cur = currentStats[selectedType];
     if (cur == null) {
       modeHint.textContent = `Loading current ${cfg.label}…`;
@@ -3988,6 +4029,22 @@ async function getExpRankByUsername(username) {
     // checks below re-disable it — selectedValue is intentionally null here.
     if (selectedType === "quotes" && selectedMode === "target" && maxQuotesMode && maxQuotesKind) return;
     if (selectedType === "chars" && selectedMode === "target" && maxCharsMode && maxCharsKind) return;
+    // Quote-chars (non-max) gain/custom: a positive number is the only gate. The
+    // generic target check below compares selectedValue against currentStats.chars
+    // (the REGULAR cumulative stat) — the wrong metric here — so short-circuit it.
+    if (selectedType === "chars" && selectedCharsKind === "quote" && !(maxCharsMode && maxCharsKind)) {
+      if (selectedValue == null || selectedValue <= 0) { confirmBtn.disabled = true; return; }
+      // A custom (target-mode) goal is an ABSOLUTE distinct-quote-char total, so it
+      // must exceed your current tally — but only enforce that once the catalog is
+      // synced enough to know it; while syncing we allow it (the target resolves
+      // against the baseline on the first ready render).
+      if (selectedMode === "target" && maxCharsReady()) {
+        confirmBtn.disabled = selectedValue <= tallyMaxChars("all").typed;
+        return;
+      }
+      confirmBtn.disabled = false;
+      return;
+    }
     if (selectedMode === "rank") {
       // If Next Rank is toggled, allow setting immediately unless already #1
       if (nextRankMode) {
@@ -4300,7 +4357,7 @@ async function getExpRankByUsername(username) {
         customInput.style.display = "";
         updateModeHint();
       }
-    } else if (isTargetMode && selectedType === "chars") {
+    } else if (isTargetMode && selectedType === "chars" && selectedCharsKind === "quote") {
       // ── Max chars mode (chars + target) ──────────────
       // Distinct-quote CHARACTER totals from the catalog (Σ length over the
       // quotes you've raced vs over every quote in the scope). The three ⚡
@@ -4577,6 +4634,18 @@ async function getExpRankByUsername(username) {
     });
   }
 
+  // Chars-kind toggle (Chars vs Quote Chars). Quote mode unlocks the Max-chars
+  // buttons + switches the metric to distinct-new-quote chars; leaving it clears
+  // any active Max-chars selection (those are quote-only).
+  charsKindBtns.forEach(btn => btn.addEventListener("click", () => {
+    const kind = btn.dataset.charsKind;
+    if (kind === selectedCharsKind) return;
+    selectedCharsKind = kind;
+    charsKindBtns.forEach(b => b.classList.toggle("active", b === btn));
+    if (selectedCharsKind !== "quote") { maxCharsMode = false; maxCharsKind = null; }
+    renderPresets();
+  }));
+
   // Single-vs-multiple toggle for the rival goal type.
   rivalMultiModeBtns.forEach(btn => btn.addEventListener("click", () => {
     const wantMulti = btn.dataset.rivalMultimode === "multi";
@@ -4632,6 +4701,12 @@ async function getExpRankByUsername(username) {
     // Show filter row only for races (the solo/quickplay split is a races-only
     // concept; improvement goals ignore it — see the finish-path filter check).
     filterRow.style.display = (selectedType === "races") ? "block" : "none";
+
+    // Chars-kind toggle row: chars type only. Reflect the current selection.
+    charsKindRow.style.display = (selectedType === "chars") ? "block" : "none";
+    if (selectedType === "chars") {
+      charsKindBtns.forEach(b => b.classList.toggle("active", b.dataset.charsKind === selectedCharsKind));
+    }
 
     // Show rank button only for PP
     rankBtn.style.display = (selectedType === "pp" || selectedType === "exp") ? "" : "none";
@@ -5258,6 +5333,9 @@ async function getExpRankByUsername(username) {
     rankFetchedPp = null; rankFetchedRank = null; nextRankMode = false;
     maxQuotesMode = false; maxQuotesKind = null; maxQuotesFetched = null; maxQuotesBaseline = null;
     maxCharsMode = false; maxCharsKind = null;
+    selectedCharsKind = "regular";
+    charsKindBtns.forEach(b => b.classList.toggle("active", b.dataset.charsKind === "regular"));
+    charsKindRow.style.display = "none";
     // Rival defaults: metric=wpm, scope from the global setting, no resolved username yet.
     selectedRivalMetric = "wpm"; rivalFetchedName = null; clearTimeout(rivalDebounce);
     rivalMultiMode = false; selectedRivalList = []; rivalPendingName = null;
@@ -5583,6 +5661,9 @@ async function getExpRankByUsername(username) {
       let maxQuotesKindForGoal = null;      // captured kind written onto the goal
       let isMaxChars = false;
       let maxCharsKindForGoal = null;
+      const isQuoteChars = selectedType === "chars" && selectedCharsKind === "quote";
+      let quoteCharsBaseline = null;       // distinct-quote-char baseline (null = lock lazily once synced)
+      let quoteCharsAbsoluteTarget = null; // custom (target-mode) goal: the absolute total to reach
       
       if (selectedMode === "rank") {
         if (rankFetchedRank == null) return;
@@ -5649,6 +5730,12 @@ async function getExpRankByUsername(username) {
           isMaxChars = true;
           maxCharsKindForGoal = maxCharsKind;
           gainTarget = 0;
+        } else if (selectedType === "chars" && isQuoteChars) {
+          // Quote-chars custom target — an ABSOLUTE distinct-quote-char total to
+          // reach. Resolved into a gain target against the baseline below (lazily
+          // once the catalog finishes syncing, so creation isn't blocked).
+          if (selectedValue == null || selectedValue <= 0) return;
+          gainTarget = selectedValue; // placeholder; refined once baseline known
         } else {
           // Regular target mode
           if (selectedValue == null || selectedValue <= currentVal) return;
@@ -5657,6 +5744,21 @@ async function getExpRankByUsername(username) {
       } else {
         if (selectedValue == null || selectedValue <= 0) return;
         gainTarget = selectedValue;
+      }
+
+      // Quote-chars (non-max): lock the distinct-quote baseline now if the catalog
+      // is synced, else defer it (the goal renders "Syncing…" until the first ready
+      // render locks it). For a target-mode goal, resolve the absolute target into
+      // a gain target against that baseline.
+      if (isQuoteChars && !(maxCharsMode && maxCharsKind)) {
+        quoteCharsBaseline = maxCharsReady() ? tallyMaxChars("all").typed : null;
+        if (selectedMode === "target") {
+          quoteCharsAbsoluteTarget = selectedValue;
+          if (quoteCharsBaseline != null) {
+            gainTarget = Math.max(1, selectedValue - quoteCharsBaseline);
+            quoteCharsAbsoluteTarget = null;
+          }
+        }
       }
 
       const isRecurring = selectedRec !== "none";
@@ -5727,6 +5829,9 @@ async function getExpRankByUsername(username) {
         maxQuotesKind: maxQuotesKindForGoal || undefined,
         maxChars: isMaxChars || undefined,
         maxCharsKind: maxCharsKindForGoal || undefined,
+        quoteChars: isQuoteChars || undefined,
+        baselineQuoteChars: (isQuoteChars && !(maxCharsMode && maxCharsKind)) ? quoteCharsBaseline : undefined,
+        quoteCharsAbsoluteTarget: quoteCharsAbsoluteTarget != null ? quoteCharsAbsoluteTarget : undefined,
         filter: (selectedType === "races" || selectedType === "improvement") ? selectedFilter : undefined,
         targetLoaded: selectedMode === "rank" ? false : true, // false for rank goals — target is loaded async by updateRankGoals/updateExpRankGoals
         [cfg.baselineKey]: maxQuotesBaselineOverride != null ? maxQuotesBaselineOverride : currentVal,
@@ -6164,7 +6269,9 @@ async function getExpRankByUsername(username) {
     if (reqLineEl)  { reqLineEl.textContent  = ""; reqLineEl.style.display  = "none"; }
     if (reqLine2El) { reqLine2El.textContent = ""; reqLine2El.style.display = "none"; }
 
-    if (gd.nextRank && gd.targetRank) {
+    if (gd.quoteChars) {
+      document.getElementById(`${goalId}-label`).textContent = "Quote Chars";
+    } else if (gd.nextRank && gd.targetRank) {
       document.getElementById(`${goalId}-label`).textContent = `${cfg.label} → #${gd.targetRank} (next rank)`;
     } else if (gd.targetRank) {
       document.getElementById(`${goalId}-label`).textContent = `${cfg.label} → rank #${gd.targetRank}`;
@@ -6265,6 +6372,18 @@ async function getExpRankByUsername(username) {
   // over the filtered catalog) and the full-width "Next quote" button. The
   // current-quote value reads the self store for the live quoteId (0 = never
   // raced here), exactly like the rival "you" number.
+  // Shared filter-band formatter for the goal cards: "Label: lo - hi", or
+  // "Label: lo+" / "Label: \u2264hi" when one end is open, or null when both ends
+  // are open (axis full range \u2192 caller omits it). Used by the improvement-
+  // target and rival cards so their length / difficulty / WPM filter lines read
+  // identically: "Len: 300 - 700 \u2022 Diff: 6 - 8 \u2022 WPM: 100 - 120".
+  function gtFilterBand(label, lo, hi, loOpen, hiOpen) {
+    if (loOpen && hiOpen) return null;
+    if (loOpen) return `${label}: \u2264${hi}`;
+    if (hiOpen) return `${label}: ${lo}+`;
+    return `${label}: ${lo} - ${hi}`;
+  }
+
   function updateTargetGoalSection(goalId, type, cfg, gd) {
     const metric = targetMetricOf(gd);
     const metricLbl = metric === "pp" ? "PP" : "WPM";
@@ -6349,20 +6468,14 @@ async function getExpRankByUsername(username) {
     // Line 2 (darker blue): "<lo> - <hi> LEN, <lo> - <hi> DIFF" — only the
     // constrained axes. Open lower = "≤hi", open upper = "lo+", matching the
     // requirement goals' "+ " convention. Hidden entirely when both are open.
-    const band = (lo, hi, unit) => {
-      if (lo == null && hi == null) return null;
-      if (lo != null && hi != null) return `${lo} - ${hi} ${unit}`;
-      if (hi == null) return `${lo}+ ${unit}`;
-      return `\u2264${hi} ${unit}`;
-    };
     const bandParts = [];
-    const lenStr  = band(gd.lenMin,  gd.lenMax,  "LEN");
-    const diffStr = band(gd.diffMin, gd.diffMax, "DIFF");
+    const lenStr  = gtFilterBand("Len",  gd.lenMin,  gd.lenMax,  gd.lenMin  == null, gd.lenMax  == null);
+    const diffStr = gtFilterBand("Diff", gd.diffMin, gd.diffMax, gd.diffMin == null, gd.diffMax == null);
     if (lenStr)  bandParts.push(lenStr);
     if (diffStr) bandParts.push(diffStr);
     const bandEl = document.getElementById(`${goalId}-target-band`);
     if (bandEl) {
-      bandEl.textContent = bandParts.join(", ");
+      bandEl.textContent = bandParts.join(" \u2022 ");
       bandEl.style.display = bandParts.length ? "block" : "none";
     }
 
@@ -6603,6 +6716,62 @@ async function getExpRankByUsername(username) {
     maxCharsCache.set(gd.id, res);
     return res;
   }
+  // Render a quote-chars goal (the toggle's "Quote Chars" mode, non-max): gain
+  // or custom target measured in DISTINCT-new-quote characters, sourced from the
+  // catalog tally rather than the lifetime cumulative chars stat. Needs the
+  // catalog + self-quote store synced; until then it shows "Syncing… (N%)" like
+  // the max-chars goal. The distinct-quote baseline is locked lazily on the first
+  // ready render (and any pending absolute target resolved against it), then the
+  // goal delegates to updateGoalSection so it shares the exact same gain-row /
+  // progress-bar / pill / count-view machinery as every other cumulative goal.
+  function updateQuoteCharsGoalSection(goalId, type, cfg, gd, isRecurring) {
+    const gainTextEl = document.getElementById(`${goalId}-gain-text`);
+    const fillEl     = document.getElementById(`${goalId}-progress-fill`);
+    if (!maxCharsReady()) {
+      const labelEl = document.getElementById(`${goalId}-label`);
+      if (labelEl) labelEl.textContent = "Quote Chars";
+      const syncPct = targetSyncPercent();
+      if (gainTextEl) gainTextEl.textContent = syncPct == null ? "Syncing\u2026" : `Syncing\u2026 (${syncPct}%)`;
+      if (fillEl) { fillEl.style.width = `${syncPct == null ? 0 : syncPct}%`; fillEl.style.background = "#60a5fa"; }
+      return;
+    }
+    // Catalog ready — lock the baseline (and resolve a pending absolute target)
+    // once, persisting so it survives reloads.
+    const scope = gd.quoteCharsScope || "all";
+    const { typed } = tallyMaxChars(scope);
+    if (gd.baselineQuoteChars == null) {
+      const goals = goalData[type];
+      const live  = goals && goals.find(g => g.id === goalId);
+      if (live) {
+        live.baselineQuoteChars = typed;
+        if (live.quoteCharsAbsoluteTarget != null) {
+          live.target = Math.max(1, live.quoteCharsAbsoluteTarget - typed);
+          delete live.quoteCharsAbsoluteTarget;
+        }
+        saveGoals(type);
+        gd = live;
+      }
+    }
+    const baseline = gd.baselineQuoteChars || 0;
+    const gain = Math.max(0, typed - baseline);
+
+    // +N pop when distinct-quote chars climb; skip the first ready render
+    // (prev == null) so the goal doesn't flash its whole accumulated gain.
+    const prev = prevGainMap[goalId];
+    let gainDelta = 0;
+    if (prev != null && gain > prev) gainDelta = gain - prev;
+    prevGainMap[goalId] = gain;
+
+    // Sticky completion for recurring goals (mirrors the standard path).
+    if (isRecurring && !gd.completedThisPeriod && gain >= gd.target) {
+      const goals = goalData[type];
+      const idx = goals ? goals.findIndex(g => g.id === goalId) : -1;
+      if (idx >= 0) { goals[idx] = { ...goals[idx], completedThisPeriod: true }; saveGoals(type); gd = goals[idx]; }
+    }
+
+    updateGoalSection(goalId, type, cfg, gd, gain, isRecurring, gainDelta);
+  }
+
   // Render a max-chars goal into the standard gain-row + progress-bar layout --
   // visually identical to a Max quotes goal, just chars instead of a count.
   function updateMaxCharsGoalSection(goalId, type, cfg, gd) {
@@ -6745,7 +6914,7 @@ async function getExpRankByUsername(username) {
             currentVal = currentStats.quotes; // ranked (and legacy)
           }
         }
-        if (type === "chars" && gd.maxChars) {
+        if (type === "chars" && (gd.maxChars || gd.quoteChars)) {
           currentVal = currentStats.chars ?? 0; // non-null so the goal reaches its section; value unused
         }
 
@@ -6868,6 +7037,12 @@ async function getExpRankByUsername(username) {
               const liveQid = getCurrentQuoteIdLive();
               if (liveQid) onQuoteStarted(liveQid);
             }
+            // Quote-chars goals re-lock their distinct-quote baseline each new
+            // period: null it now and the next ready render captures the period-
+            // start tally (so "gain N new-quote chars per week" resets cleanly).
+            if (type === "chars" && gd.quoteChars && !gd.maxChars) {
+              gd.baselineQuoteChars = null;
+            }
             goals[i] = gd;
             saveGoals(type);
           }
@@ -6881,6 +7056,10 @@ async function getExpRankByUsername(username) {
         }
         if (type === "chars" && gd.maxChars) {
           updateMaxCharsGoalSection(goalId, type, cfg, gd);
+          continue;
+        }
+        if (type === "chars" && gd.quoteChars) {
+          updateQuoteCharsGoalSection(goalId, type, cfg, gd, isRecurring);
           continue;
         }
 
@@ -9852,6 +10031,41 @@ async function getExpRankByUsername(username) {
       showMsg(rivalResolved ? noneMsg : "Loading…");
     }
 
+    // ── Filter display lines (mirror the improvement-target card) ──
+    // Rival filters are global, so every rival card shows the same pool + band.
+    // Line 1 (cyan): the quote pool (scope + shared). Line 2 (darker blue): the
+    // length / difficulty / metric bands, hidden when all are full-range.
+    const rivalPoolEl = document.getElementById(`${goalId}-rival-pool`);
+    if (rivalPoolEl) {
+      const poolParts = [];
+      const psc = rivalScope();
+      if (psc === "ranked")        poolParts.push("Ranked");
+      else if (psc === "unranked") poolParts.push("Unranked");
+      if (rivalSettings.requireBoth) poolParts.push("Shared");
+      rivalPoolEl.textContent = `Quote Pool: ${poolParts.length ? poolParts.join(", ") : "All"}`;
+      rivalPoolEl.style.display = "block";
+    }
+    const rivalBandEl = document.getElementById(`${goalId}-rival-band`);
+    if (rivalBandEl) {
+      const f  = rivalFilterState();
+      const mf = rivalMetricFilterState();
+      const bandParts = [];
+      if (f.lActive) {
+        const s = gtFilterBand("Len", f.lMin, f.lMax, f.lMin <= f.axis.lenMin, f.lMax >= f.axis.lenMax);
+        if (s) bandParts.push(s);
+      }
+      if (f.dActive) {
+        const s = gtFilterBand("Diff", f.dMin, f.dMax, f.dMin <= f.axis.diffMin, f.dMax >= f.axis.diffMax);
+        if (s) bandParts.push(s);
+      }
+      if (mf.rActive) {
+        const s = gtFilterBand(rivalMetric().toUpperCase(), mf.rMin, mf.rMax, mf.rMin <= mf.axis.rivalMin, mf.rMax >= mf.axis.rivalMax);
+        if (s) bandParts.push(s);
+      }
+      rivalBandEl.textContent = bandParts.join(" \u2022 ");
+      rivalBandEl.style.display = bandParts.length ? "block" : "none";
+    }
+
     // ── Wins + Next button ──
     const { total, wins, worse, rivalDone, selfDone } = computeRivalStandings(gd);
     // Live combined self + rival bulk-build %, shared by the wins line and the
@@ -9860,14 +10074,10 @@ async function getExpRankByUsername(username) {
     const rivalSyncLbl = rivalPct == null ? "syncing…" : `syncing… (${rivalPct}%)`;
     const winsEl = document.getElementById(`${goalId}-rival-wins`);
     if (winsEl) {
-      const sc = rivalScope();
-      const tags = [];
-      if (sc !== "all") tags.push(sc);               // "ranked" / "unranked"
-      if (rivalSettings.requireBoth) tags.push("shared"); // both-raced denominator
-      const scopeTag = tags.length ? ` ${tags.join(", ")}` : "";
+      // Scope + shared now live in the Quote Pool line above; keep Wins clean.
       winsEl.textContent = (goalCountView(gd) === "remaining")
-        ? `Wins: ${total - wins} to go${scopeTag}`
-        : `Wins: ${wins} / ${total}${scopeTag}`;
+        ? `Wins: ${total - wins} to go`
+        : `Wins: ${wins} / ${total}`;
     }
     // Build status on its own muted line below the wins (hidden once synced).
     const rivalSyncEl = document.getElementById(`${goalId}-rival-sync`);
