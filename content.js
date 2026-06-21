@@ -10142,7 +10142,7 @@ async function getExpRankByUsername(username) {
       } else if (total === 0) {
         nextBtn.title = "No quotes match the current filters";
       } else {
-        nextBtn.title = `You lead ${name} \ud83c\udf89`;
+        nextBtn.title = `All ${name}'s quotes beaten \ud83e\udd47`;
       }
       nextBtn.addEventListener("click", () => {
         if (!nextBtn.disabled) onRivalRowNextClicked(goalId, name);
