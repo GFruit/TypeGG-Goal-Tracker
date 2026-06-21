@@ -418,7 +418,7 @@ function gtMain() {
 
       document.getElementById(`${goalId}-remove-btn`).addEventListener("click", async () => {
         const gd = (goalData.rival || []).find(g => g.id === goalId);
-        const labelText = gd ? `Rival · ${goalRivalNames(gd).join(", ") || "rival"} (${rivalMetric().toUpperCase()})` : "Rival goal";
+        const labelText = gd ? `Rival · ${goalRivalNames(gd).join(", ") || "rival"} (${rivalMetric(goalRivalCfg(gd)).toUpperCase()})` : "Rival goal";
         if (await confirmDeleteGoal(labelText)) removeGoal("rival", goalId);
       });
 
@@ -430,7 +430,7 @@ function gtMain() {
       const rivalViewToggle = document.getElementById(`${goalId}-view-toggle`);
       if (rivalViewToggle) {
         rivalViewToggle.addEventListener("mousedown", (e) => e.stopPropagation());
-        rivalViewToggle.addEventListener("click", (e) => { e.stopPropagation(); openCountViewPopover("rival", goalId, rivalViewToggle); });
+        rivalViewToggle.addEventListener("click", (e) => { e.stopPropagation(); openGoalEditPopover("rival", goalId, rivalViewToggle); });
       }
 
       // Clicking the challenge button jumps to a random quote where the rival
@@ -488,7 +488,7 @@ function gtMain() {
       const targetViewToggle = document.getElementById(`${goalId}-view-toggle`);
       if (targetViewToggle) {
         targetViewToggle.addEventListener("mousedown", (e) => e.stopPropagation());
-        targetViewToggle.addEventListener("click", (e) => { e.stopPropagation(); openCountViewPopover("improvement", goalId, targetViewToggle); });
+        targetViewToggle.addEventListener("click", (e) => { e.stopPropagation(); openGoalEditPopover("improvement", goalId, targetViewToggle); });
       }
 
       wireGoalDrag(section, goalId);
@@ -500,6 +500,7 @@ function gtMain() {
     // except pure average goals (which fluctuate, so a remainder is meaningless).
     const curGoal = (goalData[type] || []).find(g => g.id === goalId);
     const showCountToggle = goalHasToggleableLine(type, curGoal);
+    const showEditBtn = goalIsEditable(type, curGoal);
 
     section.innerHTML = `
       <div class="gt-gain-header">
@@ -509,7 +510,7 @@ function gtMain() {
         </div>
         <div class="gt-goal-actions">
           <span id="${goalId}-streak" class="gt-streak" style="display:none;"></span>
-          <button id="${goalId}-view-toggle" class="gt-icon-btn gt-view-toggle-btn" title="Display: X / Y or Z to go" aria-label="Display options"${showCountToggle ? "" : ' style="display:none;"'}>${VIEW_TOGGLE_SVG}</button>
+          <button id="${goalId}-view-toggle" class="gt-icon-btn gt-view-toggle-btn" title="Edit goal" aria-label="Edit goal"${showEditBtn ? "" : ' style="display:none;"'}>${VIEW_TOGGLE_SVG}</button>
           <button id="${goalId}-remove-btn" class="gt-remove-btn" title="Remove goal">✕</button>
         </div>
       </div>
@@ -572,11 +573,11 @@ function gtMain() {
       }
     });
 
-    // Wire the display-view toggle (present only when showCountToggle gated it in).
+    // Wire the per-goal edit button (present when goalIsEditable gated it in).
     const viewToggleBtn = document.getElementById(`${goalId}-view-toggle`);
     if (viewToggleBtn) {
       viewToggleBtn.addEventListener("mousedown", (e) => e.stopPropagation());
-      viewToggleBtn.addEventListener("click", (e) => { e.stopPropagation(); openCountViewPopover(type, goalId, viewToggleBtn); });
+      viewToggleBtn.addEventListener("click", (e) => { e.stopPropagation(); openGoalEditPopover(type, goalId, viewToggleBtn); });
     }
 
     // Wire goal-level drag
@@ -585,78 +586,439 @@ function gtMain() {
     return section;
   }
 
-  // ── Per-goal count-view popover ──────────────────────────────────
-  // The header toggle opens this small anchored popover to flip a goal between
-  // "X / Y" (progress) and "Z to go" (remaining). Body-level + position:fixed
-  // so it can't be clipped by a widget's stacking context / overflow. Only one
-  // popover is open at a time.
-  let countViewPopoverEl = null;
-  function closeCountViewPopover() {
-    if (countViewPopoverEl) {
-      countViewPopoverEl.remove();
-      countViewPopoverEl = null;
+  // (The old per-goal count-view popover was removed in v10.31: every header
+  // button now opens the unified openGoalEditPopover, which folds the
+  // progress/remaining display toggle in alongside the other tunables.)
+
+  // ── Per-goal editability predicates ──────────────
+  // A cumulative/avg goal's "amount" (gd.target) is directly editable only when
+  // it's a plain user-set number: not a rolling-average / improvement goal (mode
+  // set), not a rank / player goal (target derived from a lookup), and not a
+  // max-quotes / max-chars / absolute-quote-chars goal (target is fetched).
+  function goalAmountEditable(g) {
+    return !!g
+      && (g.mode == null || g.mode === "improvement")
+      && g.targetRank == null
+      && g.targetUsername == null
+      && !g.maxQuotes
+      && !g.maxChars
+      && g.quoteCharsAbsoluteTarget == null
+      && typeof g.target === "number";
+  }
+  // Does the header edit button have anything to offer for this goal? True when
+  // any of amount / recurrence / display can be changed in place.
+  // Mirror the creation modal's recurrence gating: recurrence shows for
+  // gain / average / improvement goals and is hidden for target / rank / player
+  // (and rival). New goals carry an explicit supportsRecurrence flag; older
+  // goals fall back to detecting the no-recurrence modes by their marker fields.
+  function goalSupportsRecurrence(g) {
+    if (!g) return false;
+    if (typeof g.supportsRecurrence === "boolean") return g.supportsRecurrence;
+    if (g.mode === "target") return false;                       // improvement-Target
+    if (g.targetRank != null || g.nextRank) return false;        // rank
+    if (g.targetUsername != null) return false;                  // player
+    if (g.maxQuotes || g.maxChars) return false;                 // max (target mode)
+    if (g.quoteCharsAbsoluteTarget != null) return false;        // quote-chars absolute
+    return typeof g.recurrence === "string";
+  }
+  function goalIsEditable(type, g) {
+    if (!g) return false;
+    return goalAmountEditable(g)
+      || goalSupportsRecurrence(g)
+      || goalHasToggleableLine(type, g);
+  }
+
+  // ── Per-goal edit popover ─────────────────────
+  // Generalizes the count-view popover: one header button opens a small anchored
+  // editor for the goal's in-place-tunable settings — amount, recurrence, and
+  // display (X / Y vs Z to go). Identity settings (type, mode, filters,
+  // requirements, rival / player target) are deliberately NOT here: changing
+  // those would redefine the goal, so they stay creation-only. Changing the
+  // recurrence resets the streak / completions (a daily streak isn't a weekly
+  // one), with an inline confirm when there's progress to lose.
+  let goalEditPopoverEl = null;
+  function closeGoalEditPopover() {
+    if (goalEditPopoverEl) {
+      goalEditPopoverEl.remove();
+      goalEditPopoverEl = null;
     }
-    document.removeEventListener("mousedown", onCountViewDocDown, true);
-    document.removeEventListener("keydown", onCountViewKey, true);
-    window.removeEventListener("scroll", closeCountViewPopover, true);
-    window.removeEventListener("resize", closeCountViewPopover, true);
+    document.removeEventListener("mousedown", onGoalEditDocDown, true);
+    document.removeEventListener("keydown", onGoalEditKey, true);
+    window.removeEventListener("scroll", onGoalEditScroll, true);
+    window.removeEventListener("resize", closeGoalEditPopover, true);
   }
-  function onCountViewDocDown(e) {
-    if (!countViewPopoverEl) return;
-    if (countViewPopoverEl.contains(e.target)) return;          // inside the popover
-    // A click on any toggle button is handled by its own click listener (which
-    // closes/reopens as a toggle), so don't also close from here — otherwise the
-    // popover would close then immediately reopen on the same gear.
+  function onGoalEditDocDown(e) {
+    if (!goalEditPopoverEl) return;
+    if (goalEditPopoverEl.contains(e.target)) return;
     if (e.target.closest && e.target.closest(".gt-view-toggle-btn")) return;
-    closeCountViewPopover();
+    closeGoalEditPopover();
   }
-  function onCountViewKey(e) {
-    if (e.key === "Escape") closeCountViewPopover();
+  function onGoalEditKey(e) {
+    if (e.key === "Escape") closeGoalEditPopover();
   }
-  function setGoalCountView(type, goalId, view) {
-    const goals = goalData[type];
-    if (!goals) return;
-    const gd = goals.find(g => g.id === goalId);
-    if (!gd) return;
-    gd.countView = (view === "remaining") ? "remaining" : "progress";
-    saveGoals(type);
-    renderAllGoals();
+  // Close on a genuine PAGE scroll only. The capture-phase listener also sees
+  // scrolls from inner containers and from TypeGG's own scrolling elements; a
+  // background re-render (stat poll, rival/target quote change, countdown) can
+  // clamp a card container's scrollTop and fire a spurious scroll that must NOT
+  // dismiss an open editor. Only a scroll whose target is the document / root is
+  // the user scrolling the page itself.
+  function onGoalEditScroll(e) {
+    const t = e.target;
+    if (t === document || t === document.documentElement || t === document.scrollingElement) {
+      closeGoalEditPopover();
+    }
   }
-  function openCountViewPopover(type, goalId, anchorBtn) {
-    // Same gear while open → toggle closed.
-    const sameOpen = countViewPopoverEl && countViewPopoverEl.dataset.goalId === goalId;
-    closeCountViewPopover();
+  function openGoalEditPopover(type, goalId, anchorBtn) {
+    const sameOpen = goalEditPopoverEl && goalEditPopoverEl.dataset.goalId === goalId;
+    closeGoalEditPopover();
     if (sameOpen) return;
 
     const gd = (goalData[type] || []).find(g => g.id === goalId);
     if (!gd) return;
-    const cur = goalCountView(gd);
+
+    const canAmount = goalAmountEditable(gd);
+    const canRec    = goalSupportsRecurrence(gd);
+    const canView   = goalHasToggleableLine(type, gd);
+    const isImpTarget = (type === "improvement" && gd.mode === "target");
+    const isRival = (type === "rival");
+    if (!canAmount && !canRec && !canView && !isImpTarget && !isRival) return;
+
+    let draftView = goalCountView(gd);
+
+    // Improvement-Target editor (threshold + catalog filters). All per-goal
+    // already; editing them re-derives standings over the cached catalog
+    // (targetFilterSig picks up the change), so no re-fetch / migration needed.
+    const impMetricLbl = (gd.metric === "pp") ? "PP" : "WPM";
+    const impCurStatus = ["all", "ranked", "unranked"].includes(gd.status) ? gd.status : "all";
+    const impCurPlayed = (gd.played === "played") ? "played" : "all";
+    const impStatusBtns = [["all", "All"], ["ranked", "Ranked"], ["unranked", "Unranked"]]
+      .map(([v, l]) => `<button class="gt-mode-btn${v === impCurStatus ? " active" : ""}" data-imp-status="${v}">${l}</button>`).join("");
+    const impPlayedBtns = [["all", "All"], ["played", "Played"]]
+      .map(([v, l]) => `<button class="gt-mode-btn${v === impCurPlayed ? " active" : ""}" data-imp-played="${v}">${l}</button>`).join("");
+    const impDiffRangeId = `gt-edit-diff-range-${goalId}`, impDiffReadoutId = `gt-edit-diff-readout-${goalId}`, impDiffTicksId = `gt-edit-diff-ticks-${goalId}`;
+    const impLenRangeId  = `gt-edit-len-range-${goalId}`,  impLenReadoutId  = `gt-edit-len-readout-${goalId}`,  impLenTicksId  = `gt-edit-len-ticks-${goalId}`;
+    const impSlider = (rangeId, readoutId, ticksId, label, loAria, hiAria) => `
+      <div class="gt-edit-label">${label}<span class="gt-range-readout" id="${readoutId}"></span></div>
+      <div class="gt-range-row" id="${ticksId}">
+        <span class="gt-range-end gt-range-end-lo"></span>
+        <div class="gt-range" id="${rangeId}">
+          <div class="gt-range-track"><div class="gt-range-fill"></div></div>
+          <input class="gt-range-input gt-range-lo" type="range" aria-label="${loAria}" />
+          <input class="gt-range-input gt-range-hi" type="range" aria-label="${hiAria}" />
+        </div>
+        <span class="gt-range-end gt-range-end-hi"></span>
+      </div>`;
+    const impTargetHtml = isImpTarget ? `
+      <div class="gt-edit-label">Target ${impMetricLbl}</div>
+      <input type="number" class="gt-custom-input gt-edit-amount gt-edit-threshold" value="${gd.target}" min="1" step="1">
+      <div class="gt-edit-label">Status</div>
+      <div class="gt-edit-rec-group">${impStatusBtns}</div>
+      <div class="gt-edit-label">Quotes</div>
+      <div class="gt-edit-rec-group">${impPlayedBtns}</div>
+      ${impSlider(impDiffRangeId, impDiffReadoutId, impDiffTicksId, "Difficulty filter", "Minimum difficulty", "Maximum difficulty")}
+      ${impSlider(impLenRangeId, impLenReadoutId, impLenTicksId, "Quote length filter", "Minimum length", "Maximum length")}
+    ` : "";
+
+    // ── Rival editor (per-goal filters: metric / scope / shared / ranges) ──
+    // Mirrors the improvement-target editor: each control auto-applies, then
+    // re-derives the standings over the cached per-rival stores (no re-fetch).
+    const rvCfg = isRival ? goalRivalCfg(gd) : null;
+    const rvMetricCur = isRival ? rivalMetric(rvCfg) : "wpm";
+    const rvScopeCur  = isRival ? rivalScope(rvCfg)  : "all";
+    const rvBothCur   = !!(rvCfg && rvCfg.requireBoth);
+    const rvMetricBtns = [["wpm", "WPM"], ["pp", "PP"]]
+      .map(([v, l]) => `<button class="gt-mode-btn${v === rvMetricCur ? " active" : ""}" data-rv-metric="${v}">${l}</button>`).join("");
+    const rvScopeBtns = [["all", "All"], ["ranked", "Ranked"], ["unranked", "Unranked"]]
+      .map(([v, l]) => `<button class="gt-mode-btn${v === rvScopeCur ? " active" : ""}" data-rv-scope="${v}">${l}</button>`).join("");
+    const rvBothBtns = [["false", "All quotes"], ["true", "Shared only"]]
+      .map(([v, l]) => `<button class="gt-mode-btn${(v === "true") === rvBothCur ? " active" : ""}" data-rv-both="${v}">${l}</button>`).join("");
+    const rvDiffRangeId = `gt-edit-rdiff-range-${goalId}`, rvDiffReadoutId = `gt-edit-rdiff-readout-${goalId}`, rvDiffTicksId = `gt-edit-rdiff-ticks-${goalId}`;
+    const rvLenRangeId  = `gt-edit-rlen-range-${goalId}`,  rvLenReadoutId  = `gt-edit-rlen-readout-${goalId}`,  rvLenTicksId  = `gt-edit-rlen-ticks-${goalId}`;
+    const rvBandRangeId = `gt-edit-rband-range-${goalId}`, rvBandReadoutId = `gt-edit-rband-readout-${goalId}`, rvBandTicksId = `gt-edit-rband-ticks-${goalId}`;
+    const rivalEditHtml = isRival ? `
+      <div class="gt-edit-label">Metric</div>
+      <div class="gt-edit-rec-group">${rvMetricBtns}</div>
+      <div class="gt-edit-label">Scope</div>
+      <div class="gt-edit-rec-group">${rvScopeBtns}</div>
+      <div class="gt-edit-label">Compare on</div>
+      <div class="gt-edit-rec-group">${rvBothBtns}</div>
+      ${impSlider(rvDiffRangeId, rvDiffReadoutId, rvDiffTicksId, "Difficulty filter", "Minimum difficulty", "Maximum difficulty")}
+      ${impSlider(rvLenRangeId, rvLenReadoutId, rvLenTicksId, "Quote length filter", "Minimum length", "Maximum length")}
+      <div class="gt-edit-label"><span class="gt-edit-rband-label">Rival ${rvMetricCur.toUpperCase()} filter</span><span class="gt-range-readout" id="${rvBandReadoutId}"></span></div>
+      <div class="gt-range-row" id="${rvBandTicksId}">
+        <span class="gt-range-end gt-range-end-lo"></span>
+        <div class="gt-range" id="${rvBandRangeId}">
+          <div class="gt-range-track"><div class="gt-range-fill"></div></div>
+          <input class="gt-range-input gt-range-lo" type="range" aria-label="Minimum rival value" />
+          <input class="gt-range-input gt-range-hi" type="range" aria-label="Maximum rival value" />
+        </div>
+        <span class="gt-range-end gt-range-end-hi"></span>
+      </div>
+    ` : "";
+
+    const recOrder = ["none", "daily", "weekly", "monthly"];
+    const recLabel = (r) => (r === "none") ? "None" : (REC_LABELS[r] || r);
+    const curRec = canRec ? (gd.recurrence || "none") : "none";
+    const recBtnsHtml = canRec ? recOrder.map(r =>
+      `<button class="gt-mode-btn${r === curRec ? " active" : ""}" data-rec-opt="${r}">${recLabel(r)}</button>`
+    ).join("") : "";
+    const recResettable = canRec && ((gd.streak > 0) || (gd.totalCompletions > 0));
 
     const pop = document.createElement("div");
-    pop.className = "gt-view-popover";
+    pop.className = "gt-view-popover gt-edit-popover" + ((isImpTarget || isRival) ? " gt-edit-popover-wide" : "");
     pop.dataset.goalId = goalId;
     pop.innerHTML = `
-      <div class="gt-view-popover-title">Display</div>
-      <button class="gt-view-popover-opt${cur === "progress" ? " active" : ""}" data-view="progress">Progress · X / Y</button>
-      <button class="gt-view-popover-opt${cur === "remaining" ? " active" : ""}" data-view="remaining">Remaining · Z to go</button>
+      <div class="gt-view-popover-title">Edit goal<span class="gt-settings-saved-indicator gt-edit-saved">Settings saved</span><button class="gt-edit-close" type="button" title="Close" aria-label="Close">×</button></div>
+      ${impTargetHtml}
+      ${rivalEditHtml}
+      ${canAmount ? `<div class="gt-edit-label">Amount</div><input type="number" class="gt-custom-input gt-edit-amount" value="${gd.target}" min="1" step="1">` : ""}
+      ${canRec ? `<div class="gt-edit-label">Recurrence</div><div class="gt-edit-rec-group">${recBtnsHtml}</div>${recResettable ? `<div class="gt-edit-note">Changing this resets the streak & completions.</div>` : ""}` : ""}
+      ${canView ? `<div class="gt-edit-label">Display Format</div><div class="gt-edit-view-group"><button class="gt-mode-btn gt-edit-view-btn${draftView === "progress" ? " active" : ""}" data-view="progress">Progress</button><button class="gt-mode-btn gt-edit-view-btn${draftView === "remaining" ? " active" : ""}" data-view="remaining">Remaining</button></div>` : ""}
     `;
-    pop.querySelectorAll(".gt-view-popover-opt").forEach(btn => {
+
+    const amountInput = pop.querySelector(".gt-edit-amount");
+    const savedEl     = pop.querySelector(".gt-edit-saved");
+    let savedTimer = null;
+    function flashSaved() {
+      if (!savedEl) return;
+      savedEl.classList.add("visible");
+      clearTimeout(savedTimer);
+      savedTimer = setTimeout(() => savedEl.classList.remove("visible"), 1500);
+    }
+    pop.querySelector(".gt-edit-close")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      closeGoalEditPopover();
+    });
+
+    // Amount: apply in place — debounced while typing, immediate on blur / Enter.
+    // The popover lives on document.body (position:fixed), so re-rendering the
+    // cards behind it neither closes it nor steals input focus.
+    let amountTimer = null;
+    function applyAmount() {
+      if (!canAmount || !amountInput) return;
+      const v = parseInt(amountInput.value, 10);
+      if (!Number.isFinite(v) || v <= 0 || v === gd.target) return;
+      gd.target = v;
+      saveGoals(type);
+      renderAllGoals();
+      flashSaved();
+    }
+    if (amountInput) {
+      amountInput.addEventListener("input", () => {
+        clearTimeout(amountTimer);
+        amountTimer = setTimeout(applyAmount, 400);
+      });
+      amountInput.addEventListener("change", () => { clearTimeout(amountTimer); applyAmount(); });
+      amountInput.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter") { ev.preventDefault(); clearTimeout(amountTimer); applyAmount(); }
+      });
+    }
+
+    // Recurrence: apply immediately on pick. A type change resets the streak /
+    // completions (a daily streak isn't a weekly one); the note forewarns when
+    // there's progress to lose, then is removed once the reset has happened.
+    pop.querySelectorAll("[data-rec-opt]").forEach(btn => {
       btn.addEventListener("click", (e) => {
         e.stopPropagation();
-        const view = btn.dataset.view;
-        closeCountViewPopover();
-        setGoalCountView(type, goalId, view);
+        const val = btn.dataset.recOpt;
+        if (val === (gd.recurrence || "none")) return;
+        pop.querySelectorAll("[data-rec-opt]").forEach(b => b.classList.toggle("active", b === btn));
+        gd.recurrence  = val;
+        gd.periodStart = (val === "none") ? null : getCurrentPeriodStart(val);
+        gd.streak = 0;
+        gd.totalCompletions = 0;
+        gd.completedThisPeriod = false;
+        const note = pop.querySelector(".gt-edit-note");
+        if (note) note.remove();
+        saveGoals(type);
+        renderAllGoals();
+        flashSaved();
       });
     });
 
-    document.body.appendChild(pop);
-    countViewPopoverEl = pop;
+    // Display: apply immediately on pick.
+    pop.querySelectorAll(".gt-edit-view-btn").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        draftView = btn.dataset.view;
+        pop.querySelectorAll(".gt-edit-view-btn").forEach(b => b.classList.toggle("active", b === btn));
+        gd.countView = (draftView === "remaining") ? "remaining" : "progress";
+        saveGoals(type);
+        renderAllGoals();
+        flashSaved();
+      });
+    });
 
-    // Anchor (fixed) BESIDE the whole card, not below the button. Dropping the
-    // popover down would cover the very count line the user is trying to preview,
-    // so it opens in the side margin instead and the card stays fully visible
-    // (you can watch the number flip live). Prefer the card's right side; flip to
-    // the left if there's no room; keep the top level with the toggle button.
+    // Improvement-Target controls: threshold (number), status / played (toggles),
+    // and difficulty / length ranges (min-max; blank = open end). Each applies in
+    // place and re-derives the standings over the cached catalog.
+    if (isImpTarget) {
+      const thr = pop.querySelector(".gt-edit-threshold");
+      let thrTimer = null;
+      const applyThreshold = () => {
+        if (!thr) return;
+        const v = parseInt(thr.value, 10);
+        if (!Number.isFinite(v) || v <= 0 || v === gd.target) return;
+        gd.target = v;
+        saveGoals(type);
+        renderAllGoals();
+        flashSaved();
+      };
+      if (thr) {
+        thr.addEventListener("input", () => { clearTimeout(thrTimer); thrTimer = setTimeout(applyThreshold, 400); });
+        thr.addEventListener("change", () => { clearTimeout(thrTimer); applyThreshold(); });
+        thr.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); clearTimeout(thrTimer); applyThreshold(); } });
+      }
+      let impTimer = null;
+      const scheduleImpApply = () => {
+        clearTimeout(impTimer);
+        impTimer = setTimeout(() => { saveGoals(type); renderAllGoals(); flashSaved(); }, 250);
+      };
+      // Build / rebuild the difficulty + length sliders from the live catalog
+      // axis for this goal's status/played, reusing the creation-modal slider
+      // component (setupTargetRange). The set() callback writes the gd handles
+      // and schedules a debounced re-derive (sliders fire continuously on drag).
+      const buildImpSliders = () => {
+        const axis = catalogAxis(gd.status || "all", gd.played || "all");
+        const clampD = (v) => Math.max(axis.diffMin, Math.min(axis.diffMax, v));
+        const clampL = (v) => Math.max(axis.lenMin,  Math.min(axis.lenMax,  v));
+        const dLo = gd.diffMin == null ? axis.diffMin : clampD(gd.diffMin);
+        const dHi = gd.diffMax == null ? axis.diffMax : clampD(gd.diffMax);
+        const lLo = gd.lenMin  == null ? axis.lenMin  : clampL(gd.lenMin);
+        const lHi = gd.lenMax  == null ? axis.lenMax  : clampL(gd.lenMax);
+        setupTargetRange(impDiffRangeId, impDiffReadoutId, impDiffTicksId, {
+          min: axis.diffMin, max: axis.diffMax, step: 0.1, decimals: true,
+          ticks: [String(axis.diffMin), `${axis.diffMax}+`], lo: dLo, hi: dHi,
+          set: (lo, hi) => { gd.diffMin = lo; gd.diffMax = hi; scheduleImpApply(); },
+        });
+        setupTargetRange(impLenRangeId, impLenReadoutId, impLenTicksId, {
+          min: axis.lenMin, max: axis.lenMax, step: 1, decimals: false,
+          ticks: [String(axis.lenMin), `${axis.lenMax}+`], lo: lLo, hi: lHi,
+          set: (lo, hi) => { gd.lenMin = lo; gd.lenMax = hi; scheduleImpApply(); },
+        });
+      };
+      // Status / Played change the catalog axis, so reset the handles to full
+      // range and rebuild the sliders (mirrors the creation modal).
+      const onImpPoolChange = () => {
+        gd.diffMin = gd.diffMax = gd.lenMin = gd.lenMax = null;
+        buildImpSliders();
+        saveGoals(type);
+        renderAllGoals();
+        flashSaved();
+      };
+      pop.querySelectorAll("[data-imp-status]").forEach(btn => {
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const val = btn.dataset.impStatus;
+          if (val === (gd.status || "all")) return;
+          pop.querySelectorAll("[data-imp-status]").forEach(b => b.classList.toggle("active", b === btn));
+          gd.status = val;
+          onImpPoolChange();
+        });
+      });
+      pop.querySelectorAll("[data-imp-played]").forEach(btn => {
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const val = btn.dataset.impPlayed;
+          if (val === (gd.played || "all")) return;
+          pop.querySelectorAll("[data-imp-played]").forEach(b => b.classList.toggle("active", b === btn));
+          gd.played = val;
+          onImpPoolChange();
+        });
+      });
+      // Initial build, deferred so the popover is attached (sliders bind by id).
+      requestAnimationFrame(buildImpSliders);
+    }
+
+    // Rival controls: metric / scope / compare-on toggles + difficulty / length
+    // / rival-value sliders. Each writes through to gd.rivalSettings and re-tally
+    // (saveGoals + renderAllGoals) — never a re-fetch, since the per-rival stores
+    // already hold every quote (status=any) with both metrics + d/l/r meta.
+    if (isRival) {
+      const rs = gd.rivalSettings || (gd.rivalSettings = defaultRivalGoalSettings());
+      let rvTimer = null;
+      const scheduleRvApply = () => {
+        clearTimeout(rvTimer);
+        rvTimer = setTimeout(() => { saveGoals("rival"); renderAllGoals(); flashSaved(); }, 250);
+      };
+      const applyRvNow = () => { saveGoals("rival"); renderAllGoals(); flashSaved(); };
+      // (Re)build all three sliders from the live per-goal axes, resolving the
+      // stored handles against them (null = open end). Rebuilt on a metric /
+      // scope / compare-on change because those move the axis bounds (and metric
+      // switches which band handles apply); the stored handles are preserved and
+      // simply clamped, mirroring the old global panel.
+      const buildRivalSliders = () => {
+        const fAxis = rivalFilterAxis(rs, gd);
+        const mAxis = rivalMetricAxis(rs, gd);
+        const mk = rivalMetricKeys(rs);
+        const clampD = (v) => Math.max(fAxis.diffMin, Math.min(fAxis.diffMax, v));
+        const clampL = (v) => Math.max(fAxis.lenMin,  Math.min(fAxis.lenMax,  v));
+        const clampR = (v) => Math.max(mAxis.rivalMin, Math.min(mAxis.rivalMax, v));
+        const dLo = rs.diffMin == null ? fAxis.diffMin : clampD(rs.diffMin);
+        const dHi = rs.diffMax == null ? fAxis.diffMax : clampD(rs.diffMax);
+        const lLo = rs.lenMin  == null ? fAxis.lenMin  : clampL(rs.lenMin);
+        const lHi = rs.lenMax  == null ? fAxis.lenMax  : clampL(rs.lenMax);
+        const rLo = rs[mk.rMin] == null ? mAxis.rivalMin : clampR(rs[mk.rMin]);
+        const rHi = rs[mk.rMax] == null ? mAxis.rivalMax : clampR(rs[mk.rMax]);
+        setupTargetRange(rvDiffRangeId, rvDiffReadoutId, rvDiffTicksId, {
+          min: fAxis.diffMin, max: fAxis.diffMax, step: 0.1, decimals: true,
+          ticks: [String(fAxis.diffMin), `${fAxis.diffMax}+`], lo: dLo, hi: dHi,
+          set: (lo, hi) => { rs.diffMin = lo; rs.diffMax = hi; scheduleRvApply(); },
+        });
+        setupTargetRange(rvLenRangeId, rvLenReadoutId, rvLenTicksId, {
+          min: fAxis.lenMin, max: fAxis.lenMax, step: 1, decimals: false,
+          ticks: [String(fAxis.lenMin), `${fAxis.lenMax}+`], lo: lLo, hi: lHi,
+          set: (lo, hi) => { rs.lenMin = lo; rs.lenMax = hi; scheduleRvApply(); },
+        });
+        setupTargetRange(rvBandRangeId, rvBandReadoutId, rvBandTicksId, {
+          min: mAxis.rivalMin, max: mAxis.rivalMax, step: 1, decimals: false,
+          ticks: [String(mAxis.rivalMin), `${mAxis.rivalMax}+`], lo: rLo, hi: rHi,
+          set: (lo, hi) => { const k = rivalMetricKeys(rs); rs[k.rMin] = lo; rs[k.rMax] = hi; scheduleRvApply(); },
+        });
+      };
+      pop.querySelectorAll("[data-rv-metric]").forEach(btn => {
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const val = btn.dataset.rvMetric === "pp" ? "pp" : "wpm";
+          if (val === rivalMetric(rs)) return;
+          pop.querySelectorAll("[data-rv-metric]").forEach(b => b.classList.toggle("active", b === btn));
+          rs.metric = val;
+          const lbl = pop.querySelector(".gt-edit-rband-label");
+          if (lbl) lbl.textContent = `Rival ${val.toUpperCase()} filter`;
+          buildRivalSliders(); // band axis + which handles apply both depend on metric
+          applyRvNow();
+        });
+      });
+      pop.querySelectorAll("[data-rv-scope]").forEach(btn => {
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const val = btn.dataset.rvScope;
+          if (val === rivalScope(rs)) return;
+          pop.querySelectorAll("[data-rv-scope]").forEach(b => b.classList.toggle("active", b === btn));
+          rs.scope = val;
+          buildRivalSliders(); // scope shifts every axis bound
+          applyRvNow();
+        });
+      });
+      pop.querySelectorAll("[data-rv-both]").forEach(btn => {
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const val = btn.dataset.rvBoth === "true";
+          if (val === !!rs.requireBoth) return;
+          pop.querySelectorAll("[data-rv-both]").forEach(b => b.classList.toggle("active", b === btn));
+          rs.requireBoth = val;
+          buildRivalSliders(); // shared-only narrows the data pool -> axis
+          applyRvNow();
+        });
+      });
+      // Initial build, deferred so the popover is attached (sliders bind by id).
+      requestAnimationFrame(buildRivalSliders);
+    }
+
+    document.body.appendChild(pop);
+    goalEditPopoverEl = pop;
+
+    // Anchor (fixed) beside the card, mirroring the count-view popover.
     const btnRect = anchorBtn.getBoundingClientRect();
     const cardEl = anchorBtn.closest(".gt-goal-section");
     const cardRect = cardEl ? cardEl.getBoundingClientRect() : btnRect;
@@ -664,11 +1026,10 @@ function gtMain() {
     const gap = 8;
     let left;
     if (cardRect.right + gap + pw <= window.innerWidth - 8) {
-      left = cardRect.right + gap;                       // room on the right
+      left = cardRect.right + gap;
     } else if (cardRect.left - gap - pw >= 8) {
-      left = cardRect.left - gap - pw;                   // else the left margin
+      left = cardRect.left - gap - pw;
     } else {
-      // No room either side — sit against whichever edge has more space.
       left = (cardRect.left > window.innerWidth - cardRect.right)
         ? Math.max(8, cardRect.left - gap - pw)
         : Math.min(window.innerWidth - 8 - pw, cardRect.right + gap);
@@ -679,10 +1040,12 @@ function gtMain() {
     pop.style.left = `${Math.round(left)}px`;
     pop.style.top = `${Math.round(top)}px`;
 
-    document.addEventListener("mousedown", onCountViewDocDown, true);
-    document.addEventListener("keydown", onCountViewKey, true);
-    window.addEventListener("scroll", closeCountViewPopover, true);
-    window.addEventListener("resize", closeCountViewPopover, true);
+    document.addEventListener("mousedown", onGoalEditDocDown, true);
+    document.addEventListener("keydown", onGoalEditKey, true);
+    window.addEventListener("scroll", onGoalEditScroll, true);
+    window.addEventListener("resize", closeGoalEditPopover, true);
+
+    if (amountInput) { amountInput.focus(); amountInput.select(); }
   }
 
   // ── Z-ordering for widgets ─────────────────────────────────────
@@ -1595,7 +1958,10 @@ function gtMain() {
            can show/hide as a unit including the section label. -->
       <div id="gt-amount-row">
         <div class="gt-section-label" id="gt-amount-label">Amount</div>
-        <div class="gt-target-row">
+        <div class="gt-target-row" id="gt-amount-target-row">
+          <!-- Rival chips render here (multiple-rivals mode), turning this row
+               into a tag field — see renderRivalList + the .gt-tagfield class. -->
+          <span id="gt-rival-inline-tags" class="gt-rival-inline-tags"></span>
           <div id="gt-max-quotes-row" style="display:none;">
             <button id="gt-max-all-btn"      class="gt-mode-btn">⚡ Max all</button>
             <button id="gt-max-ranked-btn"   class="gt-mode-btn">⚡ Max ranked</button>
@@ -1615,11 +1981,58 @@ function gtMain() {
         </div>
       </div>
       <div id="gt-mode-hint" class="gt-mode-hint" style="display:none;"></div>
-      <!-- Current Rivals (multiple-rivals mode): the chosen rivals render here,
-           on their own row directly below the username input + Add button. -->
-      <div id="gt-rival-multi-list-row" style="display:none;">
-        <div class="gt-section-label">Current Rivals</div>
-        <div id="gt-rival-multi-list" class="gt-rival-multi-list"></div>
+      <!-- Rival comparison config (type=rival only). Mirrors the per-goal "Edit
+           goal" popover so a rival goal can be tuned at creation: metric, quote
+           scope, shared-only, and difficulty / length / rival-value ranges. The
+           chosen values seed the new goal's gd.rivalSettings; the same controls
+           are editable afterwards from the card's Edit button. -->
+      <div id="gt-rival-config-row" style="display:none;">
+        <div class="gt-section-label">Metric</div>
+        <div class="gt-mode-selector" id="gt-rival-cfg-metric">
+          <button class="gt-mode-btn active" type="button" data-rvc-metric="wpm">WPM</button>
+          <button class="gt-mode-btn"        type="button" data-rvc-metric="pp">PP</button>
+        </div>
+        <div class="gt-section-label" style="margin-top:16px;">Scope</div>
+        <div class="gt-mode-selector" id="gt-rival-cfg-scope">
+          <button class="gt-mode-btn active" type="button" data-rvc-scope="all">All</button>
+          <button class="gt-mode-btn"        type="button" data-rvc-scope="ranked">Ranked</button>
+          <button class="gt-mode-btn"        type="button" data-rvc-scope="unranked">Unranked</button>
+        </div>
+        <div class="gt-section-label" style="margin-top:16px;">Compare on</div>
+        <div class="gt-mode-selector" id="gt-rival-cfg-both">
+          <button class="gt-mode-btn active" type="button" data-rvc-both="false">All quotes</button>
+          <button class="gt-mode-btn"        type="button" data-rvc-both="true">Shared only</button>
+        </div>
+        <div class="gt-section-label" style="margin-top:16px;">Difficulty filter<span class="gt-range-readout" id="gt-rival-cfg-diff-readout"></span></div>
+        <div class="gt-range-row" id="gt-rival-cfg-diff-ticks">
+          <span class="gt-range-end gt-range-end-lo"></span>
+          <div class="gt-range" id="gt-rival-cfg-diff-range">
+            <div class="gt-range-track"><div class="gt-range-fill"></div></div>
+            <input class="gt-range-input gt-range-lo" type="range" aria-label="Minimum difficulty" />
+            <input class="gt-range-input gt-range-hi" type="range" aria-label="Maximum difficulty" />
+          </div>
+          <span class="gt-range-end gt-range-end-hi"></span>
+        </div>
+        <div class="gt-section-label" style="margin-top:14px;">Quote length filter<span class="gt-range-readout" id="gt-rival-cfg-len-readout"></span></div>
+        <div class="gt-range-row" id="gt-rival-cfg-len-ticks">
+          <span class="gt-range-end gt-range-end-lo"></span>
+          <div class="gt-range" id="gt-rival-cfg-len-range">
+            <div class="gt-range-track"><div class="gt-range-fill"></div></div>
+            <input class="gt-range-input gt-range-lo" type="range" aria-label="Minimum length" />
+            <input class="gt-range-input gt-range-hi" type="range" aria-label="Maximum length" />
+          </div>
+          <span class="gt-range-end gt-range-end-hi"></span>
+        </div>
+        <div class="gt-section-label" style="margin-top:14px;"><span id="gt-rival-cfg-band-label">Rival WPM filter</span><span class="gt-range-readout" id="gt-rival-cfg-band-readout"></span></div>
+        <div class="gt-range-row" id="gt-rival-cfg-band-ticks">
+          <span class="gt-range-end gt-range-end-lo"></span>
+          <div class="gt-range" id="gt-rival-cfg-band-range">
+            <div class="gt-range-track"><div class="gt-range-fill"></div></div>
+            <input class="gt-range-input gt-range-lo" type="range" aria-label="Minimum rival value" />
+            <input class="gt-range-input gt-range-hi" type="range" aria-label="Maximum rival value" />
+          </div>
+          <span class="gt-range-end gt-range-end-hi"></span>
+        </div>
       </div>
       <!-- Window size row: only visible in average mode, sits right above
            the confirm button. Uses the same presets-+-custom layout as
@@ -2017,11 +2430,6 @@ function gtMain() {
   // ── Rival tab ─────────────────────────────────────────────────
   // Settings that apply globally to every rival goal: which quotes are tracked
   // (all / ranked / unranked) and where the "⚔ Next vs …" button navigates.
-  const RIVAL_SCOPE_OPTIONS = [
-    { value: "all",      label: "All",      hint: "Counts every quote your rival has typed — ranked and unranked." },
-    { value: "ranked",   label: "Ranked",   hint: "Counts only your rival's ranked quotes." },
-    { value: "unranked", label: "Unranked", hint: "Counts only your rival's unranked quotes." },
-  ];
   const RIVAL_NEXT_LINK_OPTIONS = [
     { value: false, label: "Solo",     hint: "Opens the text as a standard solo race." },
     { value: true,  label: "Vs Rival", hint: "Opens a head-to-head race against the rival's ghost." },
@@ -2031,72 +2439,18 @@ function gtMain() {
     { value: "closest", label: "Closest",  hint: "Smallest gap first — the quote you're nearest to beating." },
     { value: "biggest", label: "Biggest",  hint: "Largest gap first — where you're furthest behind." },
   ];
-  const RIVAL_COUNT_OPTIONS = [
-    { value: false, label: "All Rival Quotes",   hint: "" },
-    { value: true,  label: "Shared Quotes Only", hint: "" },
-  ];
 
+  // The global Rival tab now holds ONLY the two navigation prefs. The comparison
+  // FILTERS (metric / scope / shared / difficulty / length / value bands) moved
+  // to each rival goal's "Edit goal" popover (they're per-goal: changing one is
+  // a local re-tally, never a re-fetch). nextSort + nextUsesVsLink stay global
+  // because they're read live at click time in onRivalNextClicked.
   function renderRivalTab(contentEl, draft) {
-    const curScope = RIVAL_SCOPE_VALUES.includes(draft.rivalSettings.scope) ? draft.rivalSettings.scope : "all";
-    const curMetric = RIVAL_METRIC_VALUES.includes(draft.rivalSettings.metric) ? draft.rivalSettings.metric : "wpm";
-    const curSort  = RIVAL_NEXT_SORT_VALUES.includes(draft.rivalSettings.nextSort) ? draft.rivalSettings.nextSort : "random";
-    const curCount = !!draft.rivalSettings.requireBoth;
-    const current  = draft.rivalSettings.nextUsesVsLink;
+    const curSort = RIVAL_NEXT_SORT_VALUES.includes(draft.rivalSettings.nextSort) ? draft.rivalSettings.nextSort : "random";
+    const current = draft.rivalSettings.nextUsesVsLink;
     contentEl.innerHTML = `
-      <div class="gt-section-label">Quote Pool</div>
-      <div class="gt-mode-selector" id="gt-rival-count-selector">
-        ${RIVAL_COUNT_OPTIONS.map(o =>
-          `<button class="gt-mode-btn${o.value === curCount ? " active" : ""}" data-rival-count="${o.value}">${o.label}</button>`
-        ).join("")}
-      </div>
-
-      <div class="gt-section-label" style="margin-top:16px;">Quotes Status Filter</div>
-      <div class="gt-mode-selector" id="gt-rival-scope-selector">
-        ${RIVAL_SCOPE_OPTIONS.map(o =>
-          `<button class="gt-mode-btn${o.value === curScope ? " active" : ""}" data-rival-scope="${o.value}">${o.label}</button>`
-        ).join("")}
-      </div>
-
-      <div class="gt-section-label" style="margin-top:16px;">Metric</div>
-      <div class="gt-mode-selector" id="gt-rival-metric-selector">
-        <button class="gt-mode-btn${curMetric === "wpm" ? " active" : ""}" data-rival-metric="wpm">WPM</button>
-        <button class="gt-mode-btn${curMetric === "pp" ? " active" : ""}" data-rival-metric="pp">PP</button>
-      </div>
-
-      <div class="gt-section-label" style="margin-top:16px;">Rival ${curMetric.toUpperCase()} filter<span class="gt-range-readout" id="gt-rival-mrival-readout"></span></div>
-      <div class="gt-range-row" id="gt-rival-mrival-ticks">
-        <span class="gt-range-end gt-range-end-lo"></span>
-        <div class="gt-range" id="gt-rival-mrival-range">
-          <div class="gt-range-track"><div class="gt-range-fill"></div></div>
-          <input class="gt-range-input gt-range-lo" type="range" aria-label="Minimum rival ${curMetric.toUpperCase()}" />
-          <input class="gt-range-input gt-range-hi" type="range" aria-label="Maximum rival ${curMetric.toUpperCase()}" />
-        </div>
-        <span class="gt-range-end gt-range-end-hi"></span>
-      </div>
-
-      <div class="gt-section-label" style="margin-top:16px;">Difficulty filter<span class="gt-range-readout" id="gt-rival-diff-readout"></span></div>
-      <div class="gt-range-row" id="gt-rival-diff-ticks">
-        <span class="gt-range-end gt-range-end-lo"></span>
-        <div class="gt-range" id="gt-rival-diff-range">
-          <div class="gt-range-track"><div class="gt-range-fill"></div></div>
-          <input class="gt-range-input gt-range-lo" type="range" aria-label="Minimum difficulty" />
-          <input class="gt-range-input gt-range-hi" type="range" aria-label="Maximum difficulty" />
-        </div>
-        <span class="gt-range-end gt-range-end-hi"></span>
-      </div>
-
-      <div class="gt-section-label" style="margin-top:14px;">Quote length filter<span class="gt-range-readout" id="gt-rival-len-readout"></span></div>
-      <div class="gt-range-row" id="gt-rival-len-ticks">
-        <span class="gt-range-end gt-range-end-lo"></span>
-        <div class="gt-range" id="gt-rival-len-range">
-          <div class="gt-range-track"><div class="gt-range-fill"></div></div>
-          <input class="gt-range-input gt-range-lo" type="range" aria-label="Minimum length" />
-          <input class="gt-range-input gt-range-hi" type="range" aria-label="Maximum length" />
-        </div>
-        <span class="gt-range-end gt-range-end-hi"></span>
-      </div>
-
-      <div class="gt-section-label" style="margin-top:16px;">“⚔ Next vs …” button picks</div>
+      <div class="gt-mode-hint" style="display:block; margin-top:0; margin-bottom:14px;">Comparison filters (metric, scope, shared-only, difficulty, length, value) are set per goal — open a rival goal's Edit button to change them.</div>
+      <div class="gt-section-label">“⚔ Next vs …” button picks</div>
       <div class="gt-mode-selector" id="gt-rival-nextsort-selector">
         ${RIVAL_NEXT_SORT_OPTIONS.map(o =>
           `<button class="gt-mode-btn${o.value === curSort ? " active" : ""}" data-next-sort="${o.value}">${o.label}</button>`
@@ -2115,40 +2469,6 @@ function gtMain() {
         RIVAL_NEXT_LINK_OPTIONS.find(o => o.value === current)?.hint ?? ""
       }</div>
     `;
-
-    contentEl.querySelectorAll("[data-rival-metric]").forEach(btn => {
-      btn.addEventListener("click", () => {
-        if (draft.rivalSettings.metric === btn.dataset.rivalMetric) return;
-        draft.rivalSettings.metric = btn.dataset.rivalMetric;
-        applySettingsDraft();
-        // Rebuild the tab so the metric-filter sliders track the new metric
-        // (both their axis and the per-metric stored handles change).
-        renderRivalTab(contentEl, draft);
-      });
-    });
-
-    contentEl.querySelectorAll("[data-rival-scope]").forEach(btn => {
-      btn.addEventListener("click", () => {
-        const val = btn.dataset.rivalScope;
-        if (draft.rivalSettings.scope === val) return;
-        draft.rivalSettings.scope = val;
-        applySettingsDraft();
-        // Rebuild so the WPM/PP, difficulty and length slider bounds recompute
-        // against the newly filtered quote set (this status + the pool above).
-        renderRivalTab(contentEl, draft);
-      });
-    });
-
-    contentEl.querySelectorAll("[data-rival-count]").forEach(btn => {
-      btn.addEventListener("click", () => {
-        const val = btn.dataset.rivalCount === "true";
-        if (draft.rivalSettings.requireBoth === val) return;
-        draft.rivalSettings.requireBoth = val;
-        applySettingsDraft();
-        // Rebuild so the slider bounds recompute against the new quote pool.
-        renderRivalTab(contentEl, draft);
-      });
-    });
 
     const sortHintEl = contentEl.querySelector("#gt-rival-nextsort-hint");
     contentEl.querySelectorAll("[data-next-sort]").forEach(btn => {
@@ -2171,228 +2491,17 @@ function gtMain() {
         applySettingsDraft();
       });
     });
-
-    // ── Difficulty / length range sliders ──────────────────────
-    // Two overlapping range inputs per axis form a dual-handle slider. The
-    // lo/hi numbers in the readout are inline-editable: click to drop a caret
-    // (the value auto-selects so you can just type a replacement), digits and
-    // backspace work like a text field, Enter or blur commits, Escape reverts.
-    // Both dragging and typing are clamped so the min handle can never pass the
-    // max (and vice versa). Difficulty steps 0.1, length steps 1.
-    const rvAxis = rivalFilterAxis();   // data-driven bounds for the diff/length sliders
-    const rvmAxis = rivalMetricAxis();  // data-driven bounds for the metric sliders (current metric)
-    const mfK = rivalMetricKeys();      // which stored handles apply for the current metric
-    const clampVal = (v, lo, hi, d) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
-    function setupRivalRange(rangeId, readoutId, ticksId, opts) {
-      const root = contentEl.querySelector(`#${rangeId}`);
-      if (!root) return;
-      const loIn = root.querySelector(".gt-range-lo");
-      const hiIn = root.querySelector(".gt-range-hi");
-      const fill = root.querySelector(".gt-range-fill");
-      const readout = contentEl.querySelector(`#${readoutId}`);
-      const ticksEl = contentEl.querySelector(`#${ticksId}`);
-      const { min, max, step, ticks, set, decimals } = opts;
-      const snap = (v) => {
-        const n = Math.round(v / step) * step;
-        return decimals ? Math.round(n * 10) / 10 : Math.round(n);
-      };
-      const numStr = (v) => (decimals ? (Number.isInteger(v) ? String(v) : v.toFixed(1)) : String(v));
-      for (const inp of [loIn, hiIn]) { inp.min = min; inp.max = max; inp.step = step; }
-      loIn.value = snap(opts.lo); hiIn.value = snap(opts.hi);
-      if (ticksEl) {
-        const loEnd = ticksEl.querySelector(".gt-range-end-lo");
-        const hiEnd = ticksEl.querySelector(".gt-range-end-hi");
-        if (loEnd) loEnd.textContent = ticks[0];
-        if (hiEnd) hiEnd.textContent = ticks[ticks.length - 1];
-      }
-
-      let loNum = null, hiNum = null, capEl = null;
-      if (readout) {
-        readout.innerHTML =
-          `<span class="gt-range-num" data-side="lo" spellcheck="false"></span>` +
-          `<span class="gt-range-dash"> - </span>` +
-          `<span class="gt-range-num" data-side="hi" spellcheck="false"></span>` +
-          `<span class="gt-range-cap">+</span>`;
-        loNum = readout.querySelector('[data-side="lo"]');
-        hiNum = readout.querySelector('[data-side="hi"]');
-        capEl = readout.querySelector(".gt-range-cap");
-      }
-
-      const paint = (skip) => {
-        const lv = +loIn.value, hv = +hiIn.value;
-        const lp = ((lv - min) / (max - min)) * 100;
-        const hp = ((hv - min) / (max - min)) * 100;
-        fill.style.left = lp + "%";
-        fill.style.width = Math.max(0, hp - lp) + "%";
-        if (loNum && loNum !== skip) loNum.textContent = numStr(lv);
-        if (hiNum && hiNum !== skip) hiNum.textContent = numStr(hv);
-        if (capEl) capEl.style.display = (hv >= max) ? "" : "none";
-      };
-
-      const onInput = (which) => {
-        let lv = +loIn.value, hv = +hiIn.value;
-        if (which === "lo" && lv > hv) { lv = hv; loIn.value = lv; }
-        if (which === "hi" && hv < lv) { hv = lv; hiIn.value = hv; }
-        set(lv, hv);
-        paint();
-      };
-      loIn.addEventListener("input", () => onInput("lo"));
-      hiIn.addEventListener("input", () => onInput("hi"));
-      loIn.addEventListener("change", applySettingsDraft);
-      hiIn.addEventListener("change", applySettingsDraft);
-
-      // Raise whichever thumb is nearer the pointer so overlapping handles stay grabbable.
-      root.addEventListener("pointerdown", (e) => {
-        const rect = root.getBoundingClientRect();
-        if (!rect.width) return;
-        const x = e.clientX - rect.left;
-        const loX = ((+loIn.value - min) / (max - min)) * rect.width;
-        const hiX = ((+hiIn.value - min) / (max - min)) * rect.width;
-        const loCloser = Math.abs(x - loX) <= Math.abs(x - hiX);
-        loIn.style.zIndex = loCloser ? 5 : 4;
-        hiIn.style.zIndex = loCloser ? 4 : 5;
-        // A direct thumb grab reports e.target as the input itself (the thumb is
-        // pointer-events:auto); a track click passes through the pointer-events:none
-        // input. So when this isn't a thumb hit, treat it as a track click: jump the
-        // nearer handle to the click (tie -> max) and commit via the same path as a drag.
-        if (e.target === loIn || e.target === hiIn) return;
-        const moveLo = Math.abs(x - loX) < Math.abs(x - hiX);
-        const frac = Math.min(1, Math.max(0, x / rect.width));
-        let v = Math.min(max, Math.max(min, snap(min + frac * (max - min))));
-        if (moveLo) {
-          if (v > +hiIn.value) v = +hiIn.value;
-          loIn.value = v; loIn.style.zIndex = 5; hiIn.style.zIndex = 4;
-        } else {
-          if (v < +loIn.value) v = +loIn.value;
-          hiIn.value = v; hiIn.style.zIndex = 5; loIn.style.zIndex = 4;
-        }
-        set(+loIn.value, +hiIn.value);
-        paint();
-        applySettingsDraft();
-      });
-
-      // Inline-edit the lo/hi numbers like a text field.
-      const selectAllText = (el) => {
-        const r = document.createRange(); r.selectNodeContents(el);
-        const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
-      };
-      const commitEdit = (el, side) => {
-        const v0 = parseFloat((el.textContent || "").replace(/[^0-9.]/g, ""));
-        if (Number.isFinite(v0)) {
-          let v = Math.min(max, Math.max(min, snap(v0)));
-          if (side === "lo") { if (v > +hiIn.value) v = +hiIn.value; loIn.value = v; }
-          else               { if (v < +loIn.value) v = +loIn.value; hiIn.value = v; }
-          set(+loIn.value, +hiIn.value);
-          applySettingsDraft();
-        }
-        paint(); // normalise the display (also reverts a junk entry)
-      };
-      const wireEdit = (el, side) => {
-        if (!el) return;
-        // First click on the number: take over focus ourselves (so the gap
-        // around it can't grab a caret), make it editable, and select the value
-        // so a keystroke replaces it. A click while already editing is left
-        // alone so you can place the caret between digits.
-        el.addEventListener("mousedown", (e) => {
-          if (el.getAttribute("contenteditable") === "true") return;
-          e.preventDefault();
-          el.setAttribute("contenteditable", "true");
-          el.focus();
-          setTimeout(() => selectAllText(el), 0);
-        });
-        el.addEventListener("keydown", (e) => {
-          if (e.key === "Enter")  { e.preventDefault(); el.blur(); return; }
-          if (e.key === "Escape") { e.preventDefault(); paint(); el.blur(); return; }
-          const k = e.key;
-          if (k.length === 1 && !/[0-9]/.test(k) && !(decimals && k === ".") && !e.ctrlKey && !e.metaKey) {
-            e.preventDefault();
-          }
-        });
-        el.addEventListener("blur", () => {
-          el.removeAttribute("contenteditable"); // back to plain text until the next click
-          commitEdit(el, side);
-        });
-      };
-      wireEdit(loNum, "lo");
-      wireEdit(hiNum, "hi");
-
-      paint();
-    }
-    // Difficulty ticks: integers across the axis (thinned if the span is wide),
-    // last shown as "N+". A null handle (open) sits at the axis end; on commit a
-    // handle dragged/typed to an axis end is stored back as null so it stays open.
-    // Only the two ends, like the length slider: difficulty values aren't evenly
-    // spaced across the axis, so flex-spaced middle ticks would misalign.
-    const diffTicks = [String(rvAxis.diffMin), `${rvAxis.diffMax}+`];
-    setupRivalRange("gt-rival-diff-range", "gt-rival-diff-readout", "gt-rival-diff-ticks", {
-      min: rvAxis.diffMin, max: rvAxis.diffMax, step: 0.1, decimals: true, ticks: diffTicks,
-      lo: (draft.rivalSettings.diffMin == null) ? rvAxis.diffMin : clampVal(draft.rivalSettings.diffMin, rvAxis.diffMin, rvAxis.diffMax, rvAxis.diffMin),
-      hi: (draft.rivalSettings.diffMax == null) ? rvAxis.diffMax : clampVal(draft.rivalSettings.diffMax, rvAxis.diffMin, rvAxis.diffMax, rvAxis.diffMax),
-      set: (lo, hi) => {
-        draft.rivalSettings.diffMin = (lo <= rvAxis.diffMin) ? null : lo;
-        draft.rivalSettings.diffMax = (hi >= rvAxis.diffMax) ? null : hi;
-      },
-    });
-    setupRivalRange("gt-rival-len-range", "gt-rival-len-readout", "gt-rival-len-ticks", {
-      min: rvAxis.lenMin, max: rvAxis.lenMax, step: 1, decimals: false,
-      ticks: [String(rvAxis.lenMin), `${rvAxis.lenMax}+`],
-      lo: (draft.rivalSettings.lenMin == null) ? rvAxis.lenMin : clampVal(draft.rivalSettings.lenMin, rvAxis.lenMin, rvAxis.lenMax, rvAxis.lenMin),
-      hi: (draft.rivalSettings.lenMax == null) ? rvAxis.lenMax : clampVal(draft.rivalSettings.lenMax, rvAxis.lenMin, rvAxis.lenMax, rvAxis.lenMax),
-      set: (lo, hi) => {
-        draft.rivalSettings.lenMin = (lo <= rvAxis.lenMin) ? null : lo;
-        draft.rivalSettings.lenMax = (hi >= rvAxis.lenMax) ? null : hi;
-      },
-    });
-    setupRivalRange("gt-rival-mrival-range", "gt-rival-mrival-readout", "gt-rival-mrival-ticks", {
-      min: rvmAxis.rivalMin, max: rvmAxis.rivalMax, step: 1, decimals: false,
-      ticks: [String(rvmAxis.rivalMin), `${rvmAxis.rivalMax}+`],
-      lo: (draft.rivalSettings[mfK.rMin] == null) ? rvmAxis.rivalMin : clampVal(draft.rivalSettings[mfK.rMin], rvmAxis.rivalMin, rvmAxis.rivalMax, rvmAxis.rivalMin),
-      hi: (draft.rivalSettings[mfK.rMax] == null) ? rvmAxis.rivalMax : clampVal(draft.rivalSettings[mfK.rMax], rvmAxis.rivalMin, rvmAxis.rivalMax, rvmAxis.rivalMax),
-      set: (lo, hi) => {
-        draft.rivalSettings[mfK.rMin] = (lo <= rvmAxis.rivalMin) ? null : lo;
-        draft.rivalSettings[mfK.rMax] = (hi >= rvmAxis.rivalMax) ? null : hi;
-      },
-    });
   }
 
   function commitRivalTab(draft) {
-    const linkChanged   = draft.rivalSettings.nextUsesVsLink !== rivalSettings.nextUsesVsLink;
-    const scopeChanged  = draft.rivalSettings.scope        !== rivalSettings.scope;
-    const metricChanged = draft.rivalSettings.metric       !== rivalSettings.metric;
-    const sortChanged   = draft.rivalSettings.nextSort     !== rivalSettings.nextSort;
-    const countChanged  = draft.rivalSettings.requireBoth  !== rivalSettings.requireBoth;
-    const filterChanged =
-      draft.rivalSettings.diffMin !== rivalSettings.diffMin ||
-      draft.rivalSettings.diffMax !== rivalSettings.diffMax ||
-      draft.rivalSettings.lenMin  !== rivalSettings.lenMin  ||
-      draft.rivalSettings.lenMax  !== rivalSettings.lenMax;
-    const metricFilterChanged =
-      draft.rivalSettings.mfWpmSelfMin  !== rivalSettings.mfWpmSelfMin  ||
-      draft.rivalSettings.mfWpmSelfMax  !== rivalSettings.mfWpmSelfMax  ||
-      draft.rivalSettings.mfWpmRivalMin !== rivalSettings.mfWpmRivalMin ||
-      draft.rivalSettings.mfWpmRivalMax !== rivalSettings.mfWpmRivalMax ||
-      draft.rivalSettings.mfPpSelfMin   !== rivalSettings.mfPpSelfMin   ||
-      draft.rivalSettings.mfPpSelfMax   !== rivalSettings.mfPpSelfMax   ||
-      draft.rivalSettings.mfPpRivalMin  !== rivalSettings.mfPpRivalMin  ||
-      draft.rivalSettings.mfPpRivalMax  !== rivalSettings.mfPpRivalMax;
-    if (!linkChanged && !scopeChanged && !metricChanged && !sortChanged && !countChanged && !filterChanged && !metricFilterChanged) return; // no change
-    rivalSettings = { ...draft.rivalSettings };
+    // Only the two navigation prefs live here now; the per-goal filters commit
+    // straight from the edit popover. Both prefs are read live at click time
+    // (onRivalNextClicked), so a change needs persisting but no re-render.
+    const linkChanged = draft.rivalSettings.nextUsesVsLink !== rivalSettings.nextUsesVsLink;
+    const sortChanged = draft.rivalSettings.nextSort     !== rivalSettings.nextSort;
+    if (!linkChanged && !sortChanged) return; // no change
+    rivalSettings = { ...rivalSettings, nextUsesVsLink: draft.rivalSettings.nextUsesVsLink, nextSort: draft.rivalSettings.nextSort };
     saveRivalSettings();
-    if (scopeChanged) {
-      // Scope drives the standings (wins/total) and the Next-vs pool, and may
-      // newly require the unranked stream — re-render and (leader) reconcile.
-      renderAllGoals();
-      if (isLeader) ensureRivalSync();
-    } else if (metricChanged || countChanged || filterChanged || metricFilterChanged) {
-      // Metric flips which stat the standings/Next-vs compare; requireBoth and
-      // the difficulty+length filter change the displayed standings (wins
-      // denominator + Next-vs pool). The store already holds both wpm & pp per
-      // quote, so a re-render is enough — no refetch.
-      renderAllGoals();
-    }
-    // nextUsesVsLink and nextSort are both read live at click time in
-    // onRivalNextClicked, so they need no re-render. (Switching nextSort starts
-    // a fresh cursor cycle automatically — see the sort-mismatch reset there.)
   }
 
   // ── Backup tab (import / export) ──────────────────────────────
@@ -2474,6 +2583,7 @@ function gtMain() {
     displaySettings = loadDisplaySettings();
     rivalSettings   = loadRivalSettings();
     improveSettings = loadImproveSettings();
+    migrateRivalGoalSettings(); // seed per-goal rival filters for pre-v10.31 imported backups
 
     // Clear ephemeral state. prevGainMap would otherwise trigger
     // fake "+N gained!" pop-ups on the next render if any of the
@@ -2767,9 +2877,9 @@ function gtMain() {
   function commitAllTabs() {
     if (!settingsDraft) return false;
     persistActiveFormToDraft(); // capture any unblurred input edits
-    const before = JSON.stringify({ recSettings, displaySettings, rivalSettings });
+    const before = JSON.stringify({ recSettings, displaySettings, rivalSettings, improveSettings });
     for (const tab of SETTINGS_TABS) tab.commit(settingsDraft);
-    const after = JSON.stringify({ recSettings, displaySettings, rivalSettings });
+    const after = JSON.stringify({ recSettings, displaySettings, rivalSettings, improveSettings });
     return before !== after;
   }
 
@@ -3004,6 +3114,66 @@ function gtMain() {
   function saveRivalSettings() {
     localStorage.setItem(RIVAL_SETTINGS_KEY, JSON.stringify(rivalSettings));
     channel?.postMessage({ type: "rival-settings-changed" });
+  }
+
+  // ── Per-goal rival filter settings ───────────────────────────
+  // The comparison filters (scope / metric / require-both / difficulty / length
+  // / metric-value bands) are PER-GOAL: changing one is always a local re-tally
+  // over the cached per-rival store (memoized by rivalFilterSig), never a
+  // re-fetch — so the meaning of accumulated wins is preserved by re-deriving.
+  // They live on `gd.rivalSettings`. The legacy global `rivalSettings` keeps
+  // only the two navigation prefs (nextSort, nextUsesVsLink) in its Settings UI;
+  // its filter fields survive solely as the seed template for NEW goals and the
+  // one-time migration below. The bulk fetch stays keyed to the rival USERNAME
+  // (identity), untouched by any filter edit.
+  const RIVAL_GOAL_SETTINGS_V = 1;
+  // The filter slice of a settings object (everything except the nav prefs),
+  // sanitised. Pulled from the global object as the template for a new goal.
+  function rivalFilterFields(src) {
+    const g = src || {};
+    const num = (v) => { if (v == null) return null; const n = Number(v); return Number.isFinite(n) ? n : null; };
+    return {
+      scope:       RIVAL_SCOPE_VALUES.includes(g.scope)   ? g.scope   : "all",
+      metric:      RIVAL_METRIC_VALUES.includes(g.metric) ? g.metric  : "wpm",
+      requireBoth: !!g.requireBoth,
+      diffMin: num(g.diffMin), diffMax: num(g.diffMax),
+      lenMin:  num(g.lenMin),  lenMax:  num(g.lenMax),
+      // Metric-value bands, per metric. The self-side bands were removed (a
+      // self-defeating filter), so only the rival-side handles are kept.
+      mfWpmSelfMin: null, mfWpmSelfMax: null,
+      mfWpmRivalMin: num(g.mfWpmRivalMin), mfWpmRivalMax: num(g.mfWpmRivalMax),
+      mfPpSelfMin: null, mfPpSelfMax: null,
+      mfPpRivalMin: num(g.mfPpRivalMin), mfPpRivalMax: num(g.mfPpRivalMax),
+    };
+  }
+  // The settings object a NEW rival goal starts from: a CLEAN slate — no filter
+  // (every range full / open), scope "all", metric "wpm". Deliberately NOT seeded
+  // from the global object: that holds a user's old pre-per-goal filter (e.g. a
+  // stale WPM band), which would otherwise re-appear on every new goal. Each goal
+  // is configured from scratch in the creation modal (and editable afterwards).
+  function defaultRivalGoalSettings() {
+    return { ...rivalFilterFields(DEFAULT_RIVAL_SETTINGS), settingsV: RIVAL_GOAL_SETTINGS_V };
+  }
+  // The live per-goal filter object — the source of truth for every standings
+  // computation. Falls back to a fresh default if a goal somehow lacks one
+  // (shouldn't happen post-migration, but keeps every read path total).
+  function goalRivalCfg(gd) {
+    return (gd && gd.rivalSettings) ? gd.rivalSettings : defaultRivalGoalSettings();
+  }
+  // One-time seed for EXISTING goals: copy the OLD global filter config onto each
+  // rival goal that predates per-goal settings, so a user's previous global
+  // filter is preserved on the goals they already had. Guarded by a per-goal
+  // settingsV stamp so it can't double-apply, and any fields already on the goal
+  // win. New goals don't go through here — they start from the clean default.
+  function migrateRivalGoalSettings() {
+    const seed = { ...rivalFilterFields(rivalSettings), settingsV: RIVAL_GOAL_SETTINGS_V };
+    let changed = false;
+    for (const gd of (goalData.rival || [])) {
+      if (gd && gd.rivalSettings && gd.rivalSettings.settingsV === RIVAL_GOAL_SETTINGS_V) continue;
+      gd.rivalSettings = { ...seed, ...(gd.rivalSettings || {}), settingsV: RIVAL_GOAL_SETTINGS_V };
+      changed = true;
+    }
+    if (changed) saveGoals("rival");
   }
 
   // ── Migrate recurring goals when reset settings change ──────
@@ -3598,22 +3768,106 @@ async function getExpRankByUsername(username) {
 
   // Rival-mode controls (type=rival).
   const rivalMetricRow  = document.getElementById("gt-rival-metric-row");
-  const rivalMetricBtns = document.querySelectorAll(".gt-rival-metric-group .gt-mode-btn");
-  const rivalScopeBtns  = document.querySelectorAll(".gt-rival-scope-group .gt-mode-btn");
-  const rivalScopeHintEl = document.getElementById("gt-rival-scope-modal-hint");
   const rivalMultiModeBtns = document.querySelectorAll("[data-rival-multimode]");
   const rivalAddBtn      = document.getElementById("gt-rival-add-btn");
-  const rivalListEl      = document.getElementById("gt-rival-multi-list");
-  const rivalListRow     = document.getElementById("gt-rival-multi-list-row");
+  const rivalListEl      = document.getElementById("gt-rival-inline-tags"); // chips live inside the entry field now
+  const amountTargetRow  = document.getElementById("gt-amount-target-row");  // becomes the rival tag field
+  // Rival comparison config (creation modal). These mirror the per-goal edit
+  // popover; their values live in rivalDraftSettings until the goal is created,
+  // at which point they seed gd.rivalSettings. No save/re-tally here — creation
+  // commits on Confirm.
+  const rivalConfigRow   = document.getElementById("gt-rival-config-row");
+  const rivalCfgMetricBtns = rivalConfigRow ? rivalConfigRow.querySelectorAll("[data-rvc-metric]") : [];
+  const rivalCfgScopeBtns  = rivalConfigRow ? rivalConfigRow.querySelectorAll("[data-rvc-scope]")  : [];
+  const rivalCfgBothBtns   = rivalConfigRow ? rivalConfigRow.querySelectorAll("[data-rvc-both]")   : [];
+  let rivalDraftSettings = defaultRivalGoalSettings();
+  // A throwaway goal-shaped object so the data-driven axes scope to the rival(s)
+  // currently chosen in the modal. Their stores are usually empty at creation
+  // (the bulk fetch starts after Confirm), so the sliders show the fallback axis
+  // until a rival you already track elsewhere is chosen — exactly like the edit
+  // popover once synced.
+  function rivalCreateSyntheticGd() {
+    return rivalMultiMode
+      ? { id: "__rival_create__", mode: "multi", rivals: selectedRivalList.slice() }
+      : { id: "__rival_create__", rival: rivalFetchedName || null };
+  }
+  function reflectRivalCfgButtons() {
+    const m = rivalMetric(rivalDraftSettings), sc = rivalScope(rivalDraftSettings), rb = !!rivalDraftSettings.requireBoth;
+    rivalCfgMetricBtns.forEach(b => b.classList.toggle("active", b.dataset.rvcMetric === m));
+    rivalCfgScopeBtns.forEach(b => b.classList.toggle("active", b.dataset.rvcScope === sc));
+    rivalCfgBothBtns.forEach(b => b.classList.toggle("active", (b.dataset.rvcBoth === "true") === rb));
+    const lbl = document.getElementById("gt-rival-cfg-band-label");
+    if (lbl) lbl.textContent = `Rival ${m.toUpperCase()} filter`;
+  }
+  function buildRivalCreateSliders() {
+    if (!rivalConfigRow) return;
+    const sgd = rivalCreateSyntheticGd();
+    const fAxis = rivalFilterAxis(rivalDraftSettings, sgd);
+    const mAxis = rivalMetricAxis(rivalDraftSettings, sgd);
+    const mk = rivalMetricKeys(rivalDraftSettings);
+    const clampD = (v) => Math.max(fAxis.diffMin, Math.min(fAxis.diffMax, v));
+    const clampL = (v) => Math.max(fAxis.lenMin,  Math.min(fAxis.lenMax,  v));
+    const clampR = (v) => Math.max(mAxis.rivalMin, Math.min(mAxis.rivalMax, v));
+    const dLo = rivalDraftSettings.diffMin == null ? fAxis.diffMin : clampD(rivalDraftSettings.diffMin);
+    const dHi = rivalDraftSettings.diffMax == null ? fAxis.diffMax : clampD(rivalDraftSettings.diffMax);
+    const lLo = rivalDraftSettings.lenMin  == null ? fAxis.lenMin  : clampL(rivalDraftSettings.lenMin);
+    const lHi = rivalDraftSettings.lenMax  == null ? fAxis.lenMax  : clampL(rivalDraftSettings.lenMax);
+    const rLo = rivalDraftSettings[mk.rMin] == null ? mAxis.rivalMin : clampR(rivalDraftSettings[mk.rMin]);
+    const rHi = rivalDraftSettings[mk.rMax] == null ? mAxis.rivalMax : clampR(rivalDraftSettings[mk.rMax]);
+    setupTargetRange("gt-rival-cfg-diff-range", "gt-rival-cfg-diff-readout", "gt-rival-cfg-diff-ticks", {
+      min: fAxis.diffMin, max: fAxis.diffMax, step: 0.1, decimals: true,
+      ticks: [String(fAxis.diffMin), `${fAxis.diffMax}+`], lo: dLo, hi: dHi,
+      set: (lo, hi) => { rivalDraftSettings.diffMin = lo; rivalDraftSettings.diffMax = hi; },
+    });
+    setupTargetRange("gt-rival-cfg-len-range", "gt-rival-cfg-len-readout", "gt-rival-cfg-len-ticks", {
+      min: fAxis.lenMin, max: fAxis.lenMax, step: 1, decimals: false,
+      ticks: [String(fAxis.lenMin), `${fAxis.lenMax}+`], lo: lLo, hi: lHi,
+      set: (lo, hi) => { rivalDraftSettings.lenMin = lo; rivalDraftSettings.lenMax = hi; },
+    });
+    setupTargetRange("gt-rival-cfg-band-range", "gt-rival-cfg-band-readout", "gt-rival-cfg-band-ticks", {
+      min: mAxis.rivalMin, max: mAxis.rivalMax, step: 1, decimals: false,
+      ticks: [String(mAxis.rivalMin), `${mAxis.rivalMax}+`], lo: rLo, hi: rHi,
+      set: (lo, hi) => { const k = rivalMetricKeys(rivalDraftSettings); rivalDraftSettings[k.rMin] = lo; rivalDraftSettings[k.rMax] = hi; },
+    });
+  }
+  // Refresh the sliders if the rival config is currently visible (selection or
+  // toggle change). Deferred a frame so any just-injected DOM is laid out.
+  function refreshRivalCreateSliders() {
+    if (rivalConfigRow && rivalConfigRow.style.display !== "none") requestAnimationFrame(buildRivalCreateSliders);
+  }
+  rivalCfgMetricBtns.forEach(btn => btn.addEventListener("click", () => {
+    const val = btn.dataset.rvcMetric === "pp" ? "pp" : "wpm";
+    if (val === rivalMetric(rivalDraftSettings)) return;
+    rivalDraftSettings.metric = val;
+    reflectRivalCfgButtons();
+    buildRivalCreateSliders(); // band axis + which handles apply depend on metric
+  }));
+  rivalCfgScopeBtns.forEach(btn => btn.addEventListener("click", () => {
+    const val = btn.dataset.rvcScope;
+    if (val === rivalScope(rivalDraftSettings)) return;
+    rivalDraftSettings.scope = val;
+    reflectRivalCfgButtons();
+    buildRivalCreateSliders(); // scope shifts every axis bound
+  }));
+  rivalCfgBothBtns.forEach(btn => btn.addEventListener("click", () => {
+    const val = btn.dataset.rvcBoth === "true";
+    if (val === !!rivalDraftSettings.requireBoth) return;
+    rivalDraftSettings.requireBoth = val;
+    reflectRivalCfgButtons();
+    buildRivalCreateSliders(); // shared-only narrows the data pool -> axis
+  }));
   // Render the chosen-rivals list as removable chips (multiple mode). Owns the
   // visibility of the whole "Current Rivals" row: shown only in multiple mode
   // once at least one rival has been added.
+  // Render the chosen rivals as removable chips INSIDE the entry field (the
+  // amount row, styled as a tag field for rival). Only multiple-rivals mode
+  // shows chips; single mode keeps just the text input. The "Current Rivals"
+  // section was merged into this field (modern "To:"-style tag input).
   function renderRivalList() {
     if (!rivalListEl) return;
     rivalListEl.innerHTML = "";
-    const show = rivalMultiMode && selectedRivalList.length > 0;
-    if (rivalListRow) rivalListRow.style.display = show ? "" : "none";
-    if (!show) return;
+    refreshRivalCreateSliders(); // chosen-rival set changed -> axes may shift
+    if (!(rivalMultiMode && selectedRivalList.length > 0)) return;
     for (const name of selectedRivalList) {
       const chip = document.createElement("span");
       chip.className = "gt-rival-list-chip";
@@ -3634,14 +3888,10 @@ async function getExpRankByUsername(username) {
       rivalListEl.appendChild(chip);
     }
   }
-  // selectedRivalMetric ∈ {"wpm","pp"} — which stat is compared (default wpm).
-  // selectedRivalScope ∈ {"all","ranked","unranked"} — which of the rival's
-  // quotes count. It's a global preference (mirrored in Settings → Rival), so
-  // the modal seeds it from the current setting and writes it back on add.
   // rivalFetchedName: the validated rival username (null until a valid user is
   // confirmed via the username input). rivalDebounce: input debounce timer.
-  let selectedRivalMetric = "wpm";
-  let selectedRivalScope  = "all";
+  // (Metric / scope / shared / ranges now live in rivalDraftSettings, set via
+  // the per-goal config controls in the creation modal — see #gt-rival-config-row.)
   let rivalFetchedName    = null;
   let rivalDebounce       = null;
   // Multiple-rivals mode (rival goal type). rivalMultiMode toggles single vs
@@ -4100,8 +4350,9 @@ async function getExpRankByUsername(username) {
     selectedValue = null; rankFetchedPp = null; rankFetchedRank = null; maxQuotesFetched = null;
     confirmBtn.disabled = true; customInput.value = "";
     customInput.classList.remove("gt-custom-input--grow");
-    if (rivalAddBtn)  rivalAddBtn.style.display  = "none"; // re-shown by the rival branch
-    if (rivalListRow) rivalListRow.style.display = "none"; // re-shown by renderRivalList
+    if (rivalAddBtn) rivalAddBtn.style.display = "none"; // re-shown by the rival branch
+    if (amountTargetRow) amountTargetRow.classList.remove("gt-tagfield"); // rival-only styling
+    if (rivalListEl) rivalListEl.innerHTML = ""; // clear any leftover rival chips for non-rival types
 
     // ── Rival mode (type=rival) ───────────────────────────────
     // The Amount row becomes a username input (like Player mode). No presets,
@@ -4111,7 +4362,7 @@ async function getExpRankByUsername(username) {
       rivalFetchedName = null;
       rivalPendingName = null;
       amountRow.style.display   = "";
-      amountLabel.textContent   = rivalMultiMode ? "Add a rival" : "Rival player";
+      amountLabel.textContent   = "Rivals";
       presetsEl.innerHTML       = "";
       presetsEl.style.display   = "none";
       customInput.style.display = "";
@@ -4119,15 +4370,16 @@ async function getExpRankByUsername(username) {
       customInput.value         = "";
       customInput.removeAttribute("max");
       customInput.removeAttribute("step");
-      customInput.placeholder   = "Username";
+      customInput.placeholder   = rivalMultiMode ? "Add a rival\u2026" : "Username";
       nextRankRow.style.display = "none";
       maxQuotesRow.style.display = "none";
       maxCharsRow.style.display = "none";
       avgWindowRow.style.display = "none";
       if (rivalAddBtn) { rivalAddBtn.style.display = rivalMultiMode ? "" : "none"; rivalAddBtn.disabled = true; }
-      customInput.classList.add("gt-custom-input--grow"); // wider field for usernames
-      renderRivalList(); // owns the Current Rivals row visibility
-      modeHint.textContent   = rivalMultiMode ? "Enter a username to add" : "Enter a username";
+      customInput.classList.add("gt-custom-input--grow"); // borderless inside the tag field
+      if (amountTargetRow) amountTargetRow.classList.add("gt-tagfield"); // chips + input share one field
+      renderRivalList(); // renders the chosen-rival chips inside the field (multi mode)
+      modeHint.textContent   = rivalMultiMode ? "Type a username and press Enter" : "Enter a username";
       modeHint.className     = "gt-mode-hint";
       modeHint.style.display = "block";
       validateConfirm();
@@ -4461,6 +4713,7 @@ async function getExpRankByUsername(username) {
             }
           } else {
             rivalFetchedName = resolvedName;
+            refreshRivalCreateSliders(); // resolved rival -> axes may shift
             modeHint.textContent = `${resolvedName} ✓`;
             modeHint.className = "gt-mode-hint";
             confirmBtn.disabled = false;
@@ -4662,19 +4915,43 @@ async function getExpRankByUsername(username) {
     renderPresets(); // re-lays the amount row + list for the new mode
   }));
 
-  // Add the pending validated rival to the list (multiple mode).
-  if (rivalAddBtn) rivalAddBtn.addEventListener("click", () => {
+  // Add the pending validated rival to the list (multiple mode). Shared by the
+  // "+ Add" button and the Enter key in the tag-field input.
+  function addPendingRival() {
     if (!rivalMultiMode || !rivalPendingName) return;
     if (!selectedRivalList.some(n => n.toLowerCase() === rivalPendingName.toLowerCase())) {
       selectedRivalList.push(rivalPendingName);
     }
     rivalPendingName = null;
     customInput.value = "";
-    rivalAddBtn.disabled = true;
+    if (rivalAddBtn) rivalAddBtn.disabled = true;
     renderRivalList();
-    modeHint.textContent = "Enter a username to add";
+    modeHint.textContent = "Type a username and press Enter";
     modeHint.className = "gt-mode-hint";
     validateConfirm();
+  }
+  if (rivalAddBtn) rivalAddBtn.addEventListener("click", addPendingRival);
+
+  // Tag-field keyboard: Enter adds the pending rival (multi) or confirms (single).
+  // Backspace on an empty input pops the last chip — the usual "To:"-field nicety.
+  customInput.addEventListener("keydown", (e) => {
+    if (selectedType !== "rival") return;
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (rivalMultiMode) {
+        if (rivalPendingName) addPendingRival();
+      } else if (!confirmBtn.disabled) {
+        confirmBtn.click();
+      }
+      return;
+    }
+    if (e.key === "Backspace" && rivalMultiMode && customInput.value === "" && selectedRivalList.length) {
+      selectedRivalList = selectedRivalList.slice(0, -1);
+      rivalPendingName = null;
+      if (rivalAddBtn) rivalAddBtn.disabled = true;
+      renderRivalList();
+      validateConfirm();
+    }
   });
 
   typeBtns.forEach(btn => btn.addEventListener("click", () => {
@@ -4687,15 +4964,14 @@ async function getExpRankByUsername(username) {
     // race-only rows. The rival username is entered in the reused Amount-row
     // input (set up by renderPresets).
     rivalMetricRow.style.display = isRival ? "block" : "none";
+    if (rivalConfigRow) rivalConfigRow.style.display = isRival ? "block" : "none";
     if (isRival) {
       // Reflect the current single/multiple mode on the toggle buttons.
       rivalMultiModeBtns.forEach(b =>
         b.classList.toggle("active", (b.dataset.rivalMultimode === "multi") === rivalMultiMode));
-      // Seed the scope buttons from the current global preference.
-      selectedRivalScope = rivalScope();
-      rivalScopeBtns.forEach(b => b.classList.toggle("active", b.dataset.rivalScope === selectedRivalScope));
-      if (rivalScopeHintEl) rivalScopeHintEl.textContent =
-        RIVAL_SCOPE_OPTIONS.find(o => o.value === selectedRivalScope)?.hint ?? "";
+      // Reflect the draft comparison config + build its sliders.
+      reflectRivalCfgButtons();
+      requestAnimationFrame(buildRivalCreateSliders);
     }
 
     // Show filter row only for races (the solo/quickplay split is a races-only
@@ -4788,24 +5064,9 @@ async function getExpRankByUsername(username) {
     selectedFilter = btn.dataset.filter;
   }));
 
-  // Rival metric toggle (WPM / PP). Mutually exclusive; no async work — just
-  // flips which stat the comparison + wins use. Re-validates confirm in case
-  // a valid username is already entered.
-  rivalMetricBtns.forEach(btn => btn.addEventListener("click", () => {
-    rivalMetricBtns.forEach(b => b.classList.remove("active")); btn.classList.add("active");
-    selectedRivalMetric = btn.dataset.rivalMetric;
-    validateConfirm();
-  }));
-
-  // Rival scope (all / ranked / unranked): which of the rival's quotes count.
-  // Seeded from the global setting when the rival type is shown; applied back
-  // to the global setting when the goal is added.
-  rivalScopeBtns.forEach(btn => btn.addEventListener("click", () => {
-    rivalScopeBtns.forEach(b => b.classList.remove("active")); btn.classList.add("active");
-    selectedRivalScope = btn.dataset.rivalScope;
-    if (rivalScopeHintEl) rivalScopeHintEl.textContent =
-      RIVAL_SCOPE_OPTIONS.find(o => o.value === selectedRivalScope)?.hint ?? "";
-  }));
+  // (The old global WPM/PP + scope toggles in the creation modal were removed:
+  // metric / scope / shared / ranges are configured per goal via #gt-rival-config-row,
+  // wired above to rivalDraftSettings.)
 
   // ── Requirements inputs / strict toggle ─────────────────────────
   // Each input drives one axis of selectedReq. Empty / 0 / NaN = inactive
@@ -5336,17 +5597,16 @@ async function getExpRankByUsername(username) {
     selectedCharsKind = "regular";
     charsKindBtns.forEach(b => b.classList.toggle("active", b.dataset.charsKind === "regular"));
     charsKindRow.style.display = "none";
-    // Rival defaults: metric=wpm, scope from the global setting, no resolved username yet.
-    selectedRivalMetric = "wpm"; rivalFetchedName = null; clearTimeout(rivalDebounce);
+    // Rival defaults: a fresh draft comparison config (seeded from the global
+    // template), no resolved username yet.
+    rivalFetchedName = null; clearTimeout(rivalDebounce);
     rivalMultiMode = false; selectedRivalList = []; rivalPendingName = null;
     rivalMultiModeBtns.forEach(b => b.classList.toggle("active", b.dataset.rivalMultimode === "single"));
     renderRivalList();
-    rivalMetricBtns.forEach(b => b.classList.toggle("active", b.dataset.rivalMetric === "wpm"));
-    selectedRivalScope = rivalScope();
-    rivalScopeBtns.forEach(b => b.classList.toggle("active", b.dataset.rivalScope === selectedRivalScope));
-    if (rivalScopeHintEl) rivalScopeHintEl.textContent =
-      RIVAL_SCOPE_OPTIONS.find(o => o.value === selectedRivalScope)?.hint ?? "";
+    rivalDraftSettings = defaultRivalGoalSettings();
+    reflectRivalCfgButtons();
     rivalMetricRow.style.display = "none";
+    if (rivalConfigRow) rivalConfigRow.style.display = "none";
     resetRequirementsUI();
     resetAverageUI();
     resetImprovementUI();
@@ -5415,6 +5675,7 @@ async function getExpRankByUsername(username) {
     } catch {}
   }
   migrateImprovementToOwnType();
+  migrateRivalGoalSettings(); // seed each rival goal's filter settings from the old global object
 
   // ── Save goals to localStorage ─────────────────────────────────
   function saveGoals(type) {
@@ -5562,13 +5823,11 @@ async function getExpRankByUsername(username) {
       // Validate per mode: single needs a resolved name, multiple needs a list.
       if (rivalMultiMode) { if (selectedRivalList.length === 0) return; }
       else if (rivalFetchedName == null) return;
-      // Scope is a shared/global preference (also in Settings → Rival). Apply
-      // the modal's choice now; saveRivalSettings broadcasts to other tabs and
-      // the ensureRivalSync below will start the unranked stream if needed.
-      if (RIVAL_SCOPE_VALUES.includes(selectedRivalScope) && selectedRivalScope !== rivalSettings.scope) {
-        rivalSettings = { ...rivalSettings, scope: selectedRivalScope };
-        saveRivalSettings();
-      }
+      // The comparison filters are PER-GOAL and were configured right here in the
+      // modal — seed the new goal straight from the draft. Nothing is written
+      // back to the global object; the bulk fetch is keyed to the rival username
+      // only, so ensureRivalSync still starts the right stream.
+      const rivalCfg = { ...rivalDraftSettings, settingsV: RIVAL_GOAL_SETTINGS_V };
       const goalId = generateGoalId("rival");
       let newGoal;
       if (rivalMultiMode) {
@@ -5579,11 +5838,12 @@ async function getExpRankByUsername(username) {
           const k = n.toLowerCase();
           if (!seen.has(k)) { seen.add(k); rivals.push(n); }
         }
-        newGoal = { id: goalId, rivals, mode: "multi" };
+        newGoal = { id: goalId, rivals, mode: "multi", rivalSettings: rivalCfg };
       } else {
         newGoal = {
           id: goalId,
           rival: rivalFetchedName,         // display name (as TypeGG returns it)
+          rivalSettings: rivalCfg,
         };
       }
       goalData.rival.push(newGoal);
@@ -5836,6 +6096,7 @@ async function getExpRankByUsername(username) {
         targetLoaded: selectedMode === "rank" ? false : true, // false for rank goals — target is loaded async by updateRankGoals/updateExpRankGoals
         [cfg.baselineKey]: maxQuotesBaselineOverride != null ? maxQuotesBaselineOverride : currentVal,
         recurrence: selectedRec,
+        supportsRecurrence: (selectedMode === "gain" || selectedMode === "average" || selectedMode === "improvement"),
         periodStart: isRecurring ? getCurrentPeriodStart(selectedRec) : null,
         streak: 0,
         totalCompletions: 0,
@@ -6409,17 +6670,22 @@ async function getExpRankByUsername(username) {
     // When we have catalog metadata for the live quote and it fails the goal's
     // status/difficulty/length filters, racing it can never move this goal's
     // count (progress is scoped to the filtered pool), so say so instead of
-    // showing a value that looks comparable. The "played" axis is intentionally
-    // not checked here: an as-yet-unplayed quote that matches the metadata
-    // filters does count once raced. Missing meta (catalog not synced yet) falls
-    // through to the value row rather than asserting a mismatch.
+    // showing a value that looks comparable. The "Played" pool is handled the
+    // same way: a quote you haven't typed yet is not in the pool, so showing a
+    // "0 / target" row would be misleading — it flips to the value row the moment
+    // you race it (and it enters the pool). Missing meta (catalog not synced yet)
+    // falls through to the value row rather than asserting a mismatch.
     const liveMeta = liveQid ? quoteCatalog[liveQid] : null;
+    const liveSelfEntry = liveQid ? selfStore.quotes[liveQid] : undefined;
+    const playedOnly = gd.played === "played";
     if (!liveQid) {
       showMsg("Race a quote to compare");
     } else if (liveMeta && !targetQuotePassesMeta(liveMeta, gd)) {
       showMsg("Quote doesn't match filters");
+    } else if (playedOnly && !liveSelfEntry) {
+      showMsg("Quote doesn't match filters");
     } else {
-      const sEntry = selfStore.quotes[liveQid];
+      const sEntry = liveSelfEntry;
       const sv = sEntry ? (Number(sEntry[metric]) || 0) : 0;
       if (msgEl)  msgEl.style.display = "none";
       if (wrapEl) wrapEl.style.display = "";
@@ -8159,13 +8425,13 @@ async function getExpRankByUsername(username) {
   // ── Scope (all / ranked / unranked) ──────────────────────────
   // A single global preference (Settings → Rival, also surfaced in the add-goal
   // modal) decides which of the rival's quotes count toward every rival goal.
-  function rivalScope() {
-    const s = rivalSettings.scope;
+  function rivalScope(rs) {
+    const s = (rs || rivalSettings).scope;
     return (s === "ranked" || s === "unranked" || s === "all") ? s : "all";
   }
-  // Comparison metric for ALL rival goals — a global preference (Settings -> Rival).
-  function rivalMetric() {
-    return rivalSettings.metric === "pp" ? "pp" : "wpm";
+  // Comparison metric for a rival goal — a PER-GOAL setting (gd.rivalSettings).
+  function rivalMetric(rs) {
+    return (rs || rivalSettings).metric === "pp" ? "pp" : "wpm";
   }
   // Whether a rival quote falls inside the active scope. A missing `r` flag is
   // legacy data, which was ranked-only, so it counts as ranked.
@@ -9339,15 +9605,25 @@ async function getExpRankByUsername(username) {
   // an integer, length floored to the nearest 1000). Cached by store epoch
   // (rebuilt when the rival stores change). Falls back to the fixed bounds
   // until at least one rival quote with meta is known.
-  let rivalAxisCache = null;
-  function rivalFilterAxis() {
-    const scope = rivalScope();
-    const requireBoth = !!rivalSettings.requireBoth;
-    const axisKey = `${rivalStoreEpoch}:${scope}:${requireBoth}`;
-    if (rivalAxisCache && rivalAxisCache.axisKey === axisKey) return rivalAxisCache;
+  // Per-goal axis cache. Now keyed by goal id + rival set + scope + require-both
+  // (the inputs that move the bounds), so two goals with different filters don't
+  // thrash a single slot. The axis is scoped to THIS goal's rivals so the
+  // popover sliders reflect the rivals the goal actually compares against.
+  const rivalAxisCache = new Map();
+  function goalRivalNamesSig(gd) {
+    return goalRivalNames(gd).map(n => String(n).toLowerCase()).sort().join(",");
+  }
+  function rivalFilterAxis(rs, gd) {
+    rs = rs || rivalSettings;
+    const scope = rivalScope(rs);
+    const requireBoth = !!rs.requireBoth;
+    const gid = (gd && gd.id) || "";
+    const axisKey = `${gid}:${rivalStoreEpoch}:${goalRivalNamesSig(gd)}:${scope}:${requireBoth}`;
+    const hit = rivalAxisCache.get(gid);
+    if (hit && hit.axisKey === axisKey) return hit;
     const sq = loadRivalStore(RIVAL_SELF_NAME).quotes; // for the "shared quotes only" pool
     let dLo = Infinity, dHi = -Infinity, lLo = Infinity, lHi = -Infinity;
-    for (const rname of referencedRivalMap().values()) {
+    for (const rname of goalRivalNames(gd)) {
       const q = loadRivalStore(rname).quotes;
       for (const qid in q) {
         const m = rivalMetaOf(qid);
@@ -9368,19 +9644,22 @@ async function getExpRankByUsername(username) {
     };
     if (axis.diffMax <= axis.diffMin) axis.diffMax = axis.diffMin + 1;                  // keep a usable span
     if (axis.lenMax  <= axis.lenMin)  axis.lenMax  = axis.lenMin + RIVAL_LEN_AXIS_ROUND;
-    rivalAxisCache = axis;
+    rivalAxisCache.set(gid, axis);
     return axis;
   }
   // Metric-value axis (WPM/PP) — data-driven and metric-dependent. Two ranges:
   // YOUR values (self store) and the RIVAL's (across all rival stores). Cached by
   // store epoch + metric; floored to integers; a max at the axis end = uncapped.
-  let rivalMetricAxisCache = null;
-  function rivalMetricAxis() {
-    const metric = rivalMetric();
-    const scope = rivalScope();
-    const requireBoth = !!rivalSettings.requireBoth;
-    const key = `${rivalStoreEpoch}:${metric}:${scope}:${requireBoth}`;
-    if (rivalMetricAxisCache && rivalMetricAxisCache.key === key) return rivalMetricAxisCache;
+  const rivalMetricAxisCache = new Map();
+  function rivalMetricAxis(rs, gd) {
+    rs = rs || rivalSettings;
+    const metric = rivalMetric(rs);
+    const scope = rivalScope(rs);
+    const requireBoth = !!rs.requireBoth;
+    const gid = (gd && gd.id) || "";
+    const key = `${gid}:${rivalStoreEpoch}:${goalRivalNamesSig(gd)}:${metric}:${scope}:${requireBoth}`;
+    const hit = rivalMetricAxisCache.get(gid);
+    if (hit && hit.key === key) return hit;
     let sLo = Infinity, sHi = -Infinity, rLo = Infinity, rHi = -Infinity;
     const selfQ = loadRivalStore(RIVAL_SELF_NAME).quotes;
     for (const qid in selfQ) {
@@ -9388,7 +9667,7 @@ async function getExpRankByUsername(username) {
       const v = Number(selfQ[qid][metric]);
       if (Number.isFinite(v)) { if (v < sLo) sLo = v; if (v > sHi) sHi = v; }
     }
-    for (const rname of referencedRivalMap().values()) {
+    for (const rname of goalRivalNames(gd)) {
       const rq = loadRivalStore(rname).quotes;
       for (const qid in rq) {
         if (!rivalQuoteInScope(rivalMetaOf(qid), scope)) continue;  // ranked/unranked
@@ -9407,12 +9686,13 @@ async function getExpRankByUsername(username) {
     };
     if (axis.selfMax  <= axis.selfMin)  axis.selfMax  = axis.selfMin  + 1;
     if (axis.rivalMax <= axis.rivalMin) axis.rivalMax = axis.rivalMin + 1;
-    rivalMetricAxisCache = axis;
+    rivalMetricAxisCache.set(gid, axis);
     return axis;
   }
   // Resolve the stored handles (null = at an axis end) against the live axis.
-  function rivalFilterState() {
-    const s = rivalSettings, axis = rivalFilterAxis();
+  function rivalFilterState(rs, gd) {
+    rs = rs || rivalSettings;
+    const s = rs, axis = rivalFilterAxis(rs, gd);
     const clampD = (v) => Math.min(axis.diffMax, Math.max(axis.diffMin, v));
     const clampL = (v) => Math.min(axis.lenMax,  Math.max(axis.lenMin,  v));
     const dMin = (s.diffMin == null) ? axis.diffMin : clampD(s.diffMin);
@@ -9426,14 +9706,15 @@ async function getExpRankByUsername(username) {
     };
   }
   // Which stored handles apply for the CURRENT metric (per-metric storage).
-  function rivalMetricKeys() {
-    return rivalMetric() === "pp"
+  function rivalMetricKeys(rs) {
+    return rivalMetric(rs) === "pp"
       ? { sMin: "mfPpSelfMin", sMax: "mfPpSelfMax", rMin: "mfPpRivalMin", rMax: "mfPpRivalMax" }
       : { sMin: "mfWpmSelfMin", sMax: "mfWpmSelfMax", rMin: "mfWpmRivalMin", rMax: "mfWpmRivalMax" };
   }
   // Resolve the metric-filter handles (null = axis end) against the live axis.
-  function rivalMetricFilterState() {
-    const s = rivalSettings, axis = rivalMetricAxis(), k = rivalMetricKeys();
+  function rivalMetricFilterState(rs, gd) {
+    rs = rs || rivalSettings;
+    const s = rs, axis = rivalMetricAxis(rs, gd), k = rivalMetricKeys(rs);
     const clampR = (v) => Math.min(axis.rivalMax, Math.max(axis.rivalMin, v));
     const rMin = (s[k.rMin] == null) ? axis.rivalMin : clampR(s[k.rMin]);
     const rMax = (s[k.rMax] == null) ? axis.rivalMax : clampR(s[k.rMax]);
@@ -9443,9 +9724,9 @@ async function getExpRankByUsername(username) {
     };
   }
   // Signature for the standings memo so a filter change invalidates it.
-  function rivalFilterSig() {
-    const f = rivalFilterState();
-    const m = rivalMetricFilterState();
+  function rivalFilterSig(rs, gd) {
+    const f = rivalFilterState(rs, gd);
+    const m = rivalMetricFilterState(rs, gd);
     const dl = (f.dActive || f.lActive) ? `${f.dMin},${f.dMax},${f.lMin},${f.lMax}` : "";
     const mm = m.rActive ? `r${m.rMin}-${m.rMax}` : "";
     return `${dl}|${mm}`;
@@ -9523,16 +9804,18 @@ async function getExpRankByUsername(username) {
     return best === null ? null : { rv: best, holder };
   }
   // Core standings tally for an arbitrary list of rival names (length-1 for a
-  // single rival). Applies every active global filter (scope, difficulty/length,
-  // metric-value, shared-only) exactly as the card does. NOT memoized — callers
-  // that render every frame go through computeRivalStandings; the rivals modal
-  // calls this directly per rival.
-  function tallyStandings(names) {
-    const metric = rivalMetric();
-    const scope  = rivalScope();
-    const requireBoth = !!rivalSettings.requireBoth; // count only quotes you've both raced
-    const filter = rivalFilterState();
-    const mf = rivalMetricFilterState();
+  // single rival). Applies every active PER-GOAL filter (scope, difficulty/
+  // length, metric-value, shared-only) exactly as the card does, reading them
+  // from the goal's own settings (`rs` = goalRivalCfg(gd)). NOT memoized —
+  // callers that render every frame go through computeRivalStandings; the rivals
+  // modal calls this directly per rival.
+  function tallyStandings(names, rs, gd) {
+    rs = rs || rivalSettings;
+    const metric = rivalMetric(rs);
+    const scope  = rivalScope(rs);
+    const requireBoth = !!rs.requireBoth; // count only quotes you've both raced
+    const filter = rivalFilterState(rs, gd);
+    const mf = rivalMetricFilterState(rs, gd);
     const selfStore  = loadRivalStore(RIVAL_SELF_NAME);
     const selfDone   = rivalBulkDone(selfStore);     // your history fully synced?
     const sq = selfStore.quotes;
@@ -9577,10 +9860,11 @@ async function getExpRankByUsername(username) {
     return { total, wins, worse, rivalDone, selfDone };
   }
   function computeRivalStandings(gd) {
-    const metric = rivalMetric();
-    const scope  = rivalScope();
-    const requireBoth = !!rivalSettings.requireBoth;
-    const filterSig = rivalFilterSig();
+    const rs = goalRivalCfg(gd);
+    const metric = rivalMetric(rs);
+    const scope  = rivalScope(rs);
+    const requireBoth = !!rs.requireBoth;
+    const filterSig = rivalFilterSig(rs, gd);
     const selfDone  = rivalBulkDone(loadRivalStore(RIVAL_SELF_NAME));
     // The set of listed rivals is part of the goal identity; include a signature
     // so editing the list (or a name resolving to different casing) invalidates
@@ -9594,23 +9878,24 @@ async function getExpRankByUsername(username) {
         && cached.namesSig === namesSig) {
       return cached.result;
     }
-    const result = tallyStandings(names);
+    const result = tallyStandings(names, rs, gd);
     rivalStandingsCache.set(gd.id, { epoch: rivalStoreEpoch, metric, scope, requireBoth, selfDone, filterSig, namesSig, result });
     return result;
   }
 
-  // Active global rival filters as short human labels (for the modal header).
-  function activeRivalFilterLabels() {
+  // A rival goal's active filters as short human labels (for the modal header).
+  function activeRivalFilterLabels(rs, gd) {
+    rs = rs || rivalSettings;
     const out = [];
-    const scope = rivalScope();
+    const scope = rivalScope(rs);
     if (scope === "ranked") out.push("Ranked only");
     else if (scope === "unranked") out.push("Unranked only");
-    if (rivalSettings.requireBoth) out.push("Shared quotes only");
-    const f = rivalFilterState();
+    if (rs.requireBoth) out.push("Shared quotes only");
+    const f = rivalFilterState(rs, gd);
     if (f.dActive) out.push(`Difficulty ${f.dMin}\u2013${f.dMax < f.axis.diffMax ? f.dMax : f.dMax + "+"}`);
     if (f.lActive) out.push(`Length ${f.lMin}\u2013${f.lMax < f.axis.lenMax ? f.lMax : f.lMax + "+"}`);
-    const mf = rivalMetricFilterState();
-    if (mf.rActive) out.push(`${rivalMetric().toUpperCase()} ${mf.rMin}\u2013${mf.rMax < mf.axis.rivalMax ? mf.rMax : mf.rMax + "+"}`);
+    const mf = rivalMetricFilterState(rs, gd);
+    if (mf.rActive) out.push(`${rivalMetric(rs).toUpperCase()} ${mf.rMin}\u2013${mf.rMax < mf.axis.rivalMax ? mf.rMax : mf.rMax + "+"}`);
     return out;
   }
 
@@ -9622,6 +9907,7 @@ async function getExpRankByUsername(username) {
   function openRivalsModal(goalId) {
     const gd = (goalData.rival || []).find(g => g.id === goalId);
     if (!gd || !goalIsMulti(gd)) return;
+    const rs = goalRivalCfg(gd);
 
     const overlay = document.createElement("div");
     overlay.className = "gt-rivals-overlay";
@@ -9667,11 +9953,11 @@ async function getExpRankByUsername(username) {
 
     // Header line + active-filter note. Cheap; safe to run on every refresh.
     const renderHeaderNote = () => {
-      const metric = rivalMetric();
+      const metric = rivalMetric(rs);
       subEl.textContent = `Wins compared by ${metric.toUpperCase()} \u00b7 sorted A\u2013Z`;
-      const labels = activeRivalFilterLabels();
+      const labels = activeRivalFilterLabels(rs, gd);
       if (labels.length) {
-        noteEl.textContent = `Filters applied (Settings \u2192 Rival): ${labels.join(" \u00b7 ")}`;
+        noteEl.textContent = `Filters applied (this goal): ${labels.join(" \u00b7 ")}`;
         noteEl.style.display = "";
       } else {
         noteEl.style.display = "none";
@@ -9681,7 +9967,7 @@ async function getExpRankByUsername(username) {
     // Build one rival's row (name / wins / progress / next / remove). Shared by
     // the full render and the live sync-refresh so both stay in step.
     const buildRivalRow = (name, canRemove) => {
-      const { total, wins, worse, rivalDone, selfDone } = tallyStandings([name]);
+      const { total, wins, worse, rivalDone, selfDone } = tallyStandings([name], rs, gd);
       const pct  = total > 0 ? Math.floor((wins / total) * 100) : 0;
       const done = total > 0 && wins >= total;
 
@@ -9942,7 +10228,8 @@ async function getExpRankByUsername(username) {
   }
 
   function updateRivalGoalSection(goalId, gd, liveQid) {
-    const metric = rivalMetric();
+    const rs = goalRivalCfg(gd);
+    const metric = rivalMetric(rs);
     const names = goalRivalNames(gd);
     const multi = goalIsMulti(gd);
     const rivalName = multi
@@ -9977,8 +10264,28 @@ async function getExpRankByUsername(username) {
     const comp = liveQid ? rivalCompositeForQuote(gd, metric, liveQid) : null;
     const sEntry = liveQid ? selfStore.quotes[liveQid]  : undefined;
 
+    // Does the live quote fall inside this goal's filtered pool? Mirrors the
+    // accept logic in tallyStandings exactly (scope, difficulty/length, the
+    // rival metric-value band, and shared-only). A quote the rival has raced but
+    // which the filters exclude can never move the Wins count, so we say so
+    // rather than showing a comparison that looks like it would count. Only
+    // meaningful once the rival's value is known (comp present).
+    const liveInPool = (() => {
+      if (!liveQid || !comp) return true;
+      const meta = rivalMetaOf(liveQid);
+      if (!rivalQuoteInScope(meta, rivalScope(rs))) return false;
+      const filter = rivalFilterState(rs, gd);
+      if ((filter.dActive || filter.lActive) && !rivalQuotePassesFilter(meta, filter)) return false;
+      if (rs.requireBoth && !sEntry) return false; // shared-only: must have raced it too
+      const mf = rivalMetricFilterState(rs, gd);
+      if (mf.rActive && !rivalMetricPasses(comp.rv, mf)) return false;
+      return true;
+    })();
+
     if (!liveQid) {
       showMsg("Race a quote to compare");
+    } else if (comp && !liveInPool) {
+      showMsg("Quote doesn't match filters");
     } else if (comp) {
       // ── Value mode ──
       // We know the rival number (the highest among the listed rivals), so
@@ -10032,23 +10339,23 @@ async function getExpRankByUsername(username) {
     }
 
     // ── Filter display lines (mirror the improvement-target card) ──
-    // Rival filters are global, so every rival card shows the same pool + band.
+    // Rival filters are PER-GOAL now, so each card shows its own pool + band.
     // Line 1 (cyan): the quote pool (scope + shared). Line 2 (darker blue): the
     // length / difficulty / metric bands, hidden when all are full-range.
     const rivalPoolEl = document.getElementById(`${goalId}-rival-pool`);
     if (rivalPoolEl) {
       const poolParts = [];
-      const psc = rivalScope();
+      const psc = rivalScope(rs);
       if (psc === "ranked")        poolParts.push("Ranked");
       else if (psc === "unranked") poolParts.push("Unranked");
-      if (rivalSettings.requireBoth) poolParts.push("Shared");
+      if (rs.requireBoth) poolParts.push("Shared");
       rivalPoolEl.textContent = `Quote Pool: ${poolParts.length ? poolParts.join(", ") : "All"}`;
       rivalPoolEl.style.display = "block";
     }
     const rivalBandEl = document.getElementById(`${goalId}-rival-band`);
     if (rivalBandEl) {
-      const f  = rivalFilterState();
-      const mf = rivalMetricFilterState();
+      const f  = rivalFilterState(rs, gd);
+      const mf = rivalMetricFilterState(rs, gd);
       const bandParts = [];
       if (f.lActive) {
         const s = gtFilterBand("Len", f.lMin, f.lMax, f.lMin <= f.axis.lenMin, f.lMax >= f.axis.lenMax);
@@ -10059,7 +10366,7 @@ async function getExpRankByUsername(username) {
         if (s) bandParts.push(s);
       }
       if (mf.rActive) {
-        const s = gtFilterBand(rivalMetric().toUpperCase(), mf.rMin, mf.rMax, mf.rMin <= mf.axis.rivalMin, mf.rMax >= mf.axis.rivalMax);
+        const s = gtFilterBand(rivalMetric(rs).toUpperCase(), mf.rMin, mf.rMax, mf.rMin <= mf.axis.rivalMin, mf.rMax >= mf.axis.rivalMax);
         if (s) bandParts.push(s);
       }
       rivalBandEl.textContent = bandParts.join(" \u2022 ");
@@ -10123,7 +10430,7 @@ async function getExpRankByUsername(username) {
   // "biggest" → largest first. Returns an array of quoteIds. Recomputed every
   // click off the live stores, so it tracks the rival's new quotes / PBs.
   function rivalWorseSortedByGap(gd, sort) {
-    const metric = rivalMetric();
+    const metric = rivalMetric(goalRivalCfg(gd));
     const { worse } = computeRivalStandings(gd);
     const composite = buildRivalComposite(goalRivalNames(gd), metric);
     const sq = loadRivalStore(RIVAL_SELF_NAME).quotes;
@@ -10179,7 +10486,7 @@ async function getExpRankByUsername(username) {
       // we can tell an improved quote from a parked one (see the doc above).
       const sorted = rivalWorseSortedByGap(gd, sort);
       if (sorted.length === 0) return;
-      const metric = rivalMetric();
+      const metric = rivalMetric(goalRivalCfg(gd));
       const sq = loadRivalStore(RIVAL_SELF_NAME).quotes;
       const selfVal = (qid) => (sq[qid] ? sq[qid][metric] : 0);
       const cursors = loadRivalNextCursors();
@@ -10224,8 +10531,8 @@ async function getExpRankByUsername(username) {
   // list (here always one rival) and its already-computed "worse" set, order the
   // pool by gap on the goal's metric. Kept separate from the card path so the
   // composite cursor logic stays untouched.
-  function rivalRowWorseSortedByGap(names, worse, sort) {
-    const metric = rivalMetric();
+  function rivalRowWorseSortedByGap(names, worse, sort, rs) {
+    const metric = rivalMetric(rs);
     const composite = buildRivalComposite(names, metric);
     const sq = loadRivalStore(RIVAL_SELF_NAME).quotes;
     const withGap = worse.map(qid => {
@@ -10263,9 +10570,10 @@ async function getExpRankByUsername(username) {
   function onRivalRowNextClicked(goalId, name) {
     const gd = (goalData.rival || []).find(g => g.id === goalId);
     if (!gd) return;
+    const rs = goalRivalCfg(gd);
     const liveQid = getCurrentQuoteIdLive();
     const sort = rivalNextSort();
-    const { worse } = tallyStandings([name]);
+    const { worse } = tallyStandings([name], rs, gd);
     if (worse.length === 0) return;
 
     let pick;
@@ -10274,9 +10582,9 @@ async function getExpRankByUsername(username) {
       if (liveQid && worse.length > 1) pool = worse.filter(q => q !== liveQid);
       pick = pool[Math.floor(Math.random() * pool.length)];
     } else {
-      const sorted = rivalRowWorseSortedByGap([name], worse, sort);
+      const sorted = rivalRowWorseSortedByGap([name], worse, sort, rs);
       if (sorted.length === 0) return;
-      const metric = rivalMetric();
+      const metric = rivalMetric(rs);
       const sq = loadRivalStore(RIVAL_SELF_NAME).quotes;
       const selfVal = (qid) => (sq[qid] ? sq[qid][metric] : 0);
       const cursors = loadRivalRowNextCursors();

@@ -407,7 +407,11 @@
   backdrop-filter: blur(2px);
   z-index: 9999;
   align-items: flex-start;
-  padding-top: 15vh;
+  /* Sit nearer the top and allow the overlay to scroll: the rival goal type
+     makes a tall modal, and a fixed 15vh offset pushed the confirm button off
+     the bottom on shorter viewports. */
+  padding: 7vh 16px 7vh;
+  overflow-y: auto;
   justify-content: center;
 }
 #gt-overlay.open { display: flex; }
@@ -776,15 +780,31 @@
 .gt-rival-add-inline-btn:hover:not(:disabled) { border-color: #10b981; color: #a7f3d0; }
 .gt-rival-add-inline-btn:disabled { opacity: 0.45; cursor: default; }
 
+/* Rival tag field: the amount row becomes a bordered, wrapping container that
+   holds the chosen-rival chips + the entry input together (a modern "To:"-style
+   field). The chip wrapper uses display:contents so chips wrap inline with the
+   input, and the reused input drops its own border/background inside. */
+.gt-target-row.gt-tagfield {
+  flex-wrap: wrap; align-items: center; gap: 6px;
+  border: 1.5px solid #374151; background: #111827;
+  border-radius: 8px; padding: 6px 8px; min-height: 38px;
+  transition: border-color 0.15s;
+}
+.gt-target-row.gt-tagfield:focus-within { border-color: #3b82f6; }
+.gt-target-row.gt-tagfield .gt-custom-input {
+  border: none; background: transparent; padding: 3px 2px;
+  flex: 1 1 130px; min-width: 130px; width: auto;
+}
+.gt-target-row.gt-tagfield .gt-custom-input:focus { border: none; }
+.gt-target-row.gt-tagfield .gt-rival-add-inline-btn { padding: 4px 10px; }
+.gt-rival-inline-tags { display: contents; }
+
 /* ── Mode hint ───────────────────────────────────────────── */
 .gt-mode-hint { font-size: 11px; color: #6b7280; margin-top: -8px; margin-bottom: 12px; }
 .gt-mode-hint-error { color: #f87171; }
 .gt-mode-hint-ok    { color: #34d399; }
 
-/* Multiple-rivals list (rival goal-creation modal) */
-#gt-rival-multi-list-row { margin-bottom: 14px; }
-.gt-rival-multi-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.gt-rival-multi-list:empty { margin-top: 0; }
+/* Rival chips (rendered inside the tag field; see .gt-tagfield above). */
 .gt-rival-list-chip {
   display: inline-flex; align-items: center; gap: 6px;
   border: 1.5px solid #065f46; background: #022c22; color: #6ee7b7;
@@ -798,7 +818,7 @@
 
 /* ── Confirm ─────────────────────────────────────────────── */
 .gt-confirm-btn {
-  width: 100%; padding: 8px 0; border-radius: 7px;
+  width: 100%; padding: 8px 0; border-radius: 7px; margin-top: 18px;
   border: none; background: #3b82f6;
   color: white; font-size: 13px; font-weight: 600;
   cursor: pointer; transition: background 0.15s, opacity 0.15s;
@@ -1637,3 +1657,46 @@ body.gt-app-loggedout .gt-widget-detached { display: none !important; }
   background: #1e3a5f;
   color: #93c5fd;
 }
+
+/* Per-goal edit popover — reuses .gt-view-popover chrome; adds form rows. */
+.gt-edit-popover { min-width: 220px; }
+.gt-edit-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #9ca3af;
+  padding: 8px 8px 4px;
+}
+.gt-edit-rec-group { display: flex; gap: 4px; padding: 0 4px 2px; }
+.gt-edit-rec-group .gt-mode-btn { flex: 1; padding: 5px 4px; font-size: 11px; }
+.gt-edit-amount { margin: 0 4px; width: calc(100% - 8px); box-sizing: border-box; }
+.gt-edit-popover .gt-view-popover-title { display: flex; align-items: center; gap: 8px; }
+.gt-edit-saved { margin-left: auto; text-transform: none; letter-spacing: 0; }
+.gt-edit-note {
+  margin: 4px 8px 2px;
+  font-size: 10.5px;
+  line-height: 1.35;
+  color: #9ca3af;
+}
+
+.gt-edit-close {
+  border: none;
+  background: transparent;
+  color: #9ca3af;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+  transition: color 0.12s ease;
+}
+.gt-edit-close:hover { color: #e5e7eb; }
+.gt-edit-view-group { display: flex; gap: 4px; padding: 0 4px 2px; }
+.gt-edit-view-group .gt-mode-btn { flex: 1; padding: 5px 4px; font-size: 11px; }
+.gt-edit-view-group .gt-mode-btn.active {
+  border-color: #3b82f6;
+  background: #172554;
+  color: #93c5fd;
+}
+
+.gt-edit-popover-wide { min-width: 264px; }
