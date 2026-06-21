@@ -302,8 +302,10 @@ function gtMain() {
   // positioned anywhere on-screen), stack goals by dropping them onto
   // existing widgets, or reorder goals within a widget by dragging.
   //
-  // Shape: { [groupId]: { position: {left,top}|null, size: {width}|null, goalIds: [...] } }
-  //   - position: null for main = use CSS default (top-right). Detached widgets always have a position.
+  // Shape: { [groupId]: { position: {xRatio,yRatio}|null, size: {width}|null, goalIds: [...] } }
+  //   - position: fractions of the free space (0=left/top edge … 1=right/bottom edge), so a
+  //     widget keeps its place relative to the window on resize/zoom. null for main = CSS
+  //     default (top-right). Detached widgets always have a position. Legacy {left,top}px migrates.
   //   - size: null = auto / CSS default. Only main is resizable today.
   //   - goalIds: order is authoritative — determines DOM order within the widget.
   const GROUPS_KEY     = "gt-groups";
@@ -1144,10 +1146,8 @@ function gtMain() {
     w.className = "gt-widget gt-widget-detached";
     w.dataset.groupId = groupId;
     w.innerHTML = `<div class="gt-content"></div>`;
-    if (position) {
-      w.style.left = position.left;
-      w.style.top  = position.top;
-    }
+    // Position is applied by applyWidgetTransform() below (ratio-projected +
+    // clamped on-screen); `position` is kept on the group and read from there.
     document.body.appendChild(w);
     wireWidgetDrag(w, groupId);
     bringWidgetToFront(w);
@@ -1165,18 +1165,70 @@ function gtMain() {
     return w;
   }
 
+  // ── Viewport-relative widget positioning ──────────────
+  // Widget positions persist as FRACTIONS of the free space (xRatio/yRatio in
+  // [0,1]) rather than absolute pixels, so a widget keeps its spot relative to
+  // the window when you resize OR zoom the page — both change the layout
+  // viewport's size in CSS px. xRatio 1 = pinned to the right edge, 0.5 = centred,
+  // 0 = left edge (same for y); projecting that onto the current viewport keeps
+  // top-right in the top-right, centre centred, and everything on-screen. The main
+  // widget with NO stored position keeps the CSS top-right anchor (already tracks
+  // the corner). Legacy { left:"123px", top:"45px" } positions migrate on first use.
+  function gtViewport() {
+    const de = document.documentElement;
+    return { w: de.clientWidth || window.innerWidth, h: de.clientHeight || window.innerHeight };
+  }
+  function gtClamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+  // A widget's CURRENT on-screen rect → { xRatio, yRatio }.
+  //   xRatio: position within the free horizontal space (viewport − widget), so
+  //           0 = left edge, 1 = right edge — this pins the L/R corner on zoom.
+  //   yRatio: top as a fraction of the VIEWPORT height (top / vh), NOT the free
+  //           space. This is height-INDEPENDENT on purpose: re-projecting it
+  //           after the widget grows/shrinks (a goal added/removed) gives the
+  //           same top, so the top border never creeps as goals change. The top
+  //           is clamped on apply so a tall widget still can't run off-screen.
+  function widgetPositionRatio(widgetEl) {
+    const { w: vw, h: vh } = gtViewport();
+    const r = widgetEl.getBoundingClientRect();
+    const availX = Math.max(1, vw - r.width);
+    return { xRatio: gtClamp(r.left / availX, 0, 1), yRatio: gtClamp(r.top / vh, 0, 1) };
+  }
+  // Normalize a stored position to { xRatio, yRatio }, migrating the legacy pixel
+  // format in place (read relative to the current viewport; exact again after the
+  // next drag). null when there's nothing usable (e.g. the main default).
+  function normalizeGroupPositionRatio(group, widgetEl) {
+    const p = group?.position;
+    if (!p) return null;
+    if (typeof p.xRatio === "number" && typeof p.yRatio === "number") return p;
+    const left = parseFloat(p.left), top = parseFloat(p.top);
+    if (!Number.isFinite(left) || !Number.isFinite(top)) return null;
+    const { w: vw, h: vh } = gtViewport();
+    const availX = Math.max(1, vw - widgetEl.offsetWidth);
+    const ratio = { xRatio: gtClamp(left / availX, 0, 1), yRatio: gtClamp(top / vh, 0, 1) };
+    group.position = ratio; // migrate in place
+    saveGroups();
+    return ratio;
+  }
+  // Project a stored ratio onto the current viewport → clamped pixel left/top.
+  // x: free-space (corner-pinned). y: top = yRatio*vh, then clamped so the widget
+  // stays fully on-screen — height only enters here, as a clamp, never as drift.
+  function applyWidgetPositionRatio(widgetEl, ratio) {
+    if (!ratio) return;
+    const { w: vw, h: vh } = gtViewport();
+    const availX = Math.max(0, vw - widgetEl.offsetWidth);
+    const maxTop = Math.max(0, vh - widgetEl.offsetHeight);
+    widgetEl.style.right = "auto";
+    widgetEl.style.left  = Math.round(gtClamp(ratio.xRatio * availX, 0, availX)) + "px";
+    widgetEl.style.top   = Math.round(gtClamp(ratio.yRatio * vh, 0, maxTop)) + "px";
+  }
+
   // ── Apply position / size from groupData to a widget ──────────
   function applyWidgetTransform(widgetEl, groupId) {
     const group = groupData[groupId];
     if (!group) return;
-    if (group.position) {
-      widgetEl.style.right = "auto";
-      widgetEl.style.left  = group.position.left;
-      widgetEl.style.top   = group.position.top;
-    }
-    if (group.size?.width) {
-      widgetEl.style.width = group.size.width;
-    }
+    // Width first so offsetWidth is correct when we project the position ratio.
+    if (group.size?.width) widgetEl.style.width = group.size.width;
+    applyWidgetPositionRatio(widgetEl, normalizeGroupPositionRatio(group, widgetEl));
   }
 
   // ── Restore main widget position / width from stored group ────
@@ -1252,7 +1304,8 @@ function gtMain() {
     document.body.style.userSelect = "";
     // Persist position on the group (if the widget / group still exists)
     if (groupData[groupId]) {
-      groupData[groupId].position = { left: widgetEl.style.left, top: widgetEl.style.top };
+      groupData[groupId].position = widgetPositionRatio(widgetEl);
+      widgetEl.dataset.gtPlaced = "1";
       saveGroups();
     }
     wDrag = null;
@@ -1260,19 +1313,74 @@ function gtMain() {
 
   wireWidgetDrag(container, MAIN_GROUP_ID);
 
+  // ── Keep widgets viewport-relative on resize / zoom ───────
+  // window 'resize' fires for window resizes AND page (Ctrl +/-) zoom — both change
+  // documentElement.clientWidth in CSS px. Re-project every widget's stored ratio
+  // onto the new viewport so positions track the window and stay on-screen. Skipped
+  // mid-drag so it can't fight an active grab; rAF-throttled against resize bursts.
+  let gtRepositionRaf = 0;
+  function repositionAllWidgets() {
+    if (wDrag || dragInProgress) return;
+    for (const widgetEl of document.querySelectorAll(".gt-widget")) {
+      const group = groupData[widgetEl.dataset.groupId];
+      if (!group) continue;
+      applyWidgetPositionRatio(widgetEl, normalizeGroupPositionRatio(group, widgetEl));
+    }
+  }
+  function scheduleReposition() {
+    if (gtRepositionRaf) return;
+    gtRepositionRaf = requestAnimationFrame(() => { gtRepositionRaf = 0; repositionAllWidgets(); });
+  }
+  window.addEventListener("resize", scheduleReposition);
+  if (window.visualViewport) window.visualViewport.addEventListener("resize", scheduleReposition);
+
   // ── Resize persistence ────────────────────────────────────────
   // Watches a widget for size changes and persists the new width to
   // its group's storage. Debounced so dragging the resize handle
   // doesn't spam saveGroups(). One observer per widget; when the
   // widget is removed from the DOM the observer becomes inert.
   function observeWidgetResize(widgetEl, groupId) {
-    let t;
+    let t, lastH = 0;
     new ResizeObserver(() => {
+      // The stored position is height-relative (a fraction of the free space =
+      // viewport − widget), so the widget's own height interacts with it. Two
+      // distinct height changes, handled oppositely:
+      //   1. FIRST placement — a restored widget (created empty, then its goal
+      //      renders in) or a just-dropped one reaching full height. RE-APPLY the
+      //      stored ratio at full height so it LANDS in the right spot. Only case
+      //      that should move the widget.
+      //   2. LATER height change — a goal added/removed or content growth. Keep
+      //      the top-left FIXED (the widget grows/shrinks downward, as the user
+      //      expects) and only RE-DERIVE the stored ratio so a future zoom stays
+      //      correct. Never move the widget here.
+      // "Placed" is tracked on the ELEMENT, not a closure flag, and set on the
+      // first populated layout regardless of whether a position exists yet — so a
+      // drag (which sets the position AFTER this observer's initial fires, as the
+      // main widget does) still counts as placed and won't re-apply on the next
+      // goal add. (Zoom doesn't fire this — CSS-px height is zoom-invariant — so
+      //  the window 'resize' listener owns zoom; this owns content changes.)
+      const h = widgetEl.offsetHeight;
+      if (h !== lastH) {
+        lastH = h;
+        const populated = !!widgetEl.querySelector(".gt-goal-section");
+        if (populated && !wDrag && !dragInProgress) {
+          const firstPlace = widgetEl.dataset.gtPlaced !== "1";
+          widgetEl.dataset.gtPlaced = "1";
+          const group = groupData[groupId];
+          if (group && group.position) {
+            if (firstPlace) {
+              applyWidgetPositionRatio(widgetEl, normalizeGroupPositionRatio(group, widgetEl));
+            } else {
+              group.position = widgetPositionRatio(widgetEl); // keep top, refresh ratio
+            }
+          }
+        }
+      }
       clearTimeout(t);
       t = setTimeout(() => {
         if (!groupData[groupId]) return;
         groupData[groupId].size = { width: widgetEl.offsetWidth + "px" };
-        saveGroups();
+        saveGroups(); // persists width + any position ratio refreshed above
       }, 300);
     }).observe(widgetEl);
   }
@@ -1650,10 +1758,7 @@ function gtMain() {
         } else {
           // JUST MOVE: persist new position, widget stays put at cursor
           if (groupData[d.sourceGroupId]) {
-            groupData[d.sourceGroupId].position = {
-              left: widgetEl.style.left,
-              top:  widgetEl.style.top,
-            };
+            groupData[d.sourceGroupId].position = widgetPositionRatio(widgetEl);
             saveGroups();
           }
         }
@@ -1665,6 +1770,7 @@ function gtMain() {
       let targetGroupId = d.targetGroupId;
       let targetIndex   = d.targetIndex;
       let destroyedSource = false;
+      let createdNewWidget = false;
 
       if (!targetGroupId) {
         // Empty space → new detached widget at drop point
@@ -1675,6 +1781,7 @@ function gtMain() {
           goalIds: [],
         };
         targetIndex = 0;
+        createdNewWidget = true;
       }
 
       // Commit groupData. Order: remove-from-source → insert-into-target
@@ -1729,6 +1836,19 @@ function gtMain() {
         .filter(c => !c.classList.contains("gt-goal-placeholder") && c !== section);
       if (insertAt >= finalSiblings.length) targetContent.appendChild(section);
       else                                  targetContent.insertBefore(section, finalSiblings[insertAt]);
+
+      // A brand-new detached widget was positioned by createDetachedWidget while
+      // still EMPTY (the goal moves in only just above), so its migrated ratio was
+      // derived against a ~0 height and would drift up on the next zoom (worse the
+      // lower it sits). Now that the goal is in and the widget is at its real
+      // height, re-derive the ratio from the actual rect so it's correct.
+      if (createdNewWidget && groupData[targetGroupId]) {
+        const newWidget = targetContent.closest(".gt-widget");
+        if (newWidget) {
+          groupData[targetGroupId].position = widgetPositionRatio(newWidget);
+          saveGroups();
+        }
+      }
 
       // Destroy source widget DOM if its group was deleted
       if (destroyedSource) {
