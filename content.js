@@ -123,33 +123,100 @@ function gtMain() {
   //   • Skips the request entirely while we're in a backoff window (throws a
   //     synthetic error so the caller's existing catch path handles it — no
   //     network request is made, so we stop feeding the throttle).
-  //   • On a network/CORS failure or a 429/5xx, escalates a SHARED backoff
-  //     (30s → 60s → … → 15 min cap) that pauses ALL API traffic together.
-  //   • On any genuine response (2xx, or a 404 "not found"), resets it.
+  //   • Tells a genuine rate-limit (HTTP 429, or 503 + Retry-After) apart from
+  //     a merely slow / timed-out / 5xx request. A real 429 escalates the
+  //     aggressive HARD pause (30s → … → 15 min) that stops EVERYTHING incl.
+  //     the urgent post-race lane; a slow/timeout/5xx takes a gentle, capped
+  //     SOFT pause (10s → … → 2 min) that only holds the heavy BULK syncs, so
+  //     one slow history page can't starve the small urgent fetches.
+  //   • Aborts a hung request via AbortController (urgent ~10s, bulk ~30s) so a
+  //     stuck fetch fails fast instead of hanging ~55s and tripping the gate.
+  //   • On any genuine response (2xx, or a 404 "not found"), resets it and
+  //     fires a one-shot catch-up so stale cards self-heal.
   // This single coordinated gate is the thing that lets a throttle clear.
-  const API_BACKOFF_BASE_MS = 30_000;
-  const API_BACKOFF_MAX_MS  = 15 * 60_000;
-  let apiBackoffUntil = 0;
-  let apiBackoffFails = 0;
-  function apiThrottled() { return Date.now() < apiBackoffUntil; }
+  const API_BACKOFF_BASE_MS = 30_000;        // hard (429) backoff base
+  const API_BACKOFF_MAX_MS  = 15 * 60_000;   // hard backoff cap
+  const API_SOFT_BASE_MS    = 10_000;        // soft (slow/timeout/5xx) backoff base
+  const API_SOFT_MAX_MS     = 2 * 60_000;    // soft backoff cap — bulk flakiness stays well short of the 15 min hard cap
+  const API_TIMEOUT_URGENT_MS = 10_000;      // small post-race fetches fail fast
+  const API_TIMEOUT_BULK_MS   = 30_000;      // paged history/catalog get a generous cap
+  let apiBackoffUntil = 0; // BULK gate window — any failure (soft or hard) extends it
+  let apiHardUntil    = 0; // URGENT gate window — only a real 429 / 503+Retry-After extends it
+  let apiSoftFails    = 0;
+  let apiHardFails    = 0;
+  let apiCatchUpTimer = null;
+  // Bulk traffic pauses on ANY backoff; the urgent post-race lane pauses only
+  // on a genuine 429 ("hard") window — that's what stops a bulk timeout from
+  // blocking the small fetch that refreshes the rival / target cards.
+  function apiThrottled()     { return Date.now() < apiBackoffUntil; }
+  function apiHardThrottled() { return Date.now() < apiHardUntil; }
   function apiBackoffRemainingMs() { return Math.max(0, apiBackoffUntil - Date.now()); }
-  function apiNoteFailure() {
-    apiBackoffFails = Math.min(apiBackoffFails + 1, 12);
-    const wait = Math.min(API_BACKOFF_MAX_MS, API_BACKOFF_BASE_MS * 2 ** (apiBackoffFails - 1));
-    // Only ever extend the window (concurrent failures shouldn't shrink it).
-    apiBackoffUntil = Math.max(apiBackoffUntil, Date.now() + wait);
-    console.warn(`[Goal Tracker] API throttled — pausing all requests ~${Math.round(wait / 1000)}s (failure #${apiBackoffFails})`);
+  // Parse a Retry-After header (delta-seconds or HTTP-date) → ms, else 0.
+  function retryAfterMs(r) {
+    const h = r.headers.get("retry-after");
+    if (!h) return 0;
+    const s = Number(h);
+    if (Number.isFinite(s)) return Math.max(0, s * 1000);
+    const t = Date.parse(h);
+    return Number.isFinite(t) ? Math.max(0, t - Date.now()) : 0;
+  }
+  function apiNoteFailure(hard = true, explicitMs = 0) {
+    if (hard) {
+      apiHardFails = Math.min(apiHardFails + 1, 12);
+      const base = explicitMs > 0 ? explicitMs : API_BACKOFF_BASE_MS * 2 ** (apiHardFails - 1);
+      const wait = Math.min(API_BACKOFF_MAX_MS, base);
+      const until = Date.now() + wait;
+      // Hard extends BOTH windows (bulk + urgent): a real rate-limit means back
+      // off completely. Only ever extend (concurrent failures don't shrink it).
+      apiHardUntil    = Math.max(apiHardUntil, until);
+      apiBackoffUntil = Math.max(apiBackoffUntil, until);
+      console.warn(`[Goal Tracker] API rate-limited — pausing all requests ~${Math.round(wait / 1000)}s (hard #${apiHardFails})`);
+    } else {
+      apiSoftFails = Math.min(apiSoftFails + 1, 8);
+      const wait = Math.min(API_SOFT_MAX_MS, API_SOFT_BASE_MS * 2 ** (apiSoftFails - 1));
+      // Soft extends ONLY the bulk window — urgent fetches stay allowed.
+      apiBackoffUntil = Math.max(apiBackoffUntil, Date.now() + wait);
+      console.warn(`[Goal Tracker] API slow/unreachable — pausing bulk syncs ~${Math.round(wait / 1000)}s (soft #${apiSoftFails}); urgent fetches still allowed`);
+    }
+    armBackoffCatchUpTimer();
   }
   function apiNoteSuccess() {
-    if (apiBackoffFails || apiBackoffUntil) {
-      apiBackoffFails = 0;
-      apiBackoffUntil = 0;
+    if (apiSoftFails || apiHardFails || apiBackoffUntil || apiHardUntil) {
+      apiSoftFails = 0; apiHardFails = 0;
+      apiBackoffUntil = 0; apiHardUntil = 0;
+      if (apiCatchUpTimer) { clearTimeout(apiCatchUpTimer); apiCatchUpTimer = null; }
+      scheduleBackoffCatchUp(); // window cleared early by a success → heal now
     }
+  }
+  // When a backoff window is armed, schedule a single check for the moment it
+  // lapses (re-arming if a later failure pushed it out). On clear, run the
+  // catch-up so a card that went stale during the pause refreshes itself
+  // instead of waiting for the next race / a slow periodic poll.
+  function armBackoffCatchUpTimer() {
+    if (apiCatchUpTimer) clearTimeout(apiCatchUpTimer);
+    const wait = Math.max(apiBackoffUntil, apiHardUntil) - Date.now();
+    if (wait <= 0) { apiCatchUpTimer = null; return; }
+    apiCatchUpTimer = setTimeout(() => {
+      apiCatchUpTimer = null;
+      if (apiThrottled() || apiHardThrottled()) { armBackoffCatchUpTimer(); return; }
+      scheduleBackoffCatchUp();
+    }, wait + 250);
+  }
+  // Coalesce catch-up triggers into one deferred run (a success fires this from
+  // inside gtApiFetch, so defer past the current fetch's resolution).
+  let catchUpPending = false;
+  function scheduleBackoffCatchUp() {
+    if (catchUpPending) return;
+    catchUpPending = true;
+    setTimeout(() => { catchUpPending = false; try { runBackoffCatchUp(); } catch {} }, 0);
   }
   // Marker so callers can tell "we deliberately skipped" from a real failure.
   const API_THROTTLED_ERR  = "gt-api-throttled";
   const API_LOGGED_OUT_ERR = "gt-api-logged-out";
-  async function gtApiFetch(url, opts) {
+  const API_TIMEOUT_ERR    = "gt-api-timeout";
+  // gt.lane: "urgent" (short timeout, ignores a soft/bulk pause, respects only
+  // a real 429) | "bulk" (default — generous timeout, respects any pause).
+  async function gtApiFetch(url, opts, gt = {}) {
     if (!isLoggedIn()) {
       // Logged out: make NO request (every TypeGG endpoint would 401, and the
       // logged-out gate already short-circuits the pollers — this is the final
@@ -159,20 +226,35 @@ function gtMain() {
       e.gtLoggedOut = true;
       throw e;
     }
-    if (apiThrottled()) {
+    const urgent = gt.lane === "urgent";
+    // Bulk respects ANY backoff window; urgent respects only the hard (429) one.
+    if (urgent ? apiHardThrottled() : apiThrottled()) {
       const e = new Error(API_THROTTLED_ERR);
       e.gtThrottled = true;
       throw e;
     }
+    const timeoutMs = gt.timeoutMs || (urgent ? API_TIMEOUT_URGENT_MS : API_TIMEOUT_BULK_MS);
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     let r;
     try {
-      r = await fetch(url, opts);
+      r = await fetch(url, { ...opts, signal: ctrl.signal });
     } catch (e) {
-      apiNoteFailure(); // network / CORS-with-no-header → the rate-limit signature
+      clearTimeout(timer);
+      // Our timeout abort, or a network/CORS error: a SLOW/unreachable signal,
+      // NOT a rate-limit → soft backoff (bulk-only). The real HTTP status (if
+      // any) is invisible to JS here; treat it gently rather than as a 429.
+      apiNoteFailure(false);
+      if (ctrl.signal.aborted) { const te = new Error(API_TIMEOUT_ERR); te.gtTimeout = true; throw te; }
       throw e;
     }
-    if (r.ok || r.status === 404) apiNoteSuccess();
-    else apiNoteFailure(); // 429 / 500 / 502 / 503 → back off too
+    clearTimeout(timer);
+    if (r.ok || r.status === 404) { apiNoteSuccess(); return r; }
+    // Classify the HTTP error. 429 (and 503 + Retry-After) = genuine throttle →
+    // HARD pause (stops everything). 500/502/504/other = transient server/slow
+    // → SOFT pause (bulk only, urgent keeps flowing).
+    const hard = r.status === 429 || (r.status === 503 && !!r.headers.get("retry-after"));
+    apiNoteFailure(hard, hard ? retryAfterMs(r) : 0);
     return r;
   }
 
@@ -6833,7 +6915,7 @@ async function getExpRankByUsername(username) {
     // actually needs it — ranked goals are fully covered by quotesTyped.
     const needUnranked = quotesNeedUnrankedData();
     const [response, unrankedTyped] = await Promise.all([
-      gtApiFetch(userEndpoint(), { headers: authHeaders() }),
+      gtApiFetch(userEndpoint(), { headers: authHeaders() }, { lane: "urgent" }),
       needUnranked
         ? getUserQuotesTyped("unranked").catch(e => {
             console.error("Unranked-typed fetch failed:", e.message);
@@ -8092,6 +8174,13 @@ async function getExpRankByUsername(username) {
   // within one finish don't rescan thousands of quotes each time.
   let rivalStoreEpoch = 0;
   const rivalStandingsCache = new Map(); // goalId → { epoch, metric, result }
+  // Narrower epoch bumped ONLY when a RIVAL's own store (or the shared quote
+  // meta) changes — NOT when your self store changes. Setting a PB rewrites the
+  // self store and bumps rivalStoreEpoch on every such race; caching the rival
+  // composite against THIS epoch instead lets a self-only PB reuse the existing
+  // composite and skip the full per-rival history re-scan (the PB-finish stutter).
+  let rivalRivalsEpoch = 0;
+  const rivalCompositeCache = new Map(); // "namesSig:metric" → { epoch, composite }
 
   // ── Quote catalog (the COMPLETE site quote set) ───────────────
   // Drop 2 (improvement Target mode) needs every quote's difficulty/length/
@@ -8318,6 +8407,10 @@ async function getExpRankByUsername(username) {
     rivalStoreEpoch++; // invalidate standings cache
     const flushMeta = rivalMetaDirty;
     if (flushMeta) rivalMetaDirty = false;
+    // A self-only PB (name === self, no meta flush) must NOT invalidate the
+    // rival composite — it never reads the self store. Only a rival's store or a
+    // shared-meta change (which carries r/d/l used by the composite) does.
+    if (name !== RIVAL_SELF_NAME || flushMeta) rivalRivalsEpoch++;
     const metaSnapshot = rivalQuoteMeta; // live ref — persists the latest state
     idbPut(key, store)
       .then(() => flushMeta ? idbPut(RIVAL_META_KEY, metaSnapshot) : null)
@@ -8340,12 +8433,13 @@ async function getExpRankByUsername(username) {
         rivalStores.delete(key); // leader deleted it (GC)
       }
       rivalStoreEpoch++;
+      if (key.startsWith(RIVAL_KEY_PREFIX)) rivalRivalsEpoch++; // a rival's store, not self's
       renderAllGoals();
     }).catch(() => {});
   }
   function reloadRivalMetaFromDisk() {
     idbGet(RIVAL_META_KEY).then(m => {
-      if (m && typeof m === "object") { rivalQuoteMeta = m; rivalStoreEpoch++; renderAllGoals(); }
+      if (m && typeof m === "object") { rivalQuoteMeta = m; rivalStoreEpoch++; rivalRivalsEpoch++; renderAllGoals(); }
     }).catch(() => {});
   }
   // One-time localStorage → IndexedDB migration (cross-tab idempotent via the
@@ -8417,6 +8511,7 @@ async function getExpRankByUsername(username) {
       rivalIdbReady = true;
       catalogReady = true;       // catalog hydrated from IDB (empty map if none)
       rivalStoreEpoch++;
+      rivalRivalsEpoch++;        // rival stores just hydrated from IDB — composite cache is stale
       catalogEpoch++;            // a render computed on an empty catalog is stale now
       renderAllGoals();
       if (isLeader) { ensureRivalSync(); maybeRunQuoteCatalog(); }
@@ -8609,7 +8704,7 @@ async function getExpRankByUsername(username) {
   const rivalQuoteBestInFlight = new Map(); // `${key}:${qid}` → Promise
   async function fetchRivalQuoteBest(fetchName, quoteId) {
     const url = `https://api.typegg.io/v1/users/${encodeURIComponent(fetchName)}/quotes/${encodeURIComponent(quoteId)}`;
-    const r = await gtApiFetch(url, { headers: authHeaders() });
+    const r = await gtApiFetch(url, { headers: authHeaders() }, { lane: "urgent" });
     if (r.status === 404) return null;
     if (!r.ok) throw new Error(`rival quote ${fetchName}/${quoteId} → ${r.status}`);
     const d = await r.json();
@@ -9043,7 +9138,7 @@ async function getExpRankByUsername(username) {
   // Merge the recent /races list into the self store (called on quote-finish).
   async function maintainSelfStoreFromRaces(gtPerfSession = null, selfRender = true) {
     if (!rivalIdbReady) return false; // self store not hydrated yet
-    if (apiThrottled()) return false; // don't add load during a backoff window
+    if (apiHardThrottled()) return false; // only a real 429 blocks the urgent post-race lane
     let races;
     const gtRacesT0 = performance.now(); // [GT-PERF]
     try { races = await getRecentRacesData(); } catch { return false; }
@@ -9079,7 +9174,7 @@ async function getExpRankByUsername(username) {
   function ensureCurrentQuoteForRivals(quoteId) {
     if (!isLeader || !quoteId) return;
     if (!rivalIdbReady) return; // stores not hydrated yet
-    if (apiThrottled()) return; // backing off after recent failures
+    if (apiHardThrottled()) return; // only a real 429 blocks this urgent on-demand fill
     const refMap = referencedRivalMap();
     if (refMap.size === 0) return; // no rival goals → nothing to compare, don't fetch self
     const names = [RIVAL_SELF_NAME, ...refMap.keys()];
@@ -9102,6 +9197,24 @@ async function getExpRankByUsername(username) {
         .finally(() => rivalQuoteBestInFlight.delete(inflightKey));
       rivalQuoteBestInFlight.set(inflightKey, p);
     }
+  }
+
+  // Re-run the urgent post-race refresh for the live quote once an API backoff
+  // window clears, so a rival / improvement-target card that couldn't update
+  // during the pause heals itself within a couple of seconds instead of staying
+  // stale until the next race (re-type) or a slow periodic poll. Leader-only and
+  // a no-op while a genuine 429 window is still up.
+  function runBackoffCatchUp() {
+    if (!isLeader || !rivalIdbReady) return;
+    if (apiHardThrottled()) return; // a genuine rate-limit is still in effect
+    const haveRival = (goalData.rival || []).length > 0;
+    if (!haveRival && !haveImprovementTargetGoals() && !haveMaxCharsGoals()) return;
+    // Pull your latest /races into the self store (fills the just-set PB the
+    // gated finish missed), then fill the live quote's bests for each rival.
+    maintainSelfStoreFromRaces().catch(() => {});
+    const liveQid = getCurrentQuoteIdLive();
+    if (liveQid && haveRival) ensureCurrentQuoteForRivals(liveQid);
+    renderAllGoals();
   }
 
   // ══════════════════════════════════════════════════════════════
@@ -9768,6 +9881,13 @@ async function getExpRankByUsername(username) {
   // apply unchanged. For a single-rival goal the names list is length 1, so
   // this degenerates to that rival's own entries.
   function buildRivalComposite(names, metric) {
+    // Memoized against rivalRivalsEpoch (rival-store/meta changes only), so a
+    // self-only PB reuses this instead of re-scanning every listed rival's full
+    // quote history (×N rivals) — that synchronous re-scan was the PB stutter.
+    const namesSig = names.map(n => String(n).toLowerCase()).sort().join(",");
+    const cacheKey = `${namesSig}:${metric}`;
+    const cached = rivalCompositeCache.get(cacheKey);
+    if (cached && cached.epoch === rivalRivalsEpoch) return cached.composite;
     const out = Object.create(null);
     for (const name of names) {
       const q = loadRivalStore(name).quotes;
@@ -9786,6 +9906,7 @@ async function getExpRankByUsername(username) {
         }
       }
     }
+    rivalCompositeCache.set(cacheKey, { epoch: rivalRivalsEpoch, composite: out });
     return out;
   }
   // The composite for a single quote (the live-quote render path): the max
@@ -10225,6 +10346,26 @@ async function getExpRankByUsername(username) {
     // is accurate even mid-bulk. Only when at least one rival goal exists —
     // otherwise there's nothing to compare and no reason to fetch the self best.
     if (liveQid && goals.length > 0) ensureCurrentQuoteForRivals(liveQid);
+    scheduleRivalStandingsRefresh();
+  }
+
+  // Coalesce the (potentially expensive) Wins/Next standings recompute for every
+  // rival goal into one deferred pass per tick, so it never runs in the same
+  // synchronous block as the cheap value-row + gain-pill update above. Reads
+  // goalData.rival fresh when it fires (not captured now) so a goal added or
+  // removed between scheduling and firing is handled correctly.
+  let rivalStandingsRefreshPending = false;
+  function scheduleRivalStandingsRefresh() {
+    if (rivalStandingsRefreshPending) return;
+    rivalStandingsRefreshPending = true;
+    setTimeout(() => {
+      rivalStandingsRefreshPending = false;
+      for (const gd of (goalData.rival || [])) {
+        if (document.getElementById(`${gd.id}-goal-section`)) {
+          updateRivalGoalSectionStandings(gd.id, gd);
+        }
+      }
+    }, 0);
   }
 
   function updateRivalGoalSection(goalId, gd, liveQid) {
@@ -10373,7 +10514,27 @@ async function getExpRankByUsername(username) {
       rivalBandEl.style.display = bandParts.length ? "block" : "none";
     }
 
-    // ── Wins + Next button ──
+    // Wins line + "⚔ Next vs" button are recomputed separately by
+    // updateRivalGoalSectionStandings, deferred a tick by renderRivalSections so
+    // the heavier full-store standings scan can't delay the cheap value-row + +X
+    // gain-pill paint above (see the comment there).
+  }
+
+  // The "Wins: X / Y" line, the syncing… status, and the "⚔ Next vs" button.
+  // Split out of updateRivalGoalSection because computeRivalStandings (via
+  // tallyStandings/buildRivalComposite) scans every quote in each listed rival's
+  // history; on a goal with thousands of races synced that's enough work that
+  // running it inline — in the same synchronous pass that inserts the +X gain
+  // pill — delays the next paint and makes the pop-in animation visibly late on a
+  // PB. renderRivalSections calls this on a deferred tick so the value row + pill
+  // paint first and this heavier recompute lands a frame later, unfelt.
+  function updateRivalGoalSectionStandings(goalId, gd) {
+    const names = goalRivalNames(gd);
+    const multi = goalIsMulti(gd);
+    const rivalName = multi
+      ? (names.length === 1 ? names[0] : `${names.length} rivals`)
+      : (gd.rival || "rival");
+
     const { total, wins, worse, rivalDone, selfDone } = computeRivalStandings(gd);
     // Live combined self + rival bulk-build %, shared by the wins line and the
     // Next button. Climbs until BOTH your history and the rival store(s) sync.
@@ -10414,7 +10575,7 @@ async function getExpRankByUsername(username) {
         nextBtn.textContent = "⚔ No quotes found";
       } else {
         nextBtn.disabled = true;
-        nextBtn.textContent = `⚔ You lead ${rivalName} 🎉`;
+        nextBtn.textContent = "All Quotes beaten 🥇";
       }
     }
   }
@@ -10900,7 +11061,7 @@ async function getExpRankByUsername(username) {
     const { username } = getAuth();
     if (!username) throw new Error("no auth");
     const url = `https://api.typegg.io/v1/users/${encodeURIComponent(username)}/races`;
-    const r = await gtApiFetch(url, { headers: authHeaders() });
+    const r = await gtApiFetch(url, { headers: authHeaders() }, { lane: "urgent" });
     if (!r.ok) throw new Error(`races endpoint ${r.status}`);
     const data = await r.json();
     const races = Array.isArray(data?.races) ? data.races : null;
@@ -10943,7 +11104,7 @@ async function getExpRankByUsername(username) {
 
   async function fetchQuoteFromApi(quoteId) {
     const url = `https://api.typegg.io/v1/quotes/${encodeURIComponent(quoteId)}`;
-    const r = await gtApiFetch(url, { headers: authHeaders() });
+    const r = await gtApiFetch(url, { headers: authHeaders() }, { lane: "urgent" });
     if (!r.ok) throw new Error(`quote ${quoteId} → ${r.status}`);
     return await r.json();
   }
