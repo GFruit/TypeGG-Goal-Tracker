@@ -7688,6 +7688,9 @@ async function getExpRankByUsername(username) {
 
   let qfPending       = false; // another quote finished while we were retrying
   let qfWorkerRunning = false; // retry chain currently executing
+  let qfFinishedQuoteId = null; // quoteId captured at the finish edge (before any
+                                // "next vs rival" nav), so the post-race confirm
+                                // targets the quote you actually completed.
 
   // ── Pending start-seed tracking ─────────────────────────────
   // Improvement baselines are seeded asynchronously at quote-START (see
@@ -7764,6 +7767,10 @@ async function getExpRankByUsername(username) {
       chars:    currentStats.chars,
       playtime: currentStats.playtime,
     };
+    // Freeze the finished quote for THIS chain run (a finish that lands while
+    // we're retrying re-runs the chain with its own id), so the per-quote
+    // confirm below stays consistent across all iterations of this run.
+    const finishedQuoteId = qfFinishedQuoteId;
 
     for (let i = 0; i < QF_RETRY_DELAYS_MS.length; i++) {
       await new Promise(r => setTimeout(r, QF_RETRY_DELAYS_MS[i]));
@@ -7844,14 +7851,24 @@ async function getExpRankByUsername(username) {
         // selfRender=false → the caller owns the render in this path.
         const maintainPromise = maintainSelfStoreFromRaces(gtPerfSession, false)
           .catch(e => { console.warn("[Goal Tracker] rival self-store maintenance failed:", e); return false; });
+        // Authoritative per-quote PB confirm for the just-finished quote, run in
+        // PARALLEL with the aggregate /races merge above. /races is gated on the
+        // stats tick and can lag the server's per-quote best, which strands the
+        // self store one quote stale — a silently-missed rival win, and (worse) the
+        // next visit to that quote then misreads the staleness as a server PP
+        // rebalance and wipes every store. The /users/<me>/quotes/<id> endpoint is
+        // per-quote and authoritative, so it closes the hole. Resolves to whether a
+        // new best merged.
+        const confirmPromise = confirmSelfQuoteAfterRace(finishedQuoteId).catch(() => false);
+        const selfDone = Promise.all([maintainPromise, confirmPromise]);
         const winner = await Promise.race([
-          maintainPromise.then(() => "synced"),
+          selfDone.then(() => "synced"),
           new Promise(res => setTimeout(res, RIVAL_SYNC_THRESHOLD_MS, "timeout")),
         ]);
         renderAllGoals(); // synced → standard + freshly-merged rival in one frame; timed out → standard now
         if (winner === "timeout") {
-          // Slow fetch: re-render the rival card once it finally lands.
-          maintainPromise.then(changed => { if (changed) renderAllGoals(); });
+          // Slow fetch(es): re-render once they land if either merged something.
+          selfDone.then(([m, c]) => { if (m || c) renderAllGoals(); });
         }
       } else {
         renderAllGoals();
@@ -7900,6 +7917,10 @@ async function getExpRankByUsername(username) {
 
   function handleQuoteFinishAsLeader() {
     if (!isLoggedIn()) return; // logged out — don't start the stats retry chain
+    // Freeze the just-finished quote NOW, at the disabled edge, before the user
+    // can navigate (e.g. "next vs rival"). The chain uses this for an
+    // authoritative per-quote PB confirm even if the live quote changes mid-chain.
+    qfFinishedQuoteId = getCurrentQuoteIdLive() || qfFinishedQuoteId;
     qfPending = true;
     qfWorker(); // no-op if already running; picks up pending flag on loop
   }
@@ -8188,9 +8209,20 @@ async function getExpRankByUsername(username) {
       const hasImprovement = improvementGoals && improvementGoals.some(g => goalIsImprovement(g));
       const hasRival = (goalData.rival || []).length > 0;
       const hasTarget = haveImprovementTargetGoals();
-      if (!hasImprovement && !hasRival && !hasTarget) return; // cheap no-op when irrelevant
+      // The PP-rebalance self-heal applies whenever a goal reads the PP cache
+      // (rival / improvement-Target / max-chars), so widen the early-out to
+      // include max-chars-only setups.
+      const hasPpCacheConsumer = hasRival || hasTarget || haveMaxCharsGoals();
+      if (!hasImprovement && !hasPpCacheConsumer) return; // cheap no-op when irrelevant
       const qid = getCurrentQuoteIdLive();
-      if (qid && qid !== lastSeenQuoteId) {
+      if (!qid) return;
+      // Run the rebalance check EVERY tick, not just on a quote change: a cold
+      // start can fire before IDB hydration / the self bulk completes, and the
+      // change edge would then be consumed (lastSeenQuoteId set) without a real
+      // check ever happening for the quote you're sitting on. It's internally
+      // gated and deduped per quote, so steady state is just a Set lookup.
+      if (hasPpCacheConsumer) maybePpRebalanceRefetch(qid);
+      if (qid !== lastSeenQuoteId) {
         lastSeenQuoteId = qid;
         if (hasImprovement) onQuoteStarted(qid);
         // Rival + Target goals: the compare / current-value line tracks the
@@ -8242,14 +8274,18 @@ async function getExpRankByUsername(username) {
   const RIVAL_SELF_KEY   = "gt-rivalq-self";
   const RIVAL_KEY_PREFIX = "gt-rivalq-u-";
   const RIVAL_POLL_MS    = 60_000;   // ongoing refresh cadence (per the spec)
-  const RIVAL_PAGE_SIZE  = 250;      // bulk-build page size. Was 1000, but a
-                                     // 1000-row page took 30–90s server-side
-                                     // and occasionally crossed the gateway
-                                     // timeout (the intermittent failure). Cost
-                                     // is ~linear in rows, so 250 → ~10s/page
-                                     // with a wide timeout margin, same per-row
-                                     // efficiency, finer resume checkpoints.
-  const RIVAL_REFRESH_PAGE_SIZE = 100; // ongoing refresh: page the since-last-sync window
+  const RIVAL_PAGE_SIZE  = 250;      // bulk-build page-size CAP / legacy-cursor
+                                     // default. NOTE: server cost is SUPER-linear
+                                     // in page size (measured: 50→~5s, 100→~35s,
+                                     // 250→~120s), not linear as once assumed, so a
+                                     // 250-row page reliably blows the 30s bulk cap.
+                                     // The live size is now adaptive (rivalBulkPerPage);
+                                     // this constant only caps it and seeds the cursor
+                                     // rebase for stores whose cursor predates it.
+  const RIVAL_REFRESH_PAGE_SIZE = 50;  // ongoing refresh: page the since-last-sync
+                                       // window. Halved from 100 — same endpoint, same
+                                       // super-linear cost, so a large catch-up window
+                                       // at 100 could also cross the cap.
   // Re-pull a few minutes before the stored lastSync each refresh, to absorb
   // clock skew and startDate boundary inclusivity. Merges are idempotent, so the
   // small re-scan costs nothing but closes edge gaps.
@@ -8266,6 +8302,43 @@ async function getExpRankByUsername(username) {
   // account/IP gets throttled (even unrelated TypeGG tools slow down). A
   // short delay between pages keeps the build under the limiter.
   const RIVAL_PAGE_DELAY_MS = 1500;
+
+  // ── Adaptive bulk page size ───────────────────────────────────────────
+  // The /users/<name>/quotes endpoint is super-linear in page size (see
+  // RIVAL_PAGE_SIZE), so a fixed large page reliably exceeds API_TIMEOUT_BULK_MS
+  // (30s) and gets aborted+retried forever, while several small pages cover the
+  // same quotes far faster AND always finish under the cap. So we self-tune: a
+  // page that times out (or runs slow) HALVES the size; a fast page GROWS it by
+  // aligning to what we've already covered, capped at a safe band. Aligning the
+  // grow (rather than nudging) keeps the page boundary on the covered offset, so
+  // changing size mid-build re-fetches ~nothing. Persisted across sessions.
+  const RIVAL_PAGE_MIN      = 25;
+  const RIVAL_PAGE_INIT     = 50;     // safe default from the measurements
+  const RIVAL_PAGE_SLOW_MS  = 18000;  // a successful page this slow is near the cap → shrink
+  const RIVAL_PAGE_FAST_MS  = 8000;   // a successful page this fast has headroom → grow
+  const RIVAL_PAGE_SIZE_KEY = "gt-rival-bulk-pagesize";
+  let rivalBulkPerPage = (() => {
+    const n = parseInt(localStorage.getItem(RIVAL_PAGE_SIZE_KEY) || "", 10);
+    return Number.isFinite(n) ? Math.min(RIVAL_PAGE_SIZE, Math.max(RIVAL_PAGE_MIN, n)) : RIVAL_PAGE_INIT;
+  })();
+  function setRivalBulkPerPage(n) {
+    const clamped = Math.min(RIVAL_PAGE_SIZE, Math.max(RIVAL_PAGE_MIN, Math.round(n)));
+    if (clamped === rivalBulkPerPage) return;
+    const prev = rivalBulkPerPage;
+    rivalBulkPerPage = clamped;
+    try { localStorage.setItem(RIVAL_PAGE_SIZE_KEY, String(clamped)); } catch {}
+    console.warn(`[Goal Tracker] bulk page size ${prev} → ${clamped} (adapting to server latency).`);
+  }
+  // Called after a SUCCESSFUL bulk page with its latency and the new covered
+  // offset. A fast page GROWS the size by aligning it to what we've covered — the
+  // largest aligned size is `covered` itself (next page = [covered, 2·covered),
+  // zero re-read), capped at RIVAL_PAGE_SIZE. A slow page HALVES it. Aligning is
+  // what keeps the boundary on the offset so a size change doesn't re-fetch a
+  // prefix. (covered ≥ current size, so the max() never shrinks here.)
+  function adaptBulkPageSizeOnSuccess(ms, covered) {
+    if (ms < RIVAL_PAGE_FAST_MS)      setRivalBulkPerPage(Math.min(RIVAL_PAGE_SIZE, Math.max(rivalBulkPerPage, covered)));
+    else if (ms > RIVAL_PAGE_SLOW_MS) setRivalBulkPerPage(rivalBulkPerPage * 0.5);
+  }
 
   // (Backoff is now shared across ALL API calls via gtApiFetch / apiThrottled —
   // see the top of the file. Rival sync just consults apiThrottled() to avoid
@@ -8452,7 +8525,7 @@ async function getExpRankByUsername(username) {
   // scope filter (all/ranked/unranked) is then a pure read-time concern — no
   // refetch on a scope change. A missing `r` is treated as ranked (legacy data,
   // until that store's one-time status=any re-bulk re-tags it).
-  function freshRivalFetch() { return { phase: "bulk", nextPage: 1, totalPages: null }; }
+  function freshRivalFetch() { return { phase: "bulk", nextPage: 1, totalPages: null, syncBurst: true, covered: 0 }; }
   // Store meta version.
   //   v1: per-entry difficulty/length (`d`/`l`) capture.
   //   v2: single status=any build (ranked + unranked + `r` in one stream).
@@ -8663,41 +8736,76 @@ async function getExpRankByUsername(username) {
     return !!(store && store.fetch && store.fetch.phase === "done");
   }
 
-  // Aggregate bulk-build progress (integer 0..99) across THIS goal's rival
-  // stores while any are still paging; 0 while syncing before any page count is
-  // known (show "(0%)" rather than a bare hint), and null once they're all done
-  // or when there are no rivals -- so the "syncing..." hints can read "(N%)"
-  // and tick up as pages load. Work is measured in pages
-  // (fetch.nextPage / fetch.totalPages); a store whose page count isn't known
-  // yet (page 1 in flight) contributes to neither side. The self store has no
-  // comparable page count, so it is not folded in: when only the self store is
-  // left to finish, every rival store reads done and this returns null.
+  // ── Sync-burst progress (shared by the rival + target sync bars) ─────────
+  // A "sync burst" is a maximal stretch during which >=1 leg (a rival/self
+  // store, or the quote catalog) is paging. Each leg carries a persisted
+  // `syncBurst` flag: set true when its bulk (re)starts (freshRivalFetch /
+  // the catalog bulk start), and cleared for EVERY leg once the whole burst
+  // ends (clearSyncBurstIfEnded, called as each leg finishes). The bar then
+  // counts only the legs IN the burst — pending ones, plus ones that finished
+  // during it (so it never drops when one leg completes ahead of another) —
+  // and excludes legs already done BEFORE the burst began (so it starts at
+  // 0%, not at their page share). All state is persisted, so a reload mid-
+  // sync resumes at the same %.
+  function anySyncLegPending() {
+    if (!catalogFullySynced()) return true; // catalog (re)building counts as pending
+    if (!rivalBulkDone(loadRivalStore(RIVAL_SELF_NAME))) return true;
+    for (const name of rivalManaged.keys()) {
+      if (name === RIVAL_SELF_NAME) continue;
+      if (!rivalBulkDone(loadRivalStore(name))) return true;
+    }
+    return false;
+  }
+  // Called as each leg finishes. Once nothing anywhere is still paging the
+  // burst is over, so drop every leg's membership — the next burst then
+  // starts from a clean slate (and at 0%). No-op while any leg is pending.
+  function clearSyncBurstIfEnded() {
+    if (anySyncLegPending()) return;
+    if (quoteCatalogMeta.syncBurst) { quoteCatalogMeta.syncBurst = false; saveQuoteCatalog({ broadcast: false }); }
+    for (const name of new Set([RIVAL_SELF_NAME, ...rivalManaged.keys()])) {
+      const s = loadRivalStore(name);
+      if (s.fetch && s.fetch.syncBurst) { s.fetch.syncBurst = false; saveRivalStore(name, { broadcast: false }); }
+    }
+  }
+  // Combined 0..99 across a set of legs, scoped to the current burst. Each
+  // leg: { pending, inBurst, totalPages, nextPage }. A leg counts iff it's
+  // pending OR finished-this-burst (inBurst); a pending leg contributes its
+  // fetched pages (from 0), a finished one its full span. 0 while a counted
+  // leg's page count isn't known yet; null when nothing of the burst is still
+  // pending (settled — the caller hides the line anyway).
+  function syncBurstPercentFromLegs(legs) {
+    let donePages = 0, totalPages = 0, known = false, anyPending = false;
+    for (const lg of legs) {
+      const pending = !!lg.pending;
+      if (!pending && !lg.inBurst) continue;   // done before this burst -> excluded
+      if (pending) anyPending = true;
+      const tp = Number(lg.totalPages);
+      if (Number.isFinite(tp) && tp > 0) {
+        known = true;
+        totalPages += tp;
+        donePages += pending ? Math.max(0, Math.min(tp, (Number(lg.nextPage) || 1) - 1)) : tp;
+      }
+    }
+    if (!anyPending) return null;            // nothing of this burst still pending
+    if (!known || totalPages <= 0) return 0; // syncing, page counts not known yet -> 0%
+    return Math.max(0, Math.min(99, Math.floor((donePages / totalPages) * 100)));
+  }
+
+  // Rival card bar: self + this goal's rival store(s). Self is counted only
+  // when it's part of the current burst — already-synced-self (the common
+  // case when a rival goal is added) is excluded, so the bar starts at 0% and
+  // tracks the rival fetch; when self ALSO needs (re)building (initial sync,
+  // PP rebalance) it's included so both legs sum into one 0->100 bar. The
+  // card settles on rivalDone AND selfDone separately, so a self-excluded bar
+  // can't read "done" while self is still paging.
   function rivalSyncPercent(gd) {
     const names = goalRivalNames(gd);
     if (!names.length) return null;
-    let donePages = 0, totalPages = 0, known = false, anyPending = false;
-    // Self store is a leg too: a rival goal's wins depend on YOUR PBs as much as
-    // the rival's, so the bar spans both (self + rival pages) -- otherwise it
-    // would read "done" and drop the % while the self store is still paging in.
-    // A finished leg counts full/full, so the combined bar only ever climbs.
-    for (const n of [RIVAL_SELF_NAME, ...names]) {
+    const legs = [RIVAL_SELF_NAME, ...names].map(n => {
       const f = loadRivalStore(n).fetch || {};
-      const tp = Number(f.totalPages);
-      const haveTp = Number.isFinite(tp) && tp > 0;
-      if (f.phase === "done") {
-        if (haveTp) { donePages += tp; totalPages += tp; known = true; }
-        continue;
-      }
-      anyPending = true;
-      if (haveTp) {
-        known = true;
-        totalPages += tp;
-        donePages += Math.max(0, Math.min(tp, (Number(f.nextPage) || 1) - 1));
-      }
-    }
-    if (!anyPending) return null;            // all rival stores done
-    if (!known || totalPages <= 0) return 0;    // syncing, nothing measurable yet -> 0%
-    return Math.max(0, Math.min(99, Math.floor((donePages / totalPages) * 100)));
+      return { pending: f.phase !== "done", inBurst: !!f.syncBurst, totalPages: f.totalPages, nextPage: f.nextPage };
+    });
+    return syncBurstPercentFromLegs(legs);
   }
 
   // PP-keyed idempotent merge. Returns true iff anything changed (store entry OR
@@ -8889,28 +8997,54 @@ async function getExpRankByUsername(username) {
     const store = loadRivalStore(name);
     const fobj  = store.fetch;
     if (fobj.phase === "done") return "done";
-    const page = fobj.nextPage || 1;
+
+    // Forward-only OFFSET cursor. `covered` = quotes confirmed fetched, contiguous
+    // from 0. We always page FORWARD from there — page = floor(covered/perPage)+1 —
+    // so the window starts on the covered boundary and we never restart at page 1
+    // (the old rebase did, re-reading the whole prefix whenever covered < size).
+    // The API only addresses quotes by page×perPage, so the sole possible re-read
+    // is `covered % perPage` when the size isn't aligned to the boundary — and
+    // align-on-grow keeps that at zero in the common case. Legacy cursors stored a
+    // page NUMBER (+ maybe pageSize); derive covered from them once on first use.
+    const perPage = rivalBulkPerPage;
+    const covered = (typeof fobj.covered === "number")
+      ? fobj.covered
+      : ((fobj.nextPage || 1) - 1) * (fobj.pageSize || RIVAL_PAGE_SIZE); // migrate
+    const page = Math.floor(covered / perPage) + 1;
+
+    const gtT0 = performance.now();
     let res;
-    try { res = await fetchRivalQuotesPage(fetchName, { page, reverse: true, status: "any" }); }
+    try { res = await fetchRivalQuotesPage(fetchName, { page, reverse: true, perPage, status: "any" }); }
     catch (e) {
+      // A 30s abort means the page was too big for the cap → halve so the retry
+      // (same covered offset, smaller size) finishes. A plain network error fails
+      // fast and isn't a size signal, so leave the size alone for that.
+      if (e?.gtTimeout) setRivalBulkPerPage(rivalBulkPerPage * 0.5);
+      fobj.covered  = covered;   // unchanged — the page didn't land
+      fobj.pageSize = perPage;
       console.warn("[Goal Tracker] rival bulk page failed (paused):", e);
-      persist(name, true); // persist progress so we resume from here
+      persist(name, true);
       return "failed";
     }
+
     for (const q of res.quotes) {
       const e = entryFromQuoteRecord(q);
       if (e) rivalMergeEntry(store, e.quoteId, e.wpm, e.pp, e.r, e.d, e.l);
     }
-    fobj.totalPages = res.totalPages;
+    const newCovered = page * perPage;   // end of the window just fetched
+    fobj.covered    = newCovered;
+    fobj.pageSize   = perPage;
+    fobj.totalPages = res.totalPages;    // for the CURRENT perPage (drives the bar)
+    fobj.nextPage   = page + 1;          // display-only now (progress bar)
+    adaptBulkPageSizeOnSuccess(performance.now() - gtT0, newCovered); // size for next page
     if (page >= res.totalPages) {
       fobj.phase = "done";
-      fobj.nextPage = res.totalPages + 1;
       store.metaV = RIVAL_META_V; // status=any build done -> ranked/unranked/d/l/r all captured
       store.lastSync = new Date().toISOString(); // refresh anchor: all captured up to now
       persist(name, true);
+      clearSyncBurstIfEnded(); // drop burst membership once nothing is still paging
       return "done";
     }
-    fobj.nextPage = page + 1; // advance cursor (persisted below)
     persist(name, false);
     return "advanced";
   }
@@ -9279,6 +9413,31 @@ async function getExpRankByUsername(username) {
     return changed;
   }
 
+  // Authoritative post-race confirm for ONE quote (the just-finished one). The
+  // aggregate /races merge above is gated on the stats tick and reads a list that
+  // can lag the server's per-quote best, so it can silently miss a fresh PB. The
+  // /users/<me>/quotes/<id> endpoint is per-quote and can't lag that way, so we
+  // read it directly and ratchet it into the self store. Urgent lane (a bulk
+  // soft-pause must not block it); only a genuine 429 holds it off. Returns
+  // whether a new best merged.
+  async function confirmSelfQuoteAfterRace(quoteId) {
+    if (!quoteId) return false;
+    if (!isLeader || !rivalIdbReady || !isLoggedIn()) return false;
+    if (apiHardThrottled()) return false; // only a real 429 blocks the urgent lane
+    const { username } = getAuth();
+    if (!username) return false;
+    let best;
+    try { best = await fetchRivalQuoteBest(username, quoteId); }
+    catch { return false; }
+    if (!best) return false; // 404 (never raced) or no bestRace — nothing to merge
+    const store = loadRivalStore(RIVAL_SELF_NAME);
+    if (rivalMergeEntry(store, quoteId, best.wpm, best.pp)) {
+      saveRivalStore(RIVAL_SELF_NAME);
+      return true;
+    }
+    return false;
+  }
+
   // On-demand fill of the current quote's bests (leader only), so the compare
   // line is accurate before bulk completes. Records confirmed "never raced"
   // results to avoid refetch loops; store-presence always wins over that memo.
@@ -9335,6 +9494,124 @@ async function getExpRankByUsername(username) {
     const liveQid = getCurrentQuoteIdLive();
     if (liveQid && haveRival) ensureCurrentQuoteForRivals(liveQid);
     renderAllGoals();
+  }
+
+
+  // ── PP-rebalance self-heal ───────────────────────────────────
+  // TypeGG occasionally rebalances its PP system and recalculates every
+  // race's PP server-side. Our self/rival stores cache per-quote PP, and the
+  // merge RATCHETS (keeps the higher value), so a recalculation that LOWERS a
+  // quote's PP would otherwise never propagate. We catch it cheaply: on each
+  // quote change, read the server's pre-race best for that quote and compare
+  // it to our cached value. They match in normal operation (the cache is
+  // derived from the server); a mismatch means PP was recalculated, so we
+  // re-fetch every store that holds a PP value.
+  //
+  // Timing: the read is kicked at quote START (before this attempt is
+  // absorbed), so it reflects the OLD best — the same basis as the cache.
+  const PP_REBALANCE_EPS = 0.5;          // sub-PP deltas are float noise, not a rebalance
+  const ppRebalanceChecked = new Set();  // quoteIds reconciled this session (per-race cost cap)
+  let ppRebalanceRefetchActive = false;  // re-entrancy guard for the store reset itself
+  // A genuine server PP rebalance moves ESSENTIALLY EVERY quote; a single quote
+  // disagreeing is almost always local staleness (a post-race PB the /races merge
+  // missed). So we track DISTINCT mismatched quotes and only escalate to the full
+  // multi-store wipe once enough of them disagree — below that we reconcile each
+  // quote in place. This stops one missed merge from nuking every store into a
+  // slow full re-bulk (the "Syncing… 0/0" thrash).
+  const ppRebalanceMismatches = new Set(); // distinct quoteIds seen disagreeing this session
+  const PP_REBALANCE_ESCALATE = 4;         // distinct disagreeing quotes that confirm a real rebalance
+
+  async function maybePpRebalanceRefetch(quoteId) {
+    if (!quoteId) return;
+    if (!isLeader || !rivalIdbReady || !isLoggedIn()) return;
+    if (apiHardThrottled()) return;              // a real 429 is up — re-check on a later quote
+    if (ppRebalanceRefetchActive) return;        // a refetch is mid-reset
+    if (ppRebalanceChecked.has(quoteId)) return; // already reconciled this quote this session
+    // Only worth doing when something actually reads the PP cache.
+    if ((goalData.rival || []).length === 0 && !haveImprovementTargetGoals() && !haveMaxCharsGoals()) return;
+
+    const selfStore = loadRivalStore(RIVAL_SELF_NAME);
+    // Never compare against a half-built cache: during the one-time bulk a
+    // missing or low entry is expected, not a rebalance.
+    if (!rivalBulkDone(selfStore)) return;
+
+    const cached = selfStore.quotes[quoteId];
+    // "Played at least once" AND ranked (PP-bearing). Never-raced or unranked
+    // (pp 0) quotes have no old-best PP to reconcile.
+    if (!cached || !(Number(cached.pp) > 0)) return;
+
+    // Claim the quote up-front so overlapping ticks don't double-fetch; on a
+    // transient error we release it so the next visit can retry.
+    ppRebalanceChecked.add(quoteId);
+
+    let live;
+    try { live = await fetchUserQuoteBest(quoteId); } // pre-race best { wpm, pp } | null
+    catch { ppRebalanceChecked.delete(quoteId); return; }
+    // A 404 (null) against a cached PB is ambiguous (deleted/unranked quote or
+    // a transient miss), not a clear rebalance — don't nuke everything on it.
+    if (!live || !Number.isFinite(Number(live.pp))) return;
+
+    if (Math.abs(Number(live.pp) - Number(cached.pp)) <= PP_REBALANCE_EPS) {
+      ppRebalanceMismatches.delete(quoteId); // realigned (our own confirm caught up) — drop it
+      return;
+    }
+
+    // Reconcile THIS quote in place first — overwrite the self entry with the
+    // authoritative live value (an OVERWRITE, not the ratcheting merge: correct
+    // whether the true value went UP — a missed PB — or DOWN — a rebalance). This
+    // corrects the card / win count for the quote you're on without touching any
+    // other store. `quoteId` is already in ppRebalanceChecked (claimed up-front),
+    // so we won't re-fetch it this session.
+    const sStore = loadRivalStore(RIVAL_SELF_NAME);
+    sStore.quotes[quoteId] = { wpm: Number(live.wpm) || (sStore.quotes[quoteId]?.wpm || 0), pp: Number(live.pp) || 0 };
+    saveRivalStore(RIVAL_SELF_NAME);
+    ensureCurrentQuoteForRivals(quoteId); // rivals could have moved too (real rebalance); a no-op on plain staleness
+    renderAllGoals();
+
+    // Only a BROAD disagreement confirms a real server-side rebalance. Until the
+    // distinct-quote count crosses the threshold, treat each mismatch as isolated
+    // staleness (already fixed in place above) rather than wiping every store.
+    ppRebalanceMismatches.add(quoteId);
+    if (ppRebalanceMismatches.size < PP_REBALANCE_ESCALATE) {
+      console.warn(`[Goal Tracker] PP mismatch on quote ${quoteId} (cached ${cached.pp} vs server ${live.pp}) — reconciled in place (${ppRebalanceMismatches.size}/${PP_REBALANCE_ESCALATE} distinct before a full re-sync).`);
+      return;
+    }
+
+    console.warn(`[Goal Tracker] PP rebalance confirmed — ${ppRebalanceMismatches.size} distinct quotes disagreed with the server; re-fetching all PP stores.`);
+    ppRebalanceMismatches.clear();
+    refetchAllPpStores();
+  }
+
+  // Full re-fetch of every PP-bearing store (self + all managed rivals). The
+  // recalculated server values can move DOWN, but rivalMergeEntry ratchets on
+  // PP, so a plain re-page would keep stale-high values — we must CLEAR each
+  // store's entries first, then rewind its cursor to re-bulk from scratch.
+  // Resetting fetch.phase to "bulk" flips the cards back to the same
+  // "syncing…" state as the initial build, and the existing bulk driver (plus
+  // the recurring poll, if this immediate kick is throttled) refills them.
+  function refetchAllPpStores() {
+    if (!isLeader || !rivalIdbReady) return;
+    if (ppRebalanceRefetchActive) return;
+    ppRebalanceRefetchActive = true;
+    try {
+      // Every per-quote "aligned" memo was taken against the now-stale cache.
+      ppRebalanceChecked.clear();
+      // The reset legs are flagged into the current sync burst by freshRivalFetch
+      // (syncBurst), so the bars scope to them (the intact catalog is excluded).
+      // rivalManaged holds exactly the stores we actively sync (self + rivals).
+      for (const name of Array.from(rivalManaged.keys())) {
+        const store = loadRivalStore(name);
+        store.quotes   = {};                // drop stale PP/WPM so the rebuild can lower values
+        store.fetch    = freshRivalFetch(); // rewind to page 1 (phase "bulk" → "syncing…")
+        store.lastSync = null;              // re-establish the incremental anchor after the bulk
+        rivalAbsentMemo.delete(rivalStoreKey(name)); // re-confirm "never raced" on refill
+        saveRivalStore(name);               // persist + broadcast + bump epochs (caches invalidated)
+      }
+    } finally {
+      ppRebalanceRefetchActive = false;
+    }
+    renderAllGoals();     // surface the "syncing…" state immediately
+    runRivalBulkDriver(); // kick the rebuild now rather than waiting for the poll tick
   }
 
   // ══════════════════════════════════════════════════════════════
@@ -9419,25 +9696,18 @@ async function getExpRankByUsername(username) {
   // 0 while syncing before any page count is known, and null once BOTH are done
   // (the caller hides the line on `settled`, so null is just belt-and-braces).
   function targetSyncPercent() {
-    let donePages = 0, totalPages = 0, known = false, anyPending = false;
-    const addLeg = (done, tp, nextPage) => {
-      if (!done) anyPending = true;
-      if (tp > 0) {
-        known = true;
-        totalPages += tp;
-        donePages += done ? tp : Math.max(0, Math.min(tp, (Number(nextPage) || 1) - 1));
-      }
-    };
-    // Catalog leg (page cursor on quoteCatalogMeta).
-    addLeg(catalogFullySynced(), Number(quoteCatalogMeta.totalPages) || 0, quoteCatalogMeta.nextPage);
-    // Self-race store leg (same page cursor as any rival store).
-    const selfStore = loadRivalStore(RIVAL_SELF_NAME);
-    const sf = selfStore.fetch || {};
-    addLeg(rivalBulkDone(selfStore), Number(sf.totalPages) || 0, sf.nextPage);
-
-    if (!anyPending) return null;            // both legs done -> settled
-    if (!known || totalPages <= 0) return 0; // syncing, nothing measurable yet
-    return Math.max(0, Math.min(99, Math.floor((donePages / totalPages) * 100)));
+    // Catalog + self legs through the shared burst rule: whichever of the two
+    // actually needs (re)building counts (from 0%); a leg already synced before
+    // this burst is excluded. So an initial sync shows catalog+self, while a PP
+    // rebalance (catalog intact, self reset) shows self only — each starting at
+    // 0% and climbing without a drop.
+    const sf = (loadRivalStore(RIVAL_SELF_NAME).fetch) || {};
+    return syncBurstPercentFromLegs([
+      { pending: !catalogFullySynced(), inBurst: !!quoteCatalogMeta.syncBurst,
+        totalPages: quoteCatalogMeta.totalPages, nextPage: quoteCatalogMeta.nextPage },
+      { pending: sf.phase !== "done", inBurst: !!sf.syncBurst,
+        totalPages: sf.totalPages, nextPage: sf.nextPage },
+    ]);
   }
 
 
@@ -9468,11 +9738,13 @@ async function getExpRankByUsername(username) {
       quoteCatalogMeta.totalCount = data.totalCount;
       quoteCatalogMeta.totalPages = data.totalPages;
       quoteCatalogMeta.phase = "bulk";
+      quoteCatalogMeta.syncBurst = true; // part of the current sync burst
       if (data.totalPages === 0 || page >= data.totalPages) {
         quoteCatalogMeta.phase = "done";
         quoteCatalogMeta.nextPage = (data.totalPages || 0) + 1;
         quoteCatalogMeta.lastFullSync = new Date().toISOString();
         saveQuoteCatalog();
+        clearSyncBurstIfEnded(); // drop burst membership once nothing is still paging
         renderAllGoals();
         break;
       }
@@ -9537,6 +9809,7 @@ async function getExpRankByUsername(username) {
       console.warn("[Goal Tracker] quote-catalog delta hit page cap without reaching known quotes — forcing full re-sync (verify the API sort is created-DESC)");
       quoteCatalogMeta.phase = "bulk";
       quoteCatalogMeta.nextPage = 1;
+      quoteCatalogMeta.syncBurst = true; // re-entering a sync burst
       saveQuoteCatalog();
     }
   }
