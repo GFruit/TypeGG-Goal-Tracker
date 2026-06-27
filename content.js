@@ -2055,16 +2055,16 @@ function gtMain() {
       <div id="gt-target-status-row" style="display:none;">
         <div class="gt-section-label">Status</div>
         <div class="gt-mode-selector gt-target-status-group">
-          <button class="gt-mode-btn active" data-target-status="all"      type="button">All</button>
-          <button class="gt-mode-btn"        data-target-status="ranked"   type="button">Ranked</button>
+          <button class="gt-mode-btn"        data-target-status="all"      type="button">All</button>
+          <button class="gt-mode-btn active" data-target-status="ranked"   type="button">Ranked</button>
           <button class="gt-mode-btn"        data-target-status="unranked" type="button">Unranked</button>
         </div>
       </div>
       <div id="gt-target-played-row" style="display:none;">
         <div class="gt-section-label">Quotes</div>
         <div class="gt-mode-selector gt-target-played-group">
-          <button class="gt-mode-btn active" data-target-played="all"    type="button">All</button>
-          <button class="gt-mode-btn"        data-target-played="played" type="button">Played only</button>
+          <button class="gt-mode-btn"        data-target-played="all"    type="button">All</button>
+          <button class="gt-mode-btn active" data-target-played="played" type="button">Played only</button>
         </div>
       </div>
       <div id="gt-target-diff-row" style="display:none;">
@@ -2196,14 +2196,14 @@ function gtMain() {
         </div>
         <div class="gt-section-label" style="margin-top:16px;">Scope</div>
         <div class="gt-mode-selector" id="gt-rival-cfg-scope">
-          <button class="gt-mode-btn active" type="button" data-rvc-scope="all">All</button>
-          <button class="gt-mode-btn"        type="button" data-rvc-scope="ranked">Ranked</button>
+          <button class="gt-mode-btn"        type="button" data-rvc-scope="all">All</button>
+          <button class="gt-mode-btn active" type="button" data-rvc-scope="ranked">Ranked</button>
           <button class="gt-mode-btn"        type="button" data-rvc-scope="unranked">Unranked</button>
         </div>
         <div class="gt-section-label" style="margin-top:16px;">Compare on</div>
         <div class="gt-mode-selector" id="gt-rival-cfg-both">
-          <button class="gt-mode-btn active" type="button" data-rvc-both="false">All quotes</button>
-          <button class="gt-mode-btn"        type="button" data-rvc-both="true">Shared only</button>
+          <button class="gt-mode-btn"        type="button" data-rvc-both="false">All quotes</button>
+          <button class="gt-mode-btn active" type="button" data-rvc-both="true">Shared only</button>
         </div>
         <div class="gt-section-label" style="margin-top:16px;">Difficulty filter<span class="gt-range-readout" id="gt-rival-cfg-diff-readout"></span></div>
         <div class="gt-range-row" id="gt-rival-cfg-diff-ticks">
@@ -3348,13 +3348,15 @@ function gtMain() {
       mfPpRivalMin: num(g.mfPpRivalMin), mfPpRivalMax: num(g.mfPpRivalMax),
     };
   }
-  // The settings object a NEW rival goal starts from: a CLEAN slate — no filter
-  // (every range full / open), scope "all", metric "wpm". Deliberately NOT seeded
+  // The settings object a NEW rival goal starts from: no range filter (every
+  // difficulty / length / value range full / open) and metric "wpm", but with
+  // opinionated comparison defaults — scope "ranked" and shared-only ON — since
+  // those match how most rival goals are actually used. Deliberately NOT seeded
   // from the global object: that holds a user's old pre-per-goal filter (e.g. a
   // stale WPM band), which would otherwise re-appear on every new goal. Each goal
   // is configured from scratch in the creation modal (and editable afterwards).
   function defaultRivalGoalSettings() {
-    return { ...rivalFilterFields(DEFAULT_RIVAL_SETTINGS), settingsV: RIVAL_GOAL_SETTINGS_V };
+    return { ...rivalFilterFields(DEFAULT_RIVAL_SETTINGS), scope: "ranked", requireBoth: true, settingsV: RIVAL_GOAL_SETTINGS_V };
   }
   // The live per-goal filter object — the source of truth for every standings
   // computation. Falls back to a fresh default if a goal somehow lacks one
@@ -3940,8 +3942,8 @@ async function getExpRankByUsername(username) {
   // selectedImprovementMode is "gain" (the existing accumulator) or "target"
   // (the catalog threshold goal). Target handles are null = full range.
   let selectedImprovementMode = "gain";
-  let selectedTargetStatus    = "all";          // "all" | "ranked" | "unranked"
-  let selectedTargetPlayed    = "all";          // "all" | "played"
+  let selectedTargetStatus    = "ranked";       // "all" | "ranked" | "unranked"
+  let selectedTargetPlayed    = "played";       // "all" | "played"
   let selectedTargetDiffMin = null, selectedTargetDiffMax = null;
   let selectedTargetLenMin  = null, selectedTargetLenMax  = null;
 
@@ -5745,13 +5747,13 @@ async function getExpRankByUsername(username) {
   // changes that leave the Target sub-mode.
   function resetTargetUI() {
     selectedImprovementMode = "gain";
-    selectedTargetStatus = "all";
-    selectedTargetPlayed = "all";
+    selectedTargetStatus = "ranked";
+    selectedTargetPlayed = "played";
     selectedTargetDiffMin = null; selectedTargetDiffMax = null;
     selectedTargetLenMin  = null; selectedTargetLenMax  = null;
     improvementModeBtns.forEach(b => b.classList.toggle("active", b.dataset.impMode === "gain"));
-    targetStatusBtns.forEach(b => b.classList.toggle("active", b.dataset.targetStatus === "all"));
-    targetPlayedBtns.forEach(b => b.classList.toggle("active", b.dataset.targetPlayed === "all"));
+    targetStatusBtns.forEach(b => b.classList.toggle("active", b.dataset.targetStatus === "ranked"));
+    targetPlayedBtns.forEach(b => b.classList.toggle("active", b.dataset.targetPlayed === "played"));
     if (improvementModeRow) improvementModeRow.style.display = "none";
     for (const r of [targetStatusRow, targetPlayedRow, targetDiffRow, targetLenRow]) {
       if (r) r.style.display = "none";
@@ -8282,17 +8284,14 @@ async function getExpRankByUsername(username) {
                                      // The live size is now adaptive (rivalBulkPerPage);
                                      // this constant only caps it and seeds the cursor
                                      // rebase for stores whose cursor predates it.
-  const RIVAL_REFRESH_PAGE_SIZE = 50;  // ongoing refresh: page the since-last-sync
-                                       // window. Halved from 100 — same endpoint, same
+  const RIVAL_REFRESH_PAGE_SIZE = 50;  // ongoing refresh: page the recently-raced
+                                       // prefix. Halved from 100 — same endpoint, same
                                        // super-linear cost, so a large catch-up window
                                        // at 100 could also cross the cap.
-  // Re-pull a few minutes before the stored lastSync each refresh, to absorb
-  // clock skew and startDate boundary inclusivity. Merges are idempotent, so the
-  // small re-scan costs nothing but closes edge gaps.
-  const RIVAL_SYNC_OVERLAP_MS = 5 * 60_000;
-  // Safety cap on the since-last-sync scan. With a working startDate the window
-  // is tiny (a handful of pages); the cap only bounds a pathological case where
-  // startDate isn't filtering, so a refresh can never runaway-scan full history.
+  // Safety cap on the catch-up scan. In steady state the refresh stops within a
+  // page (it halts at the first already-tracked quote whose completed-race count
+  // is unchanged); this cap only bounds the one-time first scan of a store with
+  // no per-quote race baseline yet, so a refresh can never runaway-scan history.
   const RIVAL_REFRESH_MAX_PAGES = 50;
   const RIVAL_PP_EPS     = 1e-6;
   // Pace consecutive bulk-build page fetches. A tight fetch loop over a
@@ -8533,7 +8532,7 @@ async function getExpRankByUsername(username) {
   // IfNeeded) under status=any, which captures everything v2 needs at once.
   const RIVAL_META_V = 3;
   function freshRivalStore() {
-    return { quotes: {}, fetch: freshRivalFetch(), metaV: RIVAL_META_V, lastSync: null };
+    return { quotes: {}, raceCounts: {}, fetch: freshRivalFetch(), metaV: RIVAL_META_V, lastSync: null };
   }
   // Re-bulk ONCE under status=any when a store predates the current schema:
   //  - v1 stores were ranked-only (or two ranked/unranked streams).
@@ -8846,20 +8845,24 @@ async function getExpRankByUsername(username) {
     // filtering needs no separate stream. Undefined when absent (e.g. a /races
     // row) → treated as ranked downstream until the bulk re-tags it.
     const r = (qq && typeof qq.ranked === "boolean") ? qq.ranked : undefined;
+    // Top-level `races` is the USER's completed-race count on this quote (not
+    // q.quote.races, the quote's global total). The incremental refresh uses it
+    // as the "raced since last scan?" signal and stop key.
+    const races = Number(q?.races);
     return {
       quoteId: br.quoteId, wpm: Number(br.wpm), pp: Number(br.pp),
       d: Number.isFinite(d) ? d : undefined,
       l: Number.isFinite(l) ? l : undefined,
       r,
+      races: Number.isFinite(races) ? races : undefined,
     };
   }
 
   // ── Fetching ────────────────────────────────────────────────
-  async function fetchRivalQuotesPage(fetchName, { page, reverse, perPage = RIVAL_PAGE_SIZE, status, startDate }) {
+  async function fetchRivalQuotesPage(fetchName, { page, reverse, perPage = RIVAL_PAGE_SIZE, status }) {
     const params = new URLSearchParams({ page: String(page), perPage: String(perPage) });
     if (reverse) params.set("reverse", "true");
     if (status)  params.set("status", status); // ranked | unranked | any (omitted → API default = ranked)
-    if (startDate) params.set("startDate", startDate); // bound to quotes LAST-RACED on/after this (ISO)
     const url = `https://api.typegg.io/v1/users/${encodeURIComponent(fetchName)}/quotes?${params.toString()}`;
 
     // ── DIAGNOSTIC ALARM (Issue 2) — quiet by design ────────────────────
@@ -8873,7 +8876,7 @@ async function getExpRankByUsername(username) {
     //     early warning that we're drifting back toward the gateway-timeout
     //     zone that caused the original intermittent failures.
     // Watches every real page (the perPage=1 count probe is gone — the refresh
-    // now bounds itself with startDate instead).
+    // now bounds itself by the per-quote race-count stop key instead).
     const GT_DIAG_SLOW_MS = 20000;
     const gtDiagWatch = perPage > 1;
     const gtDiagTag = `[GT-DIAG] quotes ${fetchName} p${page} perPage=${perPage}${status ? " " + status : ""}`;
@@ -9027,9 +9030,14 @@ async function getExpRankByUsername(username) {
       return "failed";
     }
 
+    if (!store.raceCounts) store.raceCounts = {};
     for (const q of res.quotes) {
       const e = entryFromQuoteRecord(q);
-      if (e) rivalMergeEntry(store, e.quoteId, e.wpm, e.pp, e.r, e.d, e.l);
+      if (!e) continue;
+      rivalMergeEntry(store, e.quoteId, e.wpm, e.pp, e.r, e.d, e.l);
+      // Seed the per-quote completed-race baseline as the bulk passes each row,
+      // so the first incremental refresh has a stop key and never deep-scans.
+      if (e.races !== undefined) store.raceCounts[e.quoteId] = e.races;
     }
     const newCovered = page * perPage;   // end of the window just fetched
     fobj.covered    = newCovered;
@@ -9128,68 +9136,71 @@ async function getExpRankByUsername(username) {
     }
   }
 
-  // Ongoing refresh: a "since last sync" pull. Runs (one store per tick) every
-  // RIVAL_POLL_MS via the rotation timer.
+  // Ongoing refresh: catch up on a store's new PBs since we last looked. Runs
+  // one store per tick via the rotation timer (RIVAL_POLL_MS).
   //
-  // startDate filters by LAST-RACED time server-side (the /quotes sort + filter
-  // run on the user's last race on each quote, NOT the PB timestamp — confirmed
-  // against /races). Since you can't beat a PB without racing the quote, the set
-  // raced since lastSync is a SUPERSET of every quote improved since lastSync
-  // AND every brand-new quote — so a single startDate=<lastSync> pull catches
-  // them all, no early-stop heuristic. We decide "improved?" by score (merges
-  // are idempotent; non-PB re-races merge as no-ops). The row `timestamp` is
-  // PB-time, so it is NOT a valid paging stop key — instead we just page the
-  // (small, server-bounded) result to exhaustion. This closes the old
-  // early-stop's permanent-gap and ">100 changes while the tab was closed"
-  // holes. A small overlap (RIVAL_SYNC_OVERLAP_MS) re-pulls a few minutes before
-  // lastSync for clock-skew / boundary safety; RIVAL_REFRESH_MAX_PAGES bounds a
-  // pathological non-filtering startDate.
+  // The /users/<name>/quotes list is sorted by most-recent COMPLETED race
+  // (descending), and the top-level `races` is the user's completed-race count
+  // on each quote. Incomplete attempts neither appear nor bump `races`, so the
+  // two move in lockstep: every event that floats a quote up the list also
+  // increments its `races`. The quotes raced since our last scan are therefore
+  // exactly the contiguous prefix from the top, and the boundary is the first
+  // already-tracked quote whose `races` is unchanged — everything below it was
+  // raced even longer ago. (startDate is ignored server-side on this endpoint,
+  // so we bound the scan this way instead of by date.)
+  //
+  // Per row, top→down: a new quote, or a tracked one whose `races` grew, may
+  // carry a new PB → feed it to rivalMergeEntry (ratchets; non-PB re-races and
+  // meta-only rows no-op) and (re)record its race count. The first tracked quote
+  // with an unchanged count means we've caught up → stop. RIVAL_REFRESH_MAX_PAGES
+  // bounds the one-time first scan of a store with no baseline yet. NOTE: a PP
+  // rebalance moves pp WITHOUT a race, so `races` won't change and this refresh
+  // won't see it — that case is owned by the PP-rebalance reconcile path, by
+  // design.
   async function rivalIncrementalRefresh(name) {
     const fetchName = rivalFetchNameFor(name);
     if (!fetchName) return false;
     const store  = loadRivalStore(name);
+    if (!store.raceCounts) store.raceCounts = {};
     const status = "any";
 
-    // No anchor yet (a store that completed its bulk before lastSync existed):
-    // the bulk already captured everything, so just set the anchor to now and
-    // let the next tick do a proper bounded pull. The overlap then re-covers the
-    // gap between now and that next tick, so nothing is missed.
-    const anchorMs = store.lastSync ? Date.parse(store.lastSync) : NaN;
-    if (!Number.isFinite(anchorMs)) {
-      store.lastSync = new Date().toISOString();
-      return false; // store just changed shape but no quote changed
-    }
-
-    const syncStart = Date.now();
-    const startDate = new Date(Math.max(0, anchorMs - RIVAL_SYNC_OVERLAP_MS)).toISOString();
-    let changed = false;
-    let completed = false;
+    let changed  = false;
+    let caughtUp = false;
     let page = 1;
     while (isLeader && anyTabVisibleRecently() && !apiThrottled()) {
       if (page > 1) await new Promise(r => setTimeout(r, RIVAL_PAGE_DELAY_MS));
       let res;
-      try { res = await fetchRivalQuotesPage(fetchName, { page, reverse: false, perPage: RIVAL_REFRESH_PAGE_SIZE, status, startDate }); }
-      catch (e) { console.warn("[Goal Tracker] rival refresh failed (paused):", e); break; } // don't advance the anchor
+      try { res = await fetchRivalQuotesPage(fetchName, { page, reverse: false, perPage: RIVAL_REFRESH_PAGE_SIZE, status }); }
+      catch (e) { console.warn("[Goal Tracker] rival refresh failed (paused):", e); break; }
       for (const q of res.quotes) {
         const e = entryFromQuoteRecord(q);
         if (!e) continue;
-        // Merge improvements; non-PB re-races (the bulk of a since-last-sync
-        // window) merge as no-ops. The `r` tag is (re)applied so a mis-tag heals.
+        const races     = e.races; // undefined if the row carried no count
+        const tracked   = !!store.quotes[e.quoteId];
+        const prevRaces = store.raceCounts[e.quoteId];
+        // Caught up: an already-tracked quote whose completed-race count has not
+        // moved. The list is last-raced-desc, so every row below is older → stop.
+        if (tracked && races !== undefined && prevRaces !== undefined && races <= prevRaces) {
+          caughtUp = true;
+          break;
+        }
+        // New / re-raced since last scan: merge any PB (ratchets; non-PB re-races
+        // and meta-only rows no-op) and advance the stored race count so the next
+        // scan can stop here. The `r` tag is (re)applied so a mis-tag heals.
         if (rivalMergeEntry(store, e.quoteId, e.wpm, e.pp, e.r, e.d, e.l)) changed = true;
+        if (races !== undefined && store.raceCounts[e.quoteId] !== races) {
+          store.raceCounts[e.quoteId] = races;
+          changed = true; // persist the advanced baseline even with no PB change
+        }
       }
-      if (page >= res.totalPages) { completed = true; break; }
+      if (caughtUp) break;
+      if (page >= res.totalPages) break;
       if (page >= RIVAL_REFRESH_MAX_PAGES) {
-        console.warn("[Goal Tracker] rival refresh hit page cap — is startDate filtering?", { name, startDate, pages: page });
-        completed = true; // treat as done; the bounded set is merged
+        console.warn("[Goal Tracker] rival refresh hit page cap without catching up", { name, pages: page });
         break;
       }
       page += 1;
     }
-    // Advance the anchor only on a clean full scan — never when we bailed on
-    // throttle / lost leadership / hidden (so the missed tail is re-pulled next
-    // time). syncStart was captured BEFORE the fetches, so a quote raced during
-    // the scan stays inside the next window (the overlap reinforces this).
-    if (completed) store.lastSync = new Date(syncStart).toISOString();
     return changed;
   }
 
@@ -9601,9 +9612,10 @@ async function getExpRankByUsername(username) {
       // rivalManaged holds exactly the stores we actively sync (self + rivals).
       for (const name of Array.from(rivalManaged.keys())) {
         const store = loadRivalStore(name);
-        store.quotes   = {};                // drop stale PP/WPM so the rebuild can lower values
-        store.fetch    = freshRivalFetch(); // rewind to page 1 (phase "bulk" → "syncing…")
-        store.lastSync = null;              // re-establish the incremental anchor after the bulk
+        store.quotes     = {};              // drop stale PP/WPM so the rebuild can lower values
+        store.raceCounts = {};              // baseline rebuilds alongside quotes (bulk re-seeds it)
+        store.fetch      = freshRivalFetch(); // rewind to page 1 (phase "bulk" → "syncing…")
+        store.lastSync   = null;            // vestigial anchor; reset for tidiness
         rivalAbsentMemo.delete(rivalStoreKey(name)); // re-confirm "never raced" on refill
         saveRivalStore(name);               // persist + broadcast + bump epochs (caches invalidated)
       }
