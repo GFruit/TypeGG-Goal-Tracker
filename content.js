@@ -4,6 +4,56 @@ function gtMain() {
   // don't build a second one.
   if (document.getElementById("goal-tracker")) return;
 
+  // ── Language universes ("profiles") ────────────────────────────
+  // Each universe (typegg.io, de.typegg.io, fr.typegg.io, …) is a separate
+  // origin, but we ALSO namespace all of OUR own state (localStorage keys,
+  // the IndexedDB database, the cross-tab channel + leader lock) by universe,
+  // so every universe is a fully isolated profile: its own goals, rival
+  // stores, navigation and PP world. English keeps the bare keys (prefix ""),
+  // so existing data needs no migration; other universes get a "<code>:"
+  // prefix. Add a language later by adding one line to UNIVERSE_BY_SUBDOMAIN.
+  const UNIVERSE_BY_SUBDOMAIN = {
+    fr: "French", it: "Italian", ru: "Russian",
+    es: "Spanish", vi: "Vietnamese", de: "German",
+  };
+  const GT_SUBDOMAIN = (() => {
+    const first = (location.hostname || "").toLowerCase().split(".")[0];
+    return Object.prototype.hasOwnProperty.call(UNIVERSE_BY_SUBDOMAIN, first) ? first : "";
+  })();
+  // API "language" value for PP-derived stats; "English" is the default world.
+  const GT_LANGUAGE = GT_SUBDOMAIN ? UNIVERSE_BY_SUBDOMAIN[GT_SUBDOMAIN] : "English";
+  // Storage namespace; "" for English so existing keys keep working untouched.
+  const GT_NS = GT_SUBDOMAIN ? GT_SUBDOMAIN + ":" : "";
+
+  // Append the universe to a PP-derived endpoint (/users, /leaders?sort=totalPp).
+  // No-op for English. Only totalPp / globalRank / bestPp / bestWpm are
+  // language-scoped by the API; EXP / races / quotes / nWpm stay global, so
+  // this is only ever applied on PP paths.
+  function withLang(url) {
+    if (!GT_LANGUAGE || GT_LANGUAGE === "English") return url;
+    return url + (url.includes("?") ? "&" : "?") + "language=" + encodeURIComponent(GT_LANGUAGE);
+  }
+
+  // localStorage proxy: transparently namespaces OUR keys (those starting with
+  // "gt") by universe while leaving the site's own keys (e.g. pocketbase_auth)
+  // untouched. With GT_NS === "" this is a pure pass-through, so English is
+  // byte-for-byte unchanged. Shadowing the global here scopes every existing
+  // localStorage.* call in this closure with zero call-site changes. key()
+  // returns LOGICAL (de-prefixed) keys so enumeration + storage events still
+  // match our logical key constants.
+  const GT_RAW_LS = window.localStorage;
+  const gtIsOurKey = (k) => typeof k === "string" && k.startsWith("gt");
+  const gtPhysKey  = (k) => (GT_NS && gtIsOurKey(k)) ? GT_NS + k : k;
+  const logiKey    = (k) => (GT_NS && typeof k === "string" && k.startsWith(GT_NS + "gt")) ? k.slice(GT_NS.length) : k;
+  const localStorage = {
+    getItem:    (k)    => GT_RAW_LS.getItem(gtPhysKey(k)),
+    setItem:    (k, v) => GT_RAW_LS.setItem(gtPhysKey(k), v),
+    removeItem: (k)    => GT_RAW_LS.removeItem(gtPhysKey(k)),
+    key:        (i)    => logiKey(GT_RAW_LS.key(i)),
+    clear:      ()     => GT_RAW_LS.clear(),
+    get length() { return GT_RAW_LS.length; },
+  };
+
   // ── Cached stats (for target-mode hint in modal) ───────────────
   let currentStats = { exp: null, pp: null, races: null, quotes: null, quotesUnranked: null, playtime: null, rank: null, expRank: JSON.parse(localStorage.getItem("gt-exp-rank"))?.rank ?? null };
 
@@ -54,8 +104,8 @@ function gtMain() {
   // Goal: with 4 TypeGG tabs open, only ONE fetches from the API.
   // The "leader" tab runs the intervals; follower tabs receive data
   // via BroadcastChannel and just update their UI.
-  const CHANNEL_NAME     = 'gt-sync';
-  const LEADER_LOCK_NAME = 'gt-leader';
+  const CHANNEL_NAME     = GT_NS + 'gt-sync';
+  const LEADER_LOCK_NAME = GT_NS + 'gt-leader';
   const STATS_CACHE_KEY  = 'gt-stats-cache';
   const STATS_CACHE_TTL  = 5 * 60 * 1000; // 5 min — beyond this, treat cache as stale
 
@@ -260,7 +310,7 @@ function gtMain() {
 
   function userEndpoint() {
     const { username } = getAuth();
-    return `https://api.typegg.io/v1/users/${username ?? "fruit"}`;
+    return withLang(`https://api.typegg.io/v1/users/${username ?? "fruit"}`);
   }
 
   // ── ID generation ──────────────────────────────────────────────
@@ -3529,7 +3579,7 @@ function gtMain() {
   async function getPpByRank(targetRank) {
     const perPage = 20;
     const page    = Math.ceil(targetRank / perPage);
-    const url     = `https://api.typegg.io/v1/leaders?sort=totalPp&page=${page}&perPage=${perPage}`;
+    const url     = withLang(`https://api.typegg.io/v1/leaders?sort=totalPp&page=${page}&perPage=${perPage}`);
     const response = await gtApiFetch(url, { headers: authHeaders() });
     if (!response.ok) throw new Error("Leaderboard fetch failed");
     const data = await response.json();
@@ -3540,7 +3590,7 @@ function gtMain() {
 
   // ── Username → PP lookup ─────────────────────────────────────────
   async function getPpByUsername(username) {
-    const url = `https://api.typegg.io/v1/users/${encodeURIComponent(username)}`;
+    const url = withLang(`https://api.typegg.io/v1/users/${encodeURIComponent(username)}`);
     
     const response = await gtApiFetch(url, { headers: authHeaders() });
     if (!response.ok) throw new Error("User fetch failed");
@@ -8401,7 +8451,7 @@ async function getExpRankByUsername(username) {
   // BroadcastChannel (localStorage's automatic `storage` event is gone for these
   // keys). All async; on IDB failure we degrade to in-memory-only for the
   // session (a warning, no crash) — the leader rebuilds from the API anyway.
-  const RIVAL_IDB_NAME     = "gt-rival";
+  const RIVAL_IDB_NAME     = GT_NS + "gt-rival";
   const RIVAL_IDB_STORE    = "kv";
   const RIVAL_META_KEY     = "gt-rivalq-meta";          // shared quote-meta record
   const RIVAL_MIGRATED_KEY = "gt-rivalq-idb-migrated";  // one-time LS→IDB marker
@@ -10103,7 +10153,7 @@ async function getExpRankByUsername(username) {
       cursors[goalId] = { sort, served };
       saveTargetNextCursors(cursors);
     }
-    window.location.href = `https://typegg.io/solo/${encodeURIComponent(pick)}`;
+    window.location.href = `${location.origin}/solo/${encodeURIComponent(pick)}`;
   }
 
   // ── Rendering ───────────────────────────────────────────────────────────────────
@@ -11084,7 +11134,7 @@ async function getExpRankByUsername(username) {
       saveRivalNextCursors(cursors);
     }
 
-    const base = `https://typegg.io/solo/${encodeURIComponent(pick)}`;
+    const base = `${location.origin}/solo/${encodeURIComponent(pick)}`;
     // Global setting (Settings → Rival): optionally open the head-to-head
     // "/vs/<rival>" page instead of the quote on its own.
     const url = (rivalSettings.nextUsesVsLink && gd.rival)
@@ -11176,7 +11226,7 @@ async function getExpRankByUsername(username) {
       saveRivalRowNextCursors(cursors);
     }
 
-    const base = `https://typegg.io/solo/${encodeURIComponent(pick)}`;
+    const base = `${location.origin}/solo/${encodeURIComponent(pick)}`;
     const url = rivalSettings.nextUsesVsLink
       ? `${base}/vs/${encodeURIComponent(name)}`
       : base;
@@ -11224,7 +11274,7 @@ async function getExpRankByUsername(username) {
         const perPage = 20;
         const page    = Math.ceil(rank / perPage);
         if (!pageCache.has(page)) {
-          const url = `https://api.typegg.io/v1/leaders?sort=totalPp&page=${page}&perPage=${perPage}`;
+          const url = withLang(`https://api.typegg.io/v1/leaders?sort=totalPp&page=${page}&perPage=${perPage}`);
           pageCache.set(page, gtApiFetch(url, { headers: authHeaders() }).then(r => {
             if (!r.ok) throw new Error("Leaderboard fetch failed");
             return r.json();
@@ -11392,7 +11442,7 @@ async function getExpRankByUsername(username) {
       const userStats = new Map();
       await Promise.all([...usernames].map(async (name) => {
         try {
-          const url = `https://api.typegg.io/v1/users/${encodeURIComponent(name)}`;
+          const url = withLang(`https://api.typegg.io/v1/users/${encodeURIComponent(name)}`);
           const r = await gtApiFetch(url, { headers: authHeaders() });
           if (!r.ok) return;
           const data = await r.json();
@@ -12313,12 +12363,15 @@ async function getExpRankByUsername(username) {
   // where a tab joins late or misses a BroadcastChannel message.
   window.addEventListener('storage', (e) => {
     if (!e.key) return;
+    // Native storage events carry the PHYSICAL key (universe-prefixed); map
+    // it back to logical key space so the comparisons below still match.
+    const k = logiKey(e.key);
 
     // Auth changed in another tab (TypeGG's own key)? Re-evaluate the gate.
-    if (e.key === 'pocketbase_auth') { checkAuthTransition(); return; }
+    if (k === 'pocketbase_auth') { checkAuthTransition(); return; }
 
     // Recurrence settings change?
-    if (e.key === REC_SETTINGS_KEY) {
+    if (k === REC_SETTINGS_KEY) {
       recSettings = loadRecSettings();
       migrateRecurringGoalPeriodStarts(); // preserve in-period progress
       renderAllGoals();
@@ -12326,20 +12379,20 @@ async function getExpRankByUsername(username) {
     }
 
     // Display settings change?
-    if (e.key === DISPLAY_SETTINGS_KEY) {
+    if (k === DISPLAY_SETTINGS_KEY) {
       displaySettings = loadDisplaySettings();
       renderAllGoals();
       return;
     }
 
     // Improve settings change? (Next-quote ordering — read live, no re-render.)
-    if (e.key === IMPROVE_SETTINGS_KEY) {
+    if (k === IMPROVE_SETTINGS_KEY) {
       improveSettings = loadImproveSettings();
       return;
     }
 
     // Rival settings change?
-    if (e.key === RIVAL_SETTINGS_KEY) {
+    if (k === RIVAL_SETTINGS_KEY) {
       rivalSettings = loadRivalSettings();
       renderAllGoals();
       if (isLeader) ensureRivalSync();
@@ -12347,7 +12400,7 @@ async function getExpRankByUsername(username) {
     }
 
     // Groups (widget layout) change?
-    if (e.key === GROUPS_KEY) {
+    if (k === GROUPS_KEY) {
       if (dragInProgress) return;
       try {
         const parsed = e.newValue ? JSON.parse(e.newValue) : null;
@@ -12361,7 +12414,7 @@ async function getExpRankByUsername(username) {
 
     // Goal data change?
     for (const [type, cfg] of Object.entries(GOAL_CONFIG)) {
-      if (e.key === cfg.storageKey) {
+      if (k === cfg.storageKey) {
         try {
           goalData[type] = JSON.parse(e.newValue || '[]');
         } catch { goalData[type] = []; }
@@ -12384,7 +12437,7 @@ async function getExpRankByUsername(username) {
     // BroadcastChannel messages instead.)
 
     // Stats cache updated by leader? Hydrate.
-    if (e.key === STATS_CACHE_KEY && e.newValue && !isLeader) {
+    if (k === STATS_CACHE_KEY && e.newValue && !isLeader) {
       try {
         const parsed = JSON.parse(e.newValue);
         if (parsed?.data) applyUserData(parsed.data);
@@ -12393,7 +12446,7 @@ async function getExpRankByUsername(username) {
     }
 
     // EXP rank cache updated by leader? Hydrate.
-    if (e.key === 'gt-exp-rank' && e.newValue) {
+    if (k === 'gt-exp-rank' && e.newValue) {
       try { currentStats.expRank = JSON.parse(e.newValue).rank; } catch {}
     }
   });
