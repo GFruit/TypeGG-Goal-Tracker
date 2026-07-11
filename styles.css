@@ -787,7 +787,7 @@
 .gt-target-row.gt-tagfield {
   flex-wrap: wrap; align-items: center; gap: 6px;
   border: 1.5px solid #374151; background: #111827;
-  border-radius: 8px; padding: 6px 8px; min-height: 38px;
+  border-radius: 8px; padding: 6px 8px; min-height: 40px;
   transition: border-color 0.15s;
 }
 .gt-target-row.gt-tagfield:focus-within { border-color: #3b82f6; }
@@ -796,7 +796,16 @@
   flex: 1 1 130px; min-width: 130px; width: auto;
 }
 .gt-target-row.gt-tagfield .gt-custom-input:focus { border: none; }
-.gt-target-row.gt-tagfield .gt-rival-add-inline-btn { padding: 4px 10px; }
+.gt-target-row.gt-tagfield .gt-rival-add-inline-btn { padding: 4px 10px; height: 26px; box-sizing: border-box; line-height: 1; }
+/* Single-rival mode: keep the +Add button in the flex layout (so the field
+   is laid out identically to multi mode and the modal can't shift by a
+   pixel), but collapse it to zero width and hide it. The username input
+   still spans the full field; the negative margin cancels the flex gap. */
+.gt-target-row.gt-tagfield .gt-rival-add-inline-btn.gt-rival-add-inline-btn--reserved {
+  visibility: hidden; width: 0; min-width: 0;
+  padding-left: 0; padding-right: 0; border-left-width: 0; border-right-width: 0;
+  margin-left: -6px; overflow: hidden; pointer-events: none;
+}
 .gt-rival-inline-tags { display: contents; }
 
 /* ── Mode hint ───────────────────────────────────────────── */
@@ -1670,7 +1679,9 @@ body.gt-app-loggedout .gt-widget-detached { display: none !important; }
 }
 .gt-edit-rec-group { display: flex; gap: 4px; padding: 0 4px 2px; }
 .gt-edit-rec-group .gt-mode-btn { flex: 1; padding: 5px 4px; font-size: 11px; }
-.gt-edit-amount { margin: 0 4px; width: calc(100% - 8px); box-sizing: border-box; }
+.gt-edit-amount,
+.gt-edit-avg-target,
+.gt-edit-avg-window { margin: 0 4px; width: calc(100% - 8px); box-sizing: border-box; }
 .gt-edit-popover .gt-view-popover-title { display: flex; align-items: center; gap: 8px; }
 .gt-edit-saved { margin-left: auto; text-transform: none; letter-spacing: 0; }
 .gt-edit-note {

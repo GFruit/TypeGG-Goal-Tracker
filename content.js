@@ -100,6 +100,64 @@ function gtMain() {
     };
   }
 
+  // ── Debug logging ──────────────────────────────────────────────
+  // Structured, human-readable console logs for the race lifecycle and
+  // goal recalculations. Each log is ONE line plus ONE detail object that
+  // DevTools shows collapsed by default — expand it to see the exact
+  // values a recalculation used (before → after).
+  // On by default. Toggle from the page console (takes effect immediately,
+  // no reload needed — the flag is re-read on every log call):
+  //   localStorage.gtDebugLogs = "0"   // off
+  //   localStorage.gtDebugLogs = "1"   // on
+  function gtLogEnabled() {
+    try { return localStorage.getItem("gtDebugLogs") !== "0"; } catch { return true; }
+  }
+  function gtLog(event, summary, detail) {
+    if (!gtLogEnabled()) return;
+    const t = new Date();
+    const hh = String(t.getHours()).padStart(2, "0");
+    const mm = String(t.getMinutes()).padStart(2, "0");
+    const ss = String(t.getSeconds()).padStart(2, "0");
+    const ms = String(t.getMilliseconds()).padStart(3, "0");
+    const head = `[GT ${hh}:${mm}:${ss}.${ms}] ${event}${summary ? " — " + summary : ""}`;
+    if (detail === undefined) console.log(head);
+    else console.log(head, detail);
+  }
+  // Short human tag for a goal in log lines, e.g. "races/wpm#4f2a".
+  function gtGoalTag(gd, type) {
+    if (!gd) return "(?)";
+    const bits = [type || "goal"];
+    if (gd.mode && gd.mode !== bits[0]) bits.push(gd.mode);
+    if (gd.improvementTrack) bits.push(gd.improvementTrack);
+    const metric = gd.metric || gd.improvementMetric;
+    if (metric) bits.push(metric);
+    return `${bits.join("/")}#${String(gd.id ?? "?").slice(-4)}`;
+  }
+  // Diff two flat stat objects → { field: { from, to, gain } } for changed
+  // fields (gain = to − from, only when both sides are numbers).
+  function gtStatsDiff(prev, next, fields) {
+    const d = {};
+    for (const f of fields) {
+      if (prev?.[f] !== next?.[f]) {
+        const from = prev?.[f], to = next?.[f];
+        const entry = { from, to };
+        if (typeof from === "number" && typeof to === "number" && isFinite(from) && isFinite(to)) {
+          entry.gain = Math.round((to - from) * 100) / 100;
+        }
+        d[f] = entry;
+      }
+    }
+    return d;
+  }
+  // Human-readable mean: "(93.2 + 95.1 + 97.4) / 3 = 95.23" — value-by-value
+  // for short windows, summarized for long ones (rolling-avg goals go to 250).
+  function gtAvgCalc(values, avg) {
+    if (!Array.isArray(values) || values.length === 0) return undefined;
+    const r = (x) => Math.round(x * 100) / 100;
+    if (values.length > 12) return `average of ${values.length} values = ${r(avg)}`;
+    return `(${values.map(r).join(" + ")}) / ${values.length} = ${r(avg)}`;
+  }
+
   // ── Cross-tab coordination ───────────────────────────────────
   // Goal: with 4 TypeGG tabs open, only ONE fetches from the API.
   // The "leader" tab runs the intervals; follower tabs receive data
@@ -484,7 +542,34 @@ function gtMain() {
   function updateWidgetAvgClass(groupId) {
     const w = widgetElForGroup(groupId);
     if (!w) return;
-    w.classList.toggle("gt-widget-has-avg", groupHasAvgGoal(groupId));
+    const has = groupHasAvgGoal(groupId);
+    if (w.classList.contains("gt-widget-has-avg") === has) return; // no change → skip
+    w.classList.toggle("gt-widget-has-avg", has);
+    // Toggling the class changes the widget's min-width (180 ↔ 220px), so its
+    // rendered width just jumped (avg added) or dropped (avg removed).
+    // Re-project the stored position ratio onto the new width so the widget
+    // grows in whichever direction keeps it on-screen: one anchored toward
+    // the right edge grows LEFT (instead of overflowing the viewport and
+    // getting clipped), while a left-anchored one still grows right by
+    // default — mirroring how the edit popover flips sides when space is
+    // tight. When the avg goal is later dragged away and the widget shrinks
+    // back, the same re-projection returns it to its original spot. Skipped
+    // mid-drag: the drag owns the widget's left/top and re-projecting would
+    // snap it away. (The main widget has no stored position — it keeps its
+    // right:16px CSS anchor and already grows leftward — so the projection
+    // is a no-op there.)
+    //
+    // Re-project POSITION ONLY — never re-apply the stored width here. The
+    // width change is driven purely by the min-width gate (CSS); calling
+    // applyWidgetTransform would re-apply group.size.width, which the resize
+    // observer may have just recorded as the bumped 220px while the avg goal
+    // was present — freezing the widget wide so it wouldn't shrink back to
+    // the user's chosen width once the avg goal leaves. Leaving style.width
+    // untouched lets the min-width floor drop and the width revert on its own.
+    if (!w.classList.contains("gt-widget-dragging")) {
+      const group = groupData[groupId];
+      if (group) applyWidgetPositionRatio(w, normalizeGroupPositionRatio(group, w));
+    }
   }
 
   // Refresh the .gt-widget-has-avg class on every existing widget.
@@ -759,7 +844,8 @@ function gtMain() {
     if (!g) return false;
     return goalAmountEditable(g)
       || goalSupportsRecurrence(g)
-      || goalHasToggleableLine(type, g);
+      || goalHasToggleableLine(type, g)
+      || goalIsAverage(g);
   }
 
   // ── Per-goal edit popover ─────────────────────
@@ -815,7 +901,8 @@ function gtMain() {
     const canView   = goalHasToggleableLine(type, gd);
     const isImpTarget = (type === "improvement" && gd.mode === "target");
     const isRival = (type === "rival");
-    if (!canAmount && !canRec && !canView && !isImpTarget && !isRival) return;
+    const canAvg  = goalIsAverage(gd);
+    if (!canAmount && !canRec && !canView && !isImpTarget && !isRival && !canAvg) return;
 
     let draftView = goalCountView(gd);
 
@@ -890,6 +977,21 @@ function gtMain() {
       </div>
     ` : "";
 
+    // ── Average editor (rolling-avg race goals: target + window) ──
+    // Both controls apply in place. Target re-checks the sticky
+    // completion flag; window resizes the rolling buffer (hiding the
+    // best while it refills under-full) and then re-checks completion.
+    // Neither re-fetches — they operate on the stored window.
+    const avgMetricLbl  = canAvg ? metricLabel(gd.metric) : "";
+    const avgTargetStep = (gd.metric === "accuracy") ? "0.1" : "1";
+    const avgTargetMax  = (gd.metric === "accuracy") ? ` max="100"` : "";
+    const avgEditHtml = canAvg ? `
+      <div class="gt-edit-label">Target ${avgMetricLbl}${gd.metric === "accuracy" ? " (%)" : ""}</div>
+      <input type="number" class="gt-custom-input gt-edit-avg-target" value="${gd.targetAvg}" min="1"${avgTargetMax} step="${avgTargetStep}">
+      <div class="gt-edit-label">Rolling window (races)</div>
+      <input type="number" class="gt-custom-input gt-edit-avg-window" value="${gd.windowSize}" min="1" step="1">
+    ` : "";
+
     const recOrder = ["none", "daily", "weekly", "monthly"];
     const recLabel = (r) => (r === "none") ? "None" : (REC_LABELS[r] || r);
     const curRec = canRec ? (gd.recurrence || "none") : "none";
@@ -905,6 +1007,7 @@ function gtMain() {
       <div class="gt-view-popover-title">Edit goal<span class="gt-settings-saved-indicator gt-edit-saved">Settings saved</span><button class="gt-edit-close" type="button" title="Close" aria-label="Close">×</button></div>
       ${impTargetHtml}
       ${rivalEditHtml}
+      ${avgEditHtml}
       ${canAmount ? `<div class="gt-edit-label">Amount</div><input type="number" class="gt-custom-input gt-edit-amount" value="${gd.target}" min="1" step="1">` : ""}
       ${canRec ? `<div class="gt-edit-label">Recurrence</div><div class="gt-edit-rec-group">${recBtnsHtml}</div>${recResettable ? `<div class="gt-edit-note">Changing this resets the streak & completions.</div>` : ""}` : ""}
       ${canView ? `<div class="gt-edit-label">Display Format</div><div class="gt-edit-view-group"><button class="gt-mode-btn gt-edit-view-btn${draftView === "progress" ? " active" : ""}" data-view="progress">Progress</button><button class="gt-mode-btn gt-edit-view-btn${draftView === "remaining" ? " active" : ""}" data-view="remaining">Remaining</button></div>` : ""}
@@ -982,6 +1085,46 @@ function gtMain() {
         flashSaved();
       });
     });
+
+    // Average controls: target (re-checks completion) and rolling window
+    // (resizes the buffer, hides best while under-full, re-checks completion).
+    if (canAvg) {
+      const avgTargetInput = pop.querySelector(".gt-edit-avg-target");
+      const avgWindowInput = pop.querySelector(".gt-edit-avg-window");
+      let avgTargetTimer = null, avgWindowTimer = null;
+      const applyAvgTarget = () => {
+        if (!avgTargetInput) return;
+        const v = parseFloat(avgTargetInput.value);
+        if (!Number.isFinite(v) || v <= 0) return;
+        if (gd.metric === "accuracy" && v > 100) return;
+        if (v === gd.targetAvg) return;
+        gd.targetAvg = v;
+        reconcileAvgCompletion(gd);
+        saveGoals(type);
+        renderAllGoals();
+        flashSaved();
+      };
+      const applyAvgWindow = () => {
+        if (!avgWindowInput) return;
+        const w = parseInt(avgWindowInput.value, 10);
+        if (!Number.isFinite(w) || w <= 0 || w === gd.windowSize) return;
+        resizeAvgWindow(gd, w);
+        reconcileAvgCompletion(gd);
+        saveGoals(type);
+        renderAllGoals();
+        flashSaved();
+      };
+      if (avgTargetInput) {
+        avgTargetInput.addEventListener("input",  () => { clearTimeout(avgTargetTimer); avgTargetTimer = setTimeout(applyAvgTarget, 400); });
+        avgTargetInput.addEventListener("change", () => { clearTimeout(avgTargetTimer); applyAvgTarget(); });
+        avgTargetInput.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); clearTimeout(avgTargetTimer); applyAvgTarget(); } });
+      }
+      if (avgWindowInput) {
+        avgWindowInput.addEventListener("input",  () => { clearTimeout(avgWindowTimer); avgWindowTimer = setTimeout(applyAvgWindow, 400); });
+        avgWindowInput.addEventListener("change", () => { clearTimeout(avgWindowTimer); applyAvgWindow(); });
+        avgWindowInput.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); clearTimeout(avgWindowTimer); applyAvgWindow(); } });
+      }
+    }
 
     // Improvement-Target controls: threshold (number), status / played (toggles),
     // and difficulty / length ranges (min-max; blank = open end). Each applies in
@@ -4370,6 +4513,41 @@ async function getExpRankByUsername(username) {
     return windowRaces[0];
   }
 
+  // ── Average-goal post-creation edits (target / rolling window) ────
+  // Re-derive the sticky completion flag after the user changes an
+  // average goal's target or window. bestAvg is the peak full-window
+  // mean this period; when it no longer clears the (possibly raised)
+  // target — or the window grew and isn't full yet, so bestAvg is null —
+  // the goal is no longer achieved and its completed styling reverts.
+  // Symmetric the other way: lowering the target so a known peak now
+  // clears it re-marks the goal complete, matching the live evaluator.
+  function reconcileAvgCompletion(gd) {
+    gd.completedThisPeriod = gd.bestAvg != null && gd.bestAvg >= gd.targetAvg;
+  }
+  // Resize an average goal's rolling window in place, keeping the most
+  // recent races still stored. Growing past what's stored leaves the
+  // window under-full, so bestAvg drops back to null (hidden) and refills
+  // exactly like a freshly-created goal; shrinking trims to the newest
+  // `newSize` races and seeds bestAvg from that now-full window. The
+  // unique-quote tracker (windowQuoteIds) is trimmed in lockstep, and the
+  // delta trackers are cleared so the next render shows no spurious pill.
+  function resizeAvgWindow(gd, newSize) {
+    let races = Array.isArray(gd.windowRaces) ? gd.windowRaces.slice() : [];
+    let qids  = (gd.uniqueOnly && Array.isArray(gd.windowQuoteIds))
+      ? gd.windowQuoteIds.slice() : null;
+    if (races.length > newSize) {
+      races = races.slice(races.length - newSize); // keep newest (oldest-first)
+      if (qids) qids = qids.slice(qids.length - newSize);
+    }
+    gd.windowSize  = newSize;
+    gd.windowRaces = races;
+    if (qids) gd.windowQuoteIds = qids;
+    // bestAvg only exists for a full window; a partial window hides it.
+    gd.bestAvg = (races.length === newSize) ? arrayMean(races) : null;
+    delete prevAvgMap[gd.id];
+    delete prevBestMap[gd.id];
+  }
+
   // Does this goal's requirements need /quotes/{id} data to evaluate?
   // True iff at least one quote-axis threshold (length or difficulty) is set.
   function goalNeedsQuoteData(req) {
@@ -4604,7 +4782,7 @@ async function getExpRankByUsername(username) {
     selectedValue = null; rankFetchedPp = null; rankFetchedRank = null; maxQuotesFetched = null;
     confirmBtn.disabled = true; customInput.value = "";
     customInput.classList.remove("gt-custom-input--grow");
-    if (rivalAddBtn) rivalAddBtn.style.display = "none"; // re-shown by the rival branch
+    if (rivalAddBtn) { rivalAddBtn.style.display = "none"; rivalAddBtn.classList.remove("gt-rival-add-inline-btn--reserved"); } // re-shown by the rival branch
     if (amountTargetRow) amountTargetRow.classList.remove("gt-tagfield"); // rival-only styling
     if (rivalListEl) rivalListEl.innerHTML = ""; // clear any leftover rival chips for non-rival types
 
@@ -4629,7 +4807,14 @@ async function getExpRankByUsername(username) {
       maxQuotesRow.style.display = "none";
       maxCharsRow.style.display = "none";
       avgWindowRow.style.display = "none";
-      if (rivalAddBtn) { rivalAddBtn.style.display = rivalMultiMode ? "" : "none"; rivalAddBtn.disabled = true; }
+      if (rivalAddBtn) {
+        // Keep the button in the flex layout in both modes so the field is
+        // laid out identically (prevents a 1px modal shift on toggle); the
+        // --reserved modifier collapses/hides it in single-rival mode.
+        rivalAddBtn.style.display = "";
+        rivalAddBtn.classList.toggle("gt-rival-add-inline-btn--reserved", !rivalMultiMode);
+        rivalAddBtn.disabled = true;
+      }
       customInput.classList.add("gt-custom-input--grow"); // borderless inside the tag field
       if (amountTargetRow) amountTargetRow.classList.add("gt-tagfield"); // chips + input share one field
       renderRivalList(); // renders the chosen-rival chips inside the field (multi mode)
@@ -7128,6 +7313,7 @@ async function getExpRankByUsername(username) {
   // so callers can decide whether a races-based eval is needed.
   function commitUserData(data) {
     if (!data) return undefined;
+    const gtPrevSnap = { ...currentStats }; // [GT log] pre-commit snapshot for the diff below
     const prevRaces = currentStats.races;
     currentStats.exp            = data.exp;
     currentStats.pp             = data.pp;
@@ -7142,6 +7328,11 @@ async function getExpRankByUsername(username) {
     currentStats.chars          = data.chars;
     currentStats.quickplayRaces = data.quickplayRaces;
     currentStats.soloRaces      = data.soloRaces;
+    const gtDiff = gtStatsDiff(gtPrevSnap, currentStats,
+      ["exp", "pp", "races", "quotes", "quotesUnranked", "playtime", "rank", "chars", "quickplayRaces", "soloRaces"]);
+    if (Object.keys(gtDiff).length > 0) {
+      gtLog("User stats changed", Object.keys(gtDiff).join(", "), gtDiff);
+    }
     return prevRaces;
   }
 
@@ -7732,7 +7923,9 @@ async function getExpRankByUsername(username) {
   // reflect the new stats on the /users/{username} endpoint. A single
   // immediate fetch usually returns stale data. So instead: fire a
   // short retry chain with exponential-ish backoff, stopping as soon
-  // as ANY tracked stat changes vs our snapshot.
+  // as the races count moves vs our snapshot. (Not "any stat": the
+  // server reflects a race piecemeal — exp/pp can land seconds before
+  // the counters — so an exp-only change is NOT proof the race landed.)
   //
   // Follower tabs can't fetch (per the leader model), so they just
   // broadcast a 'quote-finished' message and let the leader handle it.
@@ -7824,6 +8017,12 @@ async function getExpRankByUsername(username) {
     // confirm below stays consistent across all iterations of this run.
     const finishedQuoteId = qfFinishedQuoteId;
 
+    gtLog(
+      "Post-race stats chain started",
+      `quote ${finishedQuoteId ?? "(unknown)"} — polling until the server reflects the race`,
+      { finishedQuoteId, statsSnapshotBeforeUpdate: { ...snap }, retryDelaysMs: QF_RETRY_DELAYS_MS.slice() }
+    );
+
     for (let i = 0; i < QF_RETRY_DELAYS_MS.length; i++) {
       await new Promise(r => setTimeout(r, QF_RETRY_DELAYS_MS[i]));
 
@@ -7849,15 +8048,63 @@ async function getExpRankByUsername(username) {
       const gtStatsT0 = performance.now(); // [GT-PERF]
       try { data = await fetchUserData(); }
       catch {
+        gtLog("Post-race stats attempt", `#${i + 1}/${QF_RETRY_DELAYS_MS.length} — user fetch FAILED (will retry)`);
         if (reqPrefetch) await reqPrefetch; // don't leak the promise
         continue;
       }
       const gtStatsFetchMs = performance.now() - gtStatsT0; // [GT-PERF] stats fetch latency
 
+      // Did THIS poll find the finished race? Compare the freshly-fetched
+      // stats to the snapshot taken at the finish edge. This is knowable the
+      // moment the fetch returns — so we log the attempt's outcome HERE,
+      // before committing the stats and recalculating goals. Reads in order:
+      //   "poll #N succeeded ✓" → "User stats changed" → "goal recalculated".
+      const changed =
+        data.races    !== snap.races    ||
+        data.pp       !== snap.pp       ||
+        data.exp      !== snap.exp       ||
+        data.quotes   !== snap.quotes   ||
+        (data.quotesUnranked !== undefined && data.quotesUnranked !== snap.quotesUnranked) ||
+        data.chars    !== snap.chars   ||
+        data.playtime !== snap.playtime;
+      // The races count is the authoritative "this race landed" signal —
+      // every finished race (ranked, unranked, quickplay, solo) increments
+      // it. The server can reflect a race piecemeal (exp/pp first, counters
+      // later), so `changed` alone is NOT proof the race is fully reflected.
+      const racesReflected = data.races !== snap.races;
+      const lastAttempt = i === QF_RETRY_DELAYS_MS.length - 1;
+      const gtOutcome = racesReflected
+        ? "the finished race is now reflected ✓ — committing the new stats + recalculating goals (logs below)"
+        : changed
+          ? `race only PARTIALLY reflected (races count still stale) — ${lastAttempt ? "retries exhausted, committing the partial stats now" : "holding the commit so all goals update in one frame, waiting then retrying"}`
+          : "server still stale, waiting then retrying";
+      gtLog(
+        "Post-race stats attempt",
+        `#${i + 1}/${QF_RETRY_DELAYS_MS.length} — polled your user-stats ${QF_RETRY_DELAYS_MS[i]}ms after the previous step: ${gtOutcome}`,
+        {
+          attempt: i + 1,
+          waitedMs: QF_RETRY_DELAYS_MS[i],
+          statsFetchMs: Math.round(gtStatsFetchMs),
+          racesReflected,
+          changedVsPreUpdate: changed
+            ? gtStatsDiff(snap, data, ["races", "pp", "exp", "quotes", "quotesUnranked", "chars", "playtime"])
+            : null,
+        }
+      );
+
       // Wait for prefetch to land before applyUserData triggers the eval —
       // otherwise the eval might fire before the caches are warm and fall
       // back to sequential fetches (defeating the optimization).
       if (reqPrefetch) await reqPrefetch;
+
+      // Partially-reflected race (e.g. exp updated, counters not): hold the
+      // commit entirely and poll again. Committing now would pop the exp
+      // goals in this frame and the counter-based goals (race avg, chars,
+      // playtime, …) in a later one — exactly the stagger the single-frame
+      // path below exists to avoid. Fully-stale responses skip too (their
+      // old commit/render was a visual no-op anyway). The FINAL attempt
+      // always falls through, so partial data is never withheld forever.
+      if (!racesReflected && !lastAttempt) continue;
 
       // ── Single-frame render path ───────────────────────────────
       // We want every gain indicator (req and non-req) to appear in the
@@ -7881,7 +8128,16 @@ async function getExpRankByUsername(username) {
         // unseeded and the gain is lost / later lumped. Bounded so a hung
         // seed fetch can't stall the finish path.
         if (anyImprovement) {
+          const gtSeedT0 = performance.now();
           await awaitPendingSeed();
+          const gtSeedWaitMs = Math.round(performance.now() - gtSeedT0);
+          if (gtSeedWaitMs > 50) {
+            gtLog(
+              "Waited for quote-start baseline seed",
+              `${gtSeedWaitMs}ms before improvement eval${gtSeedWaitMs >= SEED_AWAIT_TIMEOUT_MS ? " — TIMED OUT (seed may not have landed; this race could be dropped as unseeded)" : ""}`,
+              { waitedMs: gtSeedWaitMs, timeoutMs: SEED_AWAIT_TIMEOUT_MS }
+            );
+          }
         }
         try {
           if (anyEvalGoals)   await evaluateRaceRequirementsGuarded({ deferRender: true });
@@ -7930,16 +8186,7 @@ async function getExpRankByUsername(username) {
       } catch {}
       channel?.postMessage({ type: 'stats', payload: data });
 
-      // Any change vs the pre-finish snapshot? → server has updated, stop.
-      const changed =
-        data.races    !== snap.races    ||
-        data.pp       !== snap.pp       ||
-        data.exp      !== snap.exp       ||
-        data.quotes   !== snap.quotes   ||
-        (data.quotesUnranked !== undefined && data.quotesUnranked !== snap.quotesUnranked) ||
-        data.chars    !== snap.chars   ||
-        data.playtime !== snap.playtime;
-      if (changed) {
+      if (racesReflected) {
         // We just freshly updated the goal display — push the fallback
         // poll out to a full interval so we don't re-fetch immediately.
         scheduleNextStatsPoll();
@@ -7948,6 +8195,11 @@ async function getExpRankByUsername(username) {
     }
     // Fell through all retries with no change — give up.
     // The regular 20s poll will catch any eventual update.
+    gtLog(
+      "Post-race stats chain gave up",
+      "races count never reflected after all retries (unusual server lag?) — any partial stats were committed on the last attempt; the 20s fallback poll will catch the rest",
+      { statsSnapshotBeforeUpdate: snap, finishedQuoteId }
+    );
   }
 
   // Worker loop: coalesces rapid-fire quote-finishes into a single chain,
@@ -7979,6 +8231,11 @@ async function getExpRankByUsername(username) {
 
   // Called in every tab (user could be typing on leader OR follower).
   function onQuoteFinished() {
+    gtLog(
+      "Quote finish detected",
+      isLeader ? "leader tab — starting post-race stats chain" : "follower tab — notifying leader (goal recalculations run — and log — in the LEADER tab's console)",
+      { role: isLeader ? "leader" : "follower", quoteId: getCurrentQuoteIdLive() }
+    );
     if (isLeader) {
       handleQuoteFinishAsLeader();
     } else {
@@ -8093,7 +8350,11 @@ async function getExpRankByUsername(username) {
         if (quoteId) break;
       }
     }
-    if (!quoteId) return; // couldn't detect — this race won't count (pure S1)
+    if (!quoteId) {
+      // couldn't detect — this race won't count (pure S1)
+      gtLog("Quote start — quoteId NOT detected", "no baseline seeded; this race won't count toward improvement goals");
+      return;
+    }
 
     // Goals still missing a baseline for this quote. (Already-seeded quotes
     // are left untouched — only the evaluator updates them.)
@@ -8117,6 +8378,7 @@ async function getExpRankByUsername(username) {
     }
 
     let changed = false;
+    const gtSeeded = []; // [GT log] what got seeded, per goal
     const arr = goalData.improvement;
     for (let i = 0; i < arr.length; i++) {
       const g = arr[i];
@@ -8130,12 +8392,16 @@ async function getExpRankByUsername(username) {
         if (best == null) {
           // Never raced this quote → no prior best.
           if (g.countFirstTime) baseline = 0;       // count first race from scratch
-          else continue;                            // don't seed; re-check next time
+          else {
+            gtSeeded.push({ goal: gtGoalTag(g, "improvement"), track: "best", metric, outcome: "NOT seeded — never raced this quote and countFirstTime is off (re-checked next quote start)" });
+            continue;                               // don't seed; re-check next time
+          }
         } else {
           baseline = Number(best[metric]);
           if (!isFinite(baseline)) baseline = 0;
         }
         arr[i] = { ...g, quoteBests: { ...(g.quoteBests || {}), [quoteId]: baseline } };
+        gtSeeded.push({ goal: gtGoalTag(g, "improvement"), track: "best", metric, baseline });
         changed = true;
       } else {
         // ── Average track ── seed the rolling-window state from prior history.
@@ -8159,24 +8425,55 @@ async function getExpRankByUsername(username) {
           let sum = 0;
           for (let k = 0; k < W; k++) sum += chrono[k];
           let peakAvg = sum / W;                       // best W-window so far
+          let peakEnd = W;                             // exclusive end index of that window
           for (let k = W; k < chrono.length; k++) {
             sum += chrono[k] - chrono[k - W];           // slide the window
-            if (sum / W > peakAvg) peakAvg = sum / W;
+            if (sum / W > peakAvg) { peakAvg = sum / W; peakEnd = k + 1; }
           }
-          state = { window: chrono.slice(chrono.length - W), baseline: peakAvg, peak: 0 };
+          // peakWindow = the actual W scores that produced peakAvg (for logging /
+          // display). Not read by the math — baseline/peak/window are unchanged.
+          const peakWindow = chrono.slice(peakEnd - W, peakEnd);
+          state = { window: chrono.slice(chrono.length - W), baseline: peakAvg, peak: 0, peakWindow };
         } else {
           state = { window: chrono.slice(), baseline: null, peak: 0 }; // warming up
         }
         arr[i] = { ...g, quoteAvgs: { ...(g.quoteAvgs || {}), [quoteId]: state } };
+        gtSeeded.push({
+          goal: gtGoalTag(g, "improvement"), track: "average", metric,
+          windowSize: W,
+          windowValues: state.window.slice(),
+          priorMatchingRaces: chrono.length,
+          baselinePeakAvg: state.baseline == null
+            ? "(warming up — fewer prior races than the window)"
+            : Math.round(state.baseline * 100) / 100,
+          peakWindowScores: state.peakWindow || undefined, // the W scores that made the peak
+          peakWindowCalc: state.peakWindow ? gtAvgCalc(state.peakWindow, state.baseline) : undefined,
+          baselineNote: state.baseline == null
+            ? undefined
+            : `peak ${W}-race rolling average across ${chrono.length} prior matching races`,
+        });
         changed = true;
       }
+    }
+    if (gtSeeded.length > 0) {
+      gtLog("Improvement baselines seeded", `quote ${quoteId} — ${gtSeeded.length} goal(s)`, { quoteId, seeded: gtSeeded });
     }
     if (changed) saveGoals("improvement");
   }
 
-  function onQuoteStarted(knownQuoteId) {
+  function onQuoteStarted(knownQuoteId, source) {
     const goals = goalData.improvement;
     if (!goals || !goals.some(g => goalIsImprovement(g))) return;
+    // For the log only: when the trigger didn't pass an id (the input-edge
+    // paths), try one live read — on a restart of the same quote the page
+    // still shows the id, so the log can name it immediately. Seeding below
+    // still does its own read WITH retries, so behaviour is unchanged.
+    const gtLiveId = knownQuoteId || getCurrentQuoteIdLive();
+    gtLog(
+      "Quote start detected",
+      `${source || "unknown trigger"} — ${gtLiveId ? `quote ${gtLiveId}` : "quoteId not readable yet (seeding retries for a few seconds)"}`,
+      { source: source || null, quoteId: gtLiveId || null }
+    );
     // Hold the promise so the quote-finish path can await this seed before
     // it evaluates the finished race (prevents the drop-then-lump bug).
     lastSeedPromise = seedImprovementForCurrentQuote(knownQuoteId);
@@ -8209,7 +8506,7 @@ async function getExpRankByUsername(username) {
         // improvement baseline for the freshly-loaded quote.
         if (wasDisabled && !isDisabled) {
           fired = false;
-          onQuoteStarted();
+          onQuoteStarted(null, "typing input re-enabled (next quote or restart)");
         }
         wasDisabled = isDisabled;
       });
@@ -8222,7 +8519,7 @@ async function getExpRankByUsername(username) {
       // while the input is already enabled — there's no disabled→enabled
       // edge to catch, so seed the current quote now. Otherwise that quote
       // would lack an S1 baseline and its race wouldn't count.
-      if (!input.disabled) onQuoteStarted();
+      if (!input.disabled) onQuoteStarted(null, "watcher attached mid-attempt");
     }
 
     function scan() {
@@ -8276,7 +8573,7 @@ async function getExpRankByUsername(username) {
       if (hasPpCacheConsumer) maybePpRebalanceRefetch(qid);
       if (qid !== lastSeenQuoteId) {
         lastSeenQuoteId = qid;
-        if (hasImprovement) onQuoteStarted(qid);
+        if (hasImprovement) onQuoteStarted(qid, "live quoteId changed");
         // Rival + Target goals: the compare / current-value line tracks the
         // quote you're on, so a new quote means re-render (rival on-demand-
         // fetches the new quote's bests; target just reads the self store).
@@ -9464,9 +9761,14 @@ async function getExpRankByUsername(username) {
     }
     const store = loadRivalStore(RIVAL_SELF_NAME);
     let changed = false;
+    const gtMerged = []; // [GT log] new personal bests merged this pass
     for (const race of races) {
-      if (race && rivalMergeEntry(store, race.quoteId, race.wpm, race.pp)) changed = true;
+      if (race && rivalMergeEntry(store, race.quoteId, race.wpm, race.pp)) {
+        changed = true;
+        gtMerged.push({ quoteId: race.quoteId, wpm: race.wpm, pp: race.pp });
+      }
     }
+    if (changed) gtLog("Self store updated from /races", `${gtMerged.length} new personal best(s) merged`, { merged: gtMerged });
     // selfRender=false lets the quote-finish path render once (so the rival
     // merge lands in the same frame as the standard goals when it's fast).
     if (changed) { saveRivalStore(RIVAL_SELF_NAME); if (selfRender) renderAllGoals(); }
@@ -9493,6 +9795,7 @@ async function getExpRankByUsername(username) {
     if (!best) return false; // 404 (never raced) or no bestRace — nothing to merge
     const store = loadRivalStore(RIVAL_SELF_NAME);
     if (rivalMergeEntry(store, quoteId, best.wpm, best.pp)) {
+      gtLog("Self store — post-race per-quote confirm merged a new best", `quote ${quoteId}`, { quoteId, wpm: best.wpm, pp: best.pp });
       saveRivalStore(RIVAL_SELF_NAME);
       return true;
     }
@@ -11302,6 +11605,7 @@ async function getExpRankByUsername(username) {
             const newPp    = await ppByRank(nextRank);
             gd.target      = Math.max(0, newPp - gd.baselinePp);
             gd.targetLoaded = true;
+            gtLog("Next-rank goal — ranked up", `now chasing rank #${nextRank}`, { targetRank: nextRank, newBaselinePp: gd.baselinePp, rankHolderPp: newPp, ppNeeded: gd.target });
             goals[i] = gd;
             saveGoals("pp");
             continue;
@@ -11311,6 +11615,7 @@ async function getExpRankByUsername(username) {
           const newPp    = await ppByRank(nextRank);
           const newTarget = Math.max(0, newPp - gd.baselinePp);
           if (Math.abs(newTarget - gd.target) > 0.01 || !gd.targetLoaded) {
+            gtLog("Next-rank goal target updated", `rank #${nextRank} PP shifted — PP needed ${gd.target} → ${Math.round(newTarget * 100) / 100}`, { targetRank: nextRank, rankHolderPp: newPp, baselinePp: gd.baselinePp, target: { from: gd.target, to: newTarget } });
             gd.target   = newTarget;
             gd.targetLoaded = true;
             goals[i] = gd;
@@ -11328,6 +11633,7 @@ async function getExpRankByUsername(username) {
         const newTarget = Math.max(0, newPp - gd.baselinePp);
 
         if (Math.abs(newTarget - gd.target) > 0.01 || !gd.targetLoaded) {
+          gtLog("Rank goal target updated", `tracking rank #${trackedRank} — PP needed ${gd.target} → ${Math.round(newTarget * 100) / 100}`, { trackedRank, rankHolderPp: newPp, baselinePp: gd.baselinePp, target: { from: gd.target, to: newTarget } });
           gd.target = newTarget;
           gd.targetLoaded = true;
           goals[i] = gd;
@@ -11381,6 +11687,7 @@ async function getExpRankByUsername(username) {
             const newExp    = await expByRank(nextRank);
             gd.target      = Math.max(0, newExp - gd.baselineExp);
             gd.targetLoaded = true;
+            gtLog("Next-EXP-rank goal — ranked up", `now chasing EXP rank #${nextRank}`, { targetRank: nextRank, newBaselineExp: gd.baselineExp, rankHolderExp: newExp, expNeeded: gd.target });
             goals[i] = gd;
             saveGoals("exp");
             continue;
@@ -11390,6 +11697,7 @@ async function getExpRankByUsername(username) {
           const newExp    = await expByRank(nextRank);
           const newTarget = Math.max(0, newExp - gd.baselineExp);
           if (Math.abs(newTarget - gd.target) > 0.01 || !gd.targetLoaded) {
+            gtLog("Next-EXP-rank goal target updated", `EXP rank #${nextRank} shifted — EXP needed ${gd.target} → ${Math.round(newTarget)}`, { targetRank: nextRank, rankHolderExp: newExp, baselineExp: gd.baselineExp, target: { from: gd.target, to: newTarget } });
             gd.target   = newTarget;
             gd.targetLoaded = true;
             goals[i] = gd;
@@ -11406,6 +11714,7 @@ async function getExpRankByUsername(username) {
         const newTarget = Math.max(0, newExp - gd.baselineExp);
 
         if (Math.abs(newTarget - gd.target) > 0.01 || !gd.targetLoaded) {
+          gtLog("EXP-rank goal target updated", `tracking EXP rank #${trackedRank} — EXP needed ${gd.target} → ${Math.round(newTarget)}`, { trackedRank, rankHolderExp: newExp, baselineExp: gd.baselineExp, target: { from: gd.target, to: newTarget } });
           gd.target = newTarget;
           gd.targetLoaded = true;
           goals[i] = gd;
@@ -11471,6 +11780,7 @@ async function getExpRankByUsername(username) {
           if (newTarget < 0) newTarget = 0;
 
           if (Math.abs(newTarget - gd.target) > 0.01) {
+            gtLog("Player goal target updated", `${gd.targetUsername} (${type}) — target ${gd.target} → ${Math.round(newTarget * 100) / 100}`, { player: gd.targetUsername, type, playerCurrentValue: newValue, yourBaseline: gd[baselineKey], target: { from: gd.target, to: newTarget } });
             gd.target = newTarget;
             goals[i] = gd;
             saveGoals(type);
@@ -11535,8 +11845,16 @@ async function getExpRankByUsername(username) {
   // we don't already have fresh cache. Fires-and-forgets on error so it
   // never blocks the quote-finish flow.
   function prefetchRacesIfNeeded() {
-    const goals = goalData.races;
-    if (!goals || !goals.some(g => goalNeedsRaceList(g))) return Promise.resolve();
+    // Consumers of the recent-races list live in TWO arrays: gated/average
+    // goals in goalData.races AND improvement goals in goalData.improvement
+    // (post-migration). Checking only goalData.races skipped the prefetch
+    // for improvement-only setups, so their eval fell back to its own
+    // sequential /races fetch after fetchUserData — slower gain indicator,
+    // and the parallel-prefetch optimisation was silently defeated.
+    const needed =
+      (goalData.races || []).some(g => goalNeedsRaceList(g)) ||
+      (goalData.improvement || []).some(g => goalIsImprovement(g));
+    if (!needed) return Promise.resolve();
     if (isRacesCacheFresh()) return Promise.resolve();
     return fetchRacesEndpoint().catch(() => {/* swallow */});
   }
@@ -11792,12 +12110,14 @@ async function getExpRankByUsername(username) {
         const windowSize   = gd.windowSize ?? 0;
         const metric       = gd.metric;
         let avgChanged = false;
+        const gtRaceLog = []; // [GT log] per-race outcomes for this goal
+        const gtBestAvgBefore = bestAvg;
 
         for (const race of chronological) {
           // Filter (quickplay/solo/all) — same semantics as gated goals.
-          if (!raceMatchesFilter(race, gd.filter)) continue;
+          if (!raceMatchesFilter(race, gd.filter)) { gtRaceLog.push({ quoteId: race?.quoteId, gamemode: race?.gamemode, outcome: "ignored — doesn't match goal filter" }); continue; }
           const v = getRaceMetricValue(race, metric);
-          if (!isFinite(v)) continue;
+          if (!isFinite(v)) { gtRaceLog.push({ quoteId: race?.quoteId, outcome: "ignored — no numeric metric value" }); continue; }
 
           // Unique-quote check: skip if this quoteId is already in the
           // current window. Defensive: also skip if uniqueOnly is on
@@ -11805,8 +12125,8 @@ async function getExpRankByUsername(username) {
           // safer to drop than to count). includes() is O(n) but n is
           // small (window size, typically 25-250).
           if (windowQuoteIds) {
-            if (!race.quoteId) continue;
-            if (windowQuoteIds.includes(race.quoteId)) continue;
+            if (!race.quoteId) { gtRaceLog.push({ [metric]: v, outcome: "ignored — unique-only goal but race has no quoteId" }); continue; }
+            if (windowQuoteIds.includes(race.quoteId)) { gtRaceLog.push({ quoteId: race.quoteId, [metric]: v, outcome: "ignored — quote already in current window (unique-only)" }); continue; }
           }
 
           windowRaces.push(v);
@@ -11826,8 +12146,28 @@ async function getExpRankByUsername(username) {
               bestAvg = m;
             }
           }
+          gtRaceLog.push({
+            quoteId: race.quoteId, [metric]: v,
+            windowFill: `${windowRaces.length}/${windowSize}`,
+            avgCalc: gtAvgCalc(windowRaces, arrayMean(windowRaces) ?? 0),
+            currentAvg: Math.round((arrayMean(windowRaces) ?? 0) * 100) / 100,
+            bestAvg: bestAvg == null ? "(window not full yet)" : Math.round(bestAvg * 100) / 100,
+          });
         }
 
+        gtLog(
+          "Average goal recalculated",
+          `${gtGoalTag(gd, "races")} — current avg ${Math.round((arrayMean(windowRaces) ?? 0) * 100) / 100}, best avg ${gtBestAvgBefore == null ? "—" : Math.round(gtBestAvgBefore * 100) / 100} → ${bestAvg == null ? "—" : Math.round(bestAvg * 100) / 100}`,
+          {
+            goal: gtGoalTag(gd, "races"), metric, windowSize,
+            newRacesConsidered: chronological.length,
+            racesEvaluated: gtRaceLog,
+            windowFill: `${windowRaces.length}/${windowSize}`,
+            windowValues: windowRaces.slice(),
+            bestAvg: { from: gtBestAvgBefore, to: bestAvg },
+            lastEvalRaces: { from: lastEval, to: racesSnapshot },
+          }
+        );
         if (avgChanged || lastEval !== racesSnapshot) {
           const next = {
             ...gd,
@@ -11866,15 +12206,25 @@ async function getExpRankByUsername(username) {
         if (gd.improvementTrack === "average") {
           const W = Math.max(2, gd.improvementAvgWindow || 5);
           const quoteAvgs = { ...(gd.quoteAvgs || {}) };
+          const gtRaceLog = []; // [GT log] per-race outcomes for this goal
 
           for (const race of chronological) {
-            if (!raceMatchesFilter(race, gd.filter)) continue;
+            if (!raceMatchesFilter(race, gd.filter)) { gtRaceLog.push({ quoteId: race?.quoteId, gamemode: race?.gamemode, outcome: "ignored — doesn't match goal filter" }); continue; }
             const val = Number(race[metric]);
-            if (!isFinite(val)) continue;
+            if (!isFinite(val)) { gtRaceLog.push({ quoteId: race?.quoteId, outcome: "ignored — no numeric metric value" }); continue; }
             const qid = race.quoteId;
-            if (!qid) continue;
+            if (!qid) { gtRaceLog.push({ [metric]: val, outcome: "ignored — race has no quoteId" }); continue; }
             const st = quoteAvgs[qid];
-            if (!st) continue;                  // not seeded → unmeasurable (S1)
+            if (!st) { gtRaceLog.push({ quoteId: qid, [metric]: val, outcome: "skipped — quote had no pre-race baseline seed (S1: race not counted)" }); continue; } // not seeded → unmeasurable (S1)
+            const gtGainBefore = accumulatedGain;
+            // Previous PEAK (before this race): its scores + their average. Prefer
+            // the stored peakWindow; fall back to baseline+peak for goals seeded
+            // before peakWindow tracking existed.
+            const gtPrevPeakWindow = Array.isArray(st.peakWindow) ? st.peakWindow.slice() : null;
+            const gtPrevPeakAvg = gtPrevPeakWindow
+              ? gtPrevPeakWindow.reduce((a, b) => a + b, 0) / gtPrevPeakWindow.length
+              : (st.baseline == null ? null : st.baseline + (st.peak ?? 0));
+            const gtBaselineWasNull = (st.baseline == null);
 
             const w = Array.isArray(st.window) ? st.window.slice() : [];
             w.push(val);
@@ -11883,18 +12233,45 @@ async function getExpRankByUsername(username) {
 
             let baseline = (st.baseline == null) ? null : st.baseline;
             let peak = st.peak ?? 0;
+            let peakWindow = Array.isArray(st.peakWindow) ? st.peakWindow.slice() : null;
+            let gtNewPeak = false;
             if (baseline == null) {
               // Warming up. Lock the baseline the moment the window is full;
               // that race itself contributes nothing (it defines the baseline).
-              if (w.length >= W) { baseline = avg; peak = 0; }
+              if (w.length >= W) { baseline = avg; peak = 0; peakWindow = w.slice(); gtNewPeak = true; }
             } else {
               const lift = avg - baseline;
-              if (lift > peak) { accumulatedGain += (lift - peak); peak = lift; }
+              if (lift > peak) { accumulatedGain += (lift - peak); peak = lift; peakWindow = w.slice(); gtNewPeak = true; }
             }
-            quoteAvgs[qid] = { window: w, baseline, peak };
+            quoteAvgs[qid] = { window: w, baseline, peak, peakWindow };
+            gtRaceLog.push({
+              quoteId: qid, [metric]: val,
+              currentWindow: w.slice(),                          // the 3 (=W) scores now
+              currentAvgCalc: gtAvgCalc(w, avg),                 // "(a + b + c) / 3 = X"
+              currentAvg: Math.round(avg * 100) / 100,
+              previousPeakWindow: gtPrevPeakWindow
+                ? gtPrevPeakWindow
+                : (gtBaselineWasNull ? "(no peak yet — window still warming up)"
+                                     : "(individual scores weren't stored for this goal's existing peak before this build — the previousPeakAvg below is read from saved state (baseline+peak), NOT recomputed from races; the scores populate once this quote sets a NEW peak or the goal re-seeds)"),
+              previousPeakAvg: gtPrevPeakAvg == null ? "(warming up)" : Math.round(gtPrevPeakAvg * 100) / 100,
+              newPeakSetThisRace: gtNewPeak || undefined,        // true when this race beat the old peak
+              gainAdded: Math.round((accumulatedGain - gtGainBefore) * 100) / 100,
+            });
             impChanged = true;                  // window/state advanced
           }
 
+          gtLog(
+            "Improvement goal recalculated (LEGACY races-array path)",
+            `${gtGoalTag(gd, "races")} — gain ${Math.round((gd.accumulatedGain ?? 0) * 100) / 100} → ${Math.round(accumulatedGain * 100) / 100}`,
+            {
+              note: "this goal still lives in goalData.races — the one-time migration to goalData.improvement didn't move it",
+              goal: gtGoalTag(gd, "races"), track: "average", metric, windowSize: W,
+              newRacesConsidered: chronological.length,
+              racesEvaluated: gtRaceLog,
+              accumulatedGain: { from: Math.round((gd.accumulatedGain ?? 0) * 100) / 100, to: Math.round(accumulatedGain * 100) / 100, gain: Math.round((accumulatedGain - (gd.accumulatedGain ?? 0)) * 100) / 100 },
+              lastEvalRaces: { from: lastEval, to: racesSnapshot },
+            }
+          );
           if (impChanged || lastEval !== racesSnapshot) {
             goals[i] = { ...gd, quoteAvgs, accumulatedGain, lastEvalRaces: racesSnapshot };
             changed = true;
@@ -11904,21 +12281,37 @@ async function getExpRankByUsername(username) {
 
         // Best track (default)
         const quoteBests = { ...(gd.quoteBests || {}) };
+        const gtRaceLog = []; // [GT log] per-race outcomes for this goal
         for (const race of chronological) {
-          if (!raceMatchesFilter(race, gd.filter)) continue;
+          if (!raceMatchesFilter(race, gd.filter)) { gtRaceLog.push({ quoteId: race?.quoteId, gamemode: race?.gamemode, outcome: "ignored — doesn't match goal filter" }); continue; }
           const val = Number(race[metric]);
-          if (!isFinite(val)) continue;
+          if (!isFinite(val)) { gtRaceLog.push({ quoteId: race?.quoteId, outcome: "ignored — no numeric metric value" }); continue; }
           const qid = race.quoteId;
-          if (!qid) continue;
-          if (!(qid in quoteBests)) continue; // no pre-race baseline → unmeasurable
+          if (!qid) { gtRaceLog.push({ [metric]: val, outcome: "ignored — race has no quoteId" }); continue; }
+          if (!(qid in quoteBests)) { gtRaceLog.push({ quoteId: qid, [metric]: val, outcome: "skipped — quote had no pre-race baseline seed (S1: race not counted)" }); continue; } // no pre-race baseline → unmeasurable
           const prev = quoteBests[qid];
           if (val > prev) {
             accumulatedGain += (val - prev);
             quoteBests[qid]  = val;            // ratchet the stored best up
             impChanged = true;
+            gtRaceLog.push({ quoteId: qid, [metric]: val, prevBest: prev, newBest: val, gainAdded: Math.round((val - prev) * 100) / 100 });
+          } else {
+            gtRaceLog.push({ quoteId: qid, [metric]: val, prevBest: prev, outcome: "no gain — didn't beat the stored best" });
           }
         }
 
+        gtLog(
+          "Improvement goal recalculated (LEGACY races-array path)",
+          `${gtGoalTag(gd, "races")} — gain ${Math.round((gd.accumulatedGain ?? 0) * 100) / 100} → ${Math.round(accumulatedGain * 100) / 100}`,
+          {
+            note: "this goal still lives in goalData.races — the one-time migration to goalData.improvement didn't move it",
+            goal: gtGoalTag(gd, "races"), track: "best", metric,
+            newRacesConsidered: chronological.length,
+            racesEvaluated: gtRaceLog,
+            accumulatedGain: { from: Math.round((gd.accumulatedGain ?? 0) * 100) / 100, to: Math.round(accumulatedGain * 100) / 100, gain: Math.round((accumulatedGain - (gd.accumulatedGain ?? 0)) * 100) / 100 },
+            lastEvalRaces: { from: lastEval, to: racesSnapshot },
+          }
+        );
         if (impChanged || lastEval !== racesSnapshot) {
           goals[i] = { ...gd, quoteBests, accumulatedGain, lastEvalRaces: racesSnapshot };
           changed = true;
@@ -11931,6 +12324,8 @@ async function getExpRankByUsername(username) {
       let qualifying = gd.qualifyingProgress ?? 0;
       const target = gd.target ?? 0;
       let goalFailed = false; // set if a quote fetch fails — bail w/o saving
+      const gtRaceLog = []; // [GT log] per-race outcomes for this goal
+      const gtQualifyingBefore = qualifying;
 
       // Unique-quote tracking: a Set seeded from the persisted array so
       // membership checks are O(1). We mutate this in-loop and serialize
@@ -11946,13 +12341,13 @@ async function getExpRankByUsername(username) {
         // Non-strict goals keep counting past target — same UX as regular
         // gain goals which show "55 / 50" once you blow past your target.
         // Resetting isn't a concern here since strictMode is off.
-        if (gd.strictMode && target > 0 && qualifying >= target) break;
+        if (gd.strictMode && target > 0 && qualifying >= target) { gtRaceLog.push({ outcome: "frozen — strict goal already completed; remaining races not counted" }); break; }
 
         // Filter check: a race that doesn't match the goal's filter is
         // invisible to this goal — neither qualifying nor strict-resetting.
         // (e.g. a 60 WPM solo race during a "100+ WPM quickplay" strict goal
         // shouldn't break the streak.)
-        if (!raceMatchesFilter(race, gd.filter)) continue;
+        if (!raceMatchesFilter(race, gd.filter)) { gtRaceLog.push({ quoteId: race?.quoteId, gamemode: race?.gamemode, outcome: "invisible — doesn't match goal filter" }); continue; }
 
         // For goals with quote-axis requirements we need the quote object.
         // Cache should be warm from the pre-fetch above; this await is
@@ -11962,6 +12357,7 @@ async function getExpRankByUsername(username) {
           if (!race.quoteId) {
             // Can't evaluate — skip this race. Don't qualify, don't reset.
             // It'll be re-attempted next eval cycle.
+            gtRaceLog.push({ outcome: "skipped — race has no quoteId (can't check quote requirements)" });
             continue;
           }
           try {
@@ -11978,7 +12374,7 @@ async function getExpRankByUsername(username) {
         // The user can't choose which quote shows up (especially in quickplay),
         // so punishing them with a strict reset for getting "the wrong quote"
         // would be unfair. Strict only fires on things the user controls (skill).
-        if (!meetsQuoteRequirements(quote, gd.requirements)) continue;
+        if (!meetsQuoteRequirements(quote, gd.requirements)) { gtRaceLog.push({ quoteId: race.quoteId, outcome: "invisible — quote doesn't meet the LEN/DIFF requirement" }); continue; }
 
         // Skill check: this is the user-controlled half (WPM / ACC / PP).
         // Failure here IS a strict reset — the race was on a qualifying
@@ -11993,10 +12389,17 @@ async function getExpRankByUsername(username) {
           // unique restriction. Penalising them with a strict reset for
           // re-typing a quote they already qualified on would be wrong.
           if (seenQuoteIds && race.quoteId && seenQuoteIds.has(race.quoteId)) {
+            gtRaceLog.push({ quoteId: race.quoteId, outcome: "neutral — passed, but quote already counted this period (unique-only)" });
             continue;
           }
           qualifying++;
           if (seenQuoteIds && race.quoteId) seenQuoteIds.add(race.quoteId);
+          gtRaceLog.push({
+            quoteId: race.quoteId, wpm: race.wpm,
+            accuracyPct: race.accuracy != null ? Math.round(race.accuracy * 1000) / 10 : undefined,
+            pp: race.pp,
+            outcome: `qualified ✓ (${qualifying}${target > 0 ? ` / ${target}` : ""})`,
+          });
         } else if (gd.strictMode) {
           // Strict reset — but ONLY for first-attempt fails. If we've
           // already qualified on this quoteId this period, the user has
@@ -12006,29 +12409,61 @@ async function getExpRankByUsername(username) {
           // one chance per period to affect the streak (positively or
           // negatively); after that it's neutral.
           if (seenQuoteIds && race.quoteId && seenQuoteIds.has(race.quoteId)) {
+            gtRaceLog.push({ quoteId: race.quoteId, outcome: "neutral — missed, but quote already qualified this period (no strict reset)" });
             continue;
           }
+          gtRaceLog.push({
+            quoteId: race.quoteId, wpm: race.wpm,
+            accuracyPct: race.accuracy != null ? Math.round(race.accuracy * 1000) / 10 : undefined,
+            pp: race.pp,
+            outcome: `STRICT RESET — skill requirement missed (progress ${qualifying} → 0)`,
+          });
           qualifying = 0;
           // Wipe the seen set on a strict reset — the streak is gone, so
           // the no-repeat-quotes restriction starts fresh too. Without this
           // a user who strict-resets would still be locked out of every
           // quote they previously qualified on, which feels punishing.
           if (seenQuoteIds) seenQuoteIds.clear();
+        } else {
+          // not strict + not qualifying → no goal change, but log the miss
+          gtRaceLog.push({
+            quoteId: race.quoteId, wpm: race.wpm,
+            accuracyPct: race.accuracy != null ? Math.round(race.accuracy * 1000) / 10 : undefined,
+            pp: race.pp,
+            outcome: "no count — skill requirement missed (non-strict: no reset)",
+          });
         }
-        // else: not strict + not qualifying → no change
       }
 
       // If a quote fetch failed mid-loop, bail out of this goal entirely.
       // Don't update qualifyingProgress or lastEvalRaces — leaving them
       // unchanged means the next eval will retry from the same point,
       // which is exactly what we want for a transient API failure.
-      if (goalFailed) continue;
+      if (goalFailed) {
+        gtLog("Requirement goal eval BAILED", `${gtGoalTag(gd, "races")} — quote fetch failed; state unchanged, will retry next cycle`, { goal: gtGoalTag(gd, "races"), racesEvaluatedSoFar: gtRaceLog });
+        continue;
+      }
 
       // Cap qualifyingProgress at target ONLY for strict goals — for the
       // same reason as the freeze above. Non-strict goals are allowed to
       // exceed target so the user gets the same "overshoot" feedback as
       // regular gain goals.
       if (gd.strictMode && target > 0 && qualifying > target) qualifying = target;
+
+      gtLog(
+        "Requirement goal recalculated",
+        `${gtGoalTag(gd, "races")} — qualifying ${gtQualifyingBefore} → ${qualifying}${target > 0 ? ` (target ${target})` : ""}`,
+        {
+          goal: gtGoalTag(gd, "races"),
+          newRacesConsidered: chronological.length,
+          racesEvaluated: gtRaceLog,
+          qualifying: { from: gtQualifyingBefore, to: qualifying },
+          target,
+          strictMode: !!gd.strictMode,
+          uniqueOnly: !!gd.uniqueOnly,
+          lastEvalRaces: { from: lastEval, to: racesSnapshot },
+        }
+      );
 
       // Always advance lastEvalRaces to the snapshot — even if the API
       // returned fewer races than the delta (in which case we missed a few).
@@ -12074,12 +12509,27 @@ async function getExpRankByUsername(username) {
     const targets = goals
       .map((g, i) => ({ g, i }))
       .filter(({ g }) => goalIsImprovement(g) && racesSnapshot > (g.lastEvalRaces ?? 0));
-    if (targets.length === 0) return;
+    if (targets.length === 0) {
+      // Explain the silence — the #1 "why didn't my goal update?" question.
+      const gains = goals.filter(g => goalIsImprovement(g));
+      if (gains.length === 0) {
+        gtLog("Improvement eval skipped", "improvement-type goals exist, but none are Gain-mode — Target-mode goals update from the self quote store (watch the 'Self store' logs), not this evaluator");
+      } else {
+        gtLog("Improvement eval skipped", "no Gain goal has new races since its last evaluation", {
+          lifetimeRacesNow: racesSnapshot,
+          goals: gains.map(g => ({ goal: gtGoalTag(g, "improvement"), lastEvalRaces: g.lastEvalRaces ?? 0 })),
+        });
+      }
+      return;
+    }
 
     let recentRaces;
     try { recentRaces = await getRecentRacesData(); }
     catch (err) { console.error("Improvement eval fetch failed:", err); return; }
-    if (!Array.isArray(recentRaces) || recentRaces.length === 0) return;
+    if (!Array.isArray(recentRaces) || recentRaces.length === 0) {
+      gtLog("Improvement eval skipped", "the /races endpoint returned no races — nothing to evaluate");
+      return;
+    }
 
     let changed = false;
     for (const { i } of targets) {
@@ -12100,29 +12550,65 @@ async function getExpRankByUsername(username) {
       if (gd.improvementTrack === "average") {
         const W = Math.max(2, gd.improvementAvgWindow || 5);
         const quoteAvgs = { ...(gd.quoteAvgs || {}) };
+        const gtRaceLog = []; // [GT log] per-race outcomes for this goal
         for (const race of chronological) {
-          if (!raceMatchesFilter(race, gd.filter)) continue;
+          if (!raceMatchesFilter(race, gd.filter)) { gtRaceLog.push({ quoteId: race?.quoteId, gamemode: race?.gamemode, outcome: "ignored — doesn't match goal filter" }); continue; }
           const val = Number(race[metric]);
-          if (!isFinite(val)) continue;
+          if (!isFinite(val)) { gtRaceLog.push({ quoteId: race?.quoteId, outcome: "ignored — no numeric metric value" }); continue; }
           const qid = race.quoteId;
-          if (!qid) continue;
+          if (!qid) { gtRaceLog.push({ [metric]: val, outcome: "ignored — race has no quoteId" }); continue; }
           const st = quoteAvgs[qid];
-          if (!st) continue;                  // not seeded -> unmeasurable (S1)
+          if (!st) { gtRaceLog.push({ quoteId: qid, [metric]: val, outcome: "skipped — quote had no pre-race baseline seed (S1: race not counted)" }); continue; } // not seeded -> unmeasurable (S1)
+          const gtGainBefore = accumulatedGain;
+          // Previous PEAK (before this race): its scores + their average. Prefer
+          // the stored peakWindow; fall back to baseline+peak for goals seeded
+          // before peakWindow tracking existed.
+          const gtPrevPeakWindow = Array.isArray(st.peakWindow) ? st.peakWindow.slice() : null;
+          const gtPrevPeakAvg = gtPrevPeakWindow
+            ? gtPrevPeakWindow.reduce((a, b) => a + b, 0) / gtPrevPeakWindow.length
+            : (st.baseline == null ? null : st.baseline + (st.peak ?? 0));
+          const gtBaselineWasNull = (st.baseline == null);
           const w = Array.isArray(st.window) ? st.window.slice() : [];
           w.push(val);
           while (w.length > W) w.shift();
           const avg = w.reduce((a, b) => a + b, 0) / w.length;
           let baseline = (st.baseline == null) ? null : st.baseline;
           let peak = st.peak ?? 0;
+          let peakWindow = Array.isArray(st.peakWindow) ? st.peakWindow.slice() : null;
+          let gtNewPeak = false;
           if (baseline == null) {
-            if (w.length >= W) { baseline = avg; peak = 0; }
+            if (w.length >= W) { baseline = avg; peak = 0; peakWindow = w.slice(); gtNewPeak = true; }
           } else {
             const lift = avg - baseline;
-            if (lift > peak) { accumulatedGain += (lift - peak); peak = lift; }
+            if (lift > peak) { accumulatedGain += (lift - peak); peak = lift; peakWindow = w.slice(); gtNewPeak = true; }
           }
-          quoteAvgs[qid] = { window: w, baseline, peak };
+          quoteAvgs[qid] = { window: w, baseline, peak, peakWindow };
+          gtRaceLog.push({
+            quoteId: qid, [metric]: val,
+            currentWindow: w.slice(),
+            currentAvgCalc: gtAvgCalc(w, avg),
+            currentAvg: Math.round(avg * 100) / 100,
+            previousPeakWindow: gtPrevPeakWindow
+              ? gtPrevPeakWindow
+              : (gtBaselineWasNull ? "(no peak yet — window still warming up)"
+                                   : "(individual scores weren't stored for this goal's existing peak before this build — the previousPeakAvg below is read from saved state (baseline+peak), NOT recomputed from races; the scores populate once this quote sets a NEW peak or the goal re-seeds)"),
+            previousPeakAvg: gtPrevPeakAvg == null ? "(warming up)" : Math.round(gtPrevPeakAvg * 100) / 100,
+            newPeakSetThisRace: gtNewPeak || undefined,
+            gainAdded: Math.round((accumulatedGain - gtGainBefore) * 100) / 100,
+          });
           impChanged = true;
         }
+        gtLog(
+          "Improvement goal recalculated",
+          `${gtGoalTag(gd, "improvement")} — gain ${Math.round((gd.accumulatedGain ?? 0) * 100) / 100} → ${Math.round(accumulatedGain * 100) / 100}`,
+          {
+            goal: gtGoalTag(gd, "improvement"), track: "average", metric, windowSize: W,
+            newRacesConsidered: chronological.length,
+            racesEvaluated: gtRaceLog,
+            accumulatedGain: { from: Math.round((gd.accumulatedGain ?? 0) * 100) / 100, to: Math.round(accumulatedGain * 100) / 100, gain: Math.round((accumulatedGain - (gd.accumulatedGain ?? 0)) * 100) / 100 },
+            lastEvalRaces: { from: lastEval, to: racesSnapshot },
+          }
+        );
         if (impChanged || lastEval !== racesSnapshot) {
           goals[i] = { ...gd, quoteAvgs, accumulatedGain, lastEvalRaces: racesSnapshot };
           changed = true;
@@ -12132,20 +12618,35 @@ async function getExpRankByUsername(username) {
 
       // Best track (default)
       const quoteBests = { ...(gd.quoteBests || {}) };
+      const gtRaceLog = []; // [GT log] per-race outcomes for this goal
       for (const race of chronological) {
-        if (!raceMatchesFilter(race, gd.filter)) continue;
+        if (!raceMatchesFilter(race, gd.filter)) { gtRaceLog.push({ quoteId: race?.quoteId, gamemode: race?.gamemode, outcome: "ignored — doesn't match goal filter" }); continue; }
         const val = Number(race[metric]);
-        if (!isFinite(val)) continue;
+        if (!isFinite(val)) { gtRaceLog.push({ quoteId: race?.quoteId, outcome: "ignored — no numeric metric value" }); continue; }
         const qid = race.quoteId;
-        if (!qid) continue;
-        if (!(qid in quoteBests)) continue; // no pre-race baseline -> unmeasurable
+        if (!qid) { gtRaceLog.push({ [metric]: val, outcome: "ignored — race has no quoteId" }); continue; }
+        if (!(qid in quoteBests)) { gtRaceLog.push({ quoteId: qid, [metric]: val, outcome: "skipped — quote had no pre-race baseline seed (S1: race not counted)" }); continue; } // no pre-race baseline -> unmeasurable
         const prev = quoteBests[qid];
         if (val > prev) {
           accumulatedGain += (val - prev);
           quoteBests[qid]  = val;            // ratchet the stored best up
           impChanged = true;
+          gtRaceLog.push({ quoteId: qid, [metric]: val, prevBest: prev, newBest: val, gainAdded: Math.round((val - prev) * 100) / 100 });
+        } else {
+          gtRaceLog.push({ quoteId: qid, [metric]: val, prevBest: prev, outcome: "no gain — didn't beat the stored best" });
         }
       }
+      gtLog(
+        "Improvement goal recalculated",
+        `${gtGoalTag(gd, "improvement")} — gain ${Math.round((gd.accumulatedGain ?? 0) * 100) / 100} → ${Math.round(accumulatedGain * 100) / 100}`,
+        {
+          goal: gtGoalTag(gd, "improvement"), track: "best", metric,
+          newRacesConsidered: chronological.length,
+          racesEvaluated: gtRaceLog,
+          accumulatedGain: { from: Math.round((gd.accumulatedGain ?? 0) * 100) / 100, to: Math.round(accumulatedGain * 100) / 100, gain: Math.round((accumulatedGain - (gd.accumulatedGain ?? 0)) * 100) / 100 },
+          lastEvalRaces: { from: lastEval, to: racesSnapshot },
+        }
+      );
       if (impChanged || lastEval !== racesSnapshot) {
         goals[i] = { ...gd, quoteBests, accumulatedGain, lastEvalRaces: racesSnapshot };
         changed = true;
@@ -12192,6 +12693,7 @@ async function getExpRankByUsername(username) {
 
         const finalTarget = Math.max(0, total - gd.baselineQuotes);
         if (Math.abs(finalTarget - gd.target) > 0.01) {
+          gtLog("Max-quotes goal target updated", `site total (${kind}) is now ${total} — target ${gd.target} → ${finalTarget}`, { kind, siteTotalQuotes: total, yourBaseline: gd.baselineQuotes, target: { from: gd.target, to: finalTarget } });
           gd.target = finalTarget;
           goals[i] = gd;
           changed = true;
