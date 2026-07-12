@@ -7917,19 +7917,42 @@ async function getExpRankByUsername(username) {
   }
   // Note: initial loadStats() + scheduleNextStatsPoll() kicked off in leader election block below
 
-  // ── Quote-finish trigger ─────────────────────────────────────
+  // ── Quote-finish trigger ─────────────────────────
   // When the user finishes a quote (#typegame-input becomes disabled),
-  // the TypeGG server takes anywhere from ~0.5s to ~16s to actually
-  // reflect the new stats on the /users/{username} endpoint. A single
-  // immediate fetch usually returns stale data. So instead: fire a
-  // short retry chain with exponential-ish backoff, stopping as soon
-  // as the races count moves vs our snapshot. (Not "any stat": the
-  // server reflects a race piecemeal — exp/pp can land seconds before
-  // the counters — so an exp-only change is NOT proof the race landed.)
+  // the TypeGG server takes anywhere from ~0.5s to ~16s to reflect the new
+  // stats on the /users/{username} endpoint — and it reflects them
+  // PIECEMEALLY: different fields (exp, races, chars, playtime, …) can land
+  // seconds apart, in NO fixed order. So a single fetch — or a chain that
+  // stops at the FIRST changed field — commits a partial race and strands the
+  // late fields until the slow 20s fallback poll; goals tied to those fields
+  // then lag ~20s and update out of sync. Instead we SAMPLE on a steady
+  // cadence, committing each field as it lands, until the stats stop changing
+  // (settle). No field is privileged, so the fix is order-agnostic.
   //
   // Follower tabs can't fetch (per the leader model), so they just
   // broadcast a 'quote-finished' message and let the leader handle it.
-  const QF_RETRY_DELAYS_MS = [400, 1200, 3000, 6000, 10000]; // ~20.6s total
+  //
+  // Cadence: a quick first poll to catch an instant reflect, then a STEADY
+  // short interval. Steady beats exponential backoff here because we're not
+  // waiting for one event — we're tracking several fields landing across a
+  // short window, which wants tight, even sampling. (Backoff's late 6–10s
+  // gaps are exactly where a straggler field would hide.)
+  const QF_FIRST_DELAY_MS      = 450;
+  const QF_POLL_INTERVAL_MS    = 1000;
+  const QF_MAX_ATTEMPTS        = 20;   // ~19.5s window; covers the server's observed ~16s worst-case reflect
+  // "Settled" = this many consecutive polls with NO new field beyond what
+  // we've already committed, AFTER at least one field has changed. The grace
+  // guards against declaring victory in a lull between two fields landing.
+  // If the landing-timeline logs show fields arriving >~2s apart, raise this.
+  const QF_SETTLE_STABLE_POLLS = 2;
+  // Fast path: the fields that move on EVERY completed race — the race
+  // counter plus the aggregate exp/chars/playtime write (pp & quotes ride that
+  // same write). Once all of these have landed the race is fully reflected, so
+  // we reveal immediately instead of spending ~2 more polls confirming quiet.
+  // The stable-poll settle above stays as the fallback for the rare race that
+  // doesn't move the whole set (e.g. an abandoned run that still triggered
+  // detection).
+  const QF_EXPECT_FIELDS = ["races", "exp", "chars", "playtime"];
 
   let qfPending       = false; // another quote finished while we were retrying
   let qfWorkerRunning = false; // retry chain currently executing
@@ -8000,96 +8023,134 @@ async function getExpRankByUsername(username) {
   };
 
   async function runQuoteFinishRetryChain() {
-    // Snapshot of stats at the moment the quote finished.
-    // We compare against this — not against `currentStats`, which may
-    // get updated mid-chain by the 20s poll.
+    // Core fields fetchUserData ALWAYS returns. quotesUnranked is a separate,
+    // sometimes-skipped endpoint — commitUserData still persists it when
+    // present, but it must NOT drive settle-detection (an undefined value
+    // would read as a perpetual "change" and the chain would never settle).
+    const FIELDS = ["races", "pp", "exp", "quotes", "chars", "playtime"];
     const snap = {
-      races:    currentStats.races,
-      pp:       currentStats.pp,
-      exp:      currentStats.exp,
-      quotes:   currentStats.quotes,
-      quotesUnranked: currentStats.quotesUnranked,
-      chars:    currentStats.chars,
-      playtime: currentStats.playtime,
+      races: currentStats.races, pp: currentStats.pp, exp: currentStats.exp,
+      quotes: currentStats.quotes, chars: currentStats.chars, playtime: currentStats.playtime,
     };
     // Freeze the finished quote for THIS chain run (a finish that lands while
-    // we're retrying re-runs the chain with its own id), so the per-quote
-    // confirm below stays consistent across all iterations of this run.
+    // we're sampling re-runs the chain with its own id), so the per-quote
+    // confirm stays consistent across every poll of this run.
     const finishedQuoteId = qfFinishedQuoteId;
+
+    // Reset the 20s fallback timer up front so it can't fire mid-window and
+    // race our own sampling (the chain owns stats polling for its window).
+    // Re-armed again when we settle or hit the cap.
+    scheduleNextStatsPoll();
+
+    const chainT0 = performance.now();
+    const landing = {};              // field → ms after finish when it FIRST appeared (instrumentation)
+    let lastCommitted = { ...snap }; // what we've already pushed to the goals; diffed against, not `snap`
+    let sawAnyChange = false;
+    let stablePolls = 0;
+
+    // ── Deferred single-frame reveal ────────────────────────
+    // The server writes a race's fields seconds apart (see the landing
+    // timeline logs), so committing each field's RENDER as it lands makes the
+    // goal cards trickle out of sync. Instead we commit each field's STATE
+    // silently (currentStats, cache, rival-store merges all stay current) and
+    // defer the visible render to flushGoalRender() at settle — so every card
+    // moves in one frame. Not "hold until all fields arrive" (which could wait
+    // forever): we reveal when the stats go quiet, so a genuinely late
+    // straggler still surfaces (next settle, or the 20s fallback) rather than
+    // being held indefinitely.
+    const pendingSelfWork = [];   // in-flight rival/self-store merges to let the reveal wait on
+    let renderPending = false;    // committed state exists that hasn't been rendered yet
+    let lastRenderData = null;    // newest full payload — broadcast to followers once, at reveal
+    async function flushGoalRender() {
+      if (!renderPending) return;
+      // Briefly wait for any rival/self-store fetches so the one render shows
+      // freshly-merged bests too. Bounded, so a slow fetch can't stall the reveal.
+      if (pendingSelfWork.length) {
+        await Promise.race([
+          Promise.all(pendingSelfWork).catch(() => {}),
+          new Promise(res => setTimeout(res, RIVAL_SYNC_THRESHOLD_MS)),
+        ]);
+      }
+      renderAllGoals();
+      // One stats broadcast (not one per poll) so follower tabs reveal in sync too.
+      if (lastRenderData) channel?.postMessage({ type: 'stats', payload: lastRenderData });
+      renderPending = false;
+    }
 
     gtLog(
       "Post-race stats chain started",
-      `quote ${finishedQuoteId ?? "(unknown)"} — polling until the server reflects the race`,
-      { finishedQuoteId, statsSnapshotBeforeUpdate: { ...snap }, retryDelaysMs: QF_RETRY_DELAYS_MS.slice() }
+      `quote ${finishedQuoteId ?? "(unknown)"} — sampling every ~${QF_POLL_INTERVAL_MS}ms until every field of the race is reflected (settle)`,
+      { finishedQuoteId, statsSnapshotBeforeUpdate: { ...snap },
+        cadence: { firstMs: QF_FIRST_DELAY_MS, intervalMs: QF_POLL_INTERVAL_MS, maxAttempts: QF_MAX_ATTEMPTS, settleStablePolls: QF_SETTLE_STABLE_POLLS } }
     );
 
-    for (let i = 0; i < QF_RETRY_DELAYS_MS.length; i++) {
-      await new Promise(r => setTimeout(r, QF_RETRY_DELAYS_MS[i]));
+    for (let i = 0; i < QF_MAX_ATTEMPTS; i++) {
+      await new Promise(r => setTimeout(r, i === 0 ? QF_FIRST_DELAY_MS : QF_POLL_INTERVAL_MS));
 
-      // Prefetch /races IN PARALLEL with the user-data fetch. Both arrive
-      // around the same time, and the cache primed here is consumed by the
-      // eval inside applyUserData → req-goal indicator now pops alongside
-      // the non-req gain indicators instead of ~1s later.
-      //
-      // Quote prefetch is CHAINED after races prefetch (we need the races
-      // list before we know which quoteIds to fetch), but the whole chain
-      // still runs in parallel with fetchUserData. If no goal has length
-      // or difficulty requirements, prefetchQuotesIfNeeded returns
-      // immediately — the quote endpoint is never hit unnecessarily.
+      // Prefetch /races (and chained quotes) IN PARALLEL with the user-data
+      // fetch, so the requirement/improvement eval finds warm caches and its
+      // gain indicator pops alongside the non-req ones instead of ~1s later.
       // Only the leader prefetches (followers don't run the eval anyway).
       const reqPrefetch = isLeader
-        ? (async () => {
-            await prefetchRacesIfNeeded();
-            await prefetchQuotesIfNeeded();
-          })()
+        ? (async () => { await prefetchRacesIfNeeded(); await prefetchQuotesIfNeeded(); })()
         : null;
 
       let data;
       const gtStatsT0 = performance.now(); // [GT-PERF]
       try { data = await fetchUserData(); }
       catch {
-        gtLog("Post-race stats attempt", `#${i + 1}/${QF_RETRY_DELAYS_MS.length} — user fetch FAILED (will retry)`);
+        gtLog("Post-race stats attempt", `#${i + 1}/${QF_MAX_ATTEMPTS} — user fetch FAILED (will retry)`);
         if (reqPrefetch) await reqPrefetch; // don't leak the promise
         continue;
       }
       const gtStatsFetchMs = performance.now() - gtStatsT0; // [GT-PERF] stats fetch latency
 
-      // Did THIS poll find the finished race? Compare the freshly-fetched
-      // stats to the snapshot taken at the finish edge. This is knowable the
-      // moment the fetch returns — so we log the attempt's outcome HERE,
-      // before committing the stats and recalculating goals. Reads in order:
-      //   "poll #N succeeded ✓" → "User stats changed" → "goal recalculated".
-      const changed =
-        data.races    !== snap.races    ||
-        data.pp       !== snap.pp       ||
-        data.exp      !== snap.exp       ||
-        data.quotes   !== snap.quotes   ||
-        (data.quotesUnranked !== undefined && data.quotesUnranked !== snap.quotesUnranked) ||
-        data.chars    !== snap.chars   ||
-        data.playtime !== snap.playtime;
-      // The races count is the authoritative "this race landed" signal —
-      // every finished race (ranked, unranked, quickplay, solo) increments
-      // it. The server can reflect a race piecemeal (exp/pp first, counters
-      // later), so `changed` alone is NOT proof the race is fully reflected.
-      const racesReflected = data.races !== snap.races;
-      const lastAttempt = i === QF_RETRY_DELAYS_MS.length - 1;
-      const gtOutcome = racesReflected
-        ? "the finished race is now reflected ✓ — committing the new stats + recalculating goals (logs below)"
-        : changed
-          ? `race only PARTIALLY reflected (races count still stale) — ${lastAttempt ? "retries exhausted, committing the partial stats now" : "holding the commit so all goals update in one frame, waiting then retrying"}`
-          : "server still stale, waiting then retrying";
+      // What's NEW since our LAST commit? Diffing against lastCommitted (not
+      // the pre-race snap) means each field is detected once, when it first
+      // lands — and keeps us immune to the fallback poll mutating currentStats
+      // between awaits. Any non-empty diff = the race is still landing.
+      const newDiff = gtStatsDiff(lastCommitted, data, FIELDS);
+      const newFields = Object.keys(newDiff);
+      const atMs = Math.round(performance.now() - chainT0);
+      for (const f of newFields) if (!(f in landing)) landing[f] = atMs;
+
+      // ── Nothing new this poll ────────────────────────────
+      if (newFields.length === 0) {
+        if (reqPrefetch) await reqPrefetch; // don't leak
+        if (sawAnyChange) {
+          stablePolls++;
+          gtLog(
+            "Post-race stats attempt",
+            `#${i + 1}/${QF_MAX_ATTEMPTS} — +${atMs}ms: no new fields — stable ${stablePolls}/${QF_SETTLE_STABLE_POLLS}`,
+            { attempt: i + 1, atMs, stablePolls }
+          );
+          if (stablePolls >= QF_SETTLE_STABLE_POLLS) {
+            gtLog(
+              "Post-race stats chain settled",
+              `race fully reflected — field landing timeline (ms after finish): ${Object.entries(landing).map(([f, t]) => `${f}@${t}`).join(", ") || "(none)"}`,
+              { finishedQuoteId, landingMs: landing, totalMs: atMs, attempts: i + 1 }
+            );
+            await flushGoalRender(); // reveal every goal card in one frame
+            scheduleNextStatsPoll();
+            return;
+          }
+        } else {
+          gtLog(
+            "Post-race stats attempt",
+            `#${i + 1}/${QF_MAX_ATTEMPTS} — +${atMs}ms: server still stale (nothing reflected yet), waiting then retrying`,
+            { attempt: i + 1, atMs }
+          );
+        }
+        continue;
+      }
+
+      // ── New field(s) landed — commit them ───────────────────
+      sawAnyChange = true;
+      stablePolls = 0;
       gtLog(
         "Post-race stats attempt",
-        `#${i + 1}/${QF_RETRY_DELAYS_MS.length} — polled your user-stats ${QF_RETRY_DELAYS_MS[i]}ms after the previous step: ${gtOutcome}`,
-        {
-          attempt: i + 1,
-          waitedMs: QF_RETRY_DELAYS_MS[i],
-          statsFetchMs: Math.round(gtStatsFetchMs),
-          racesReflected,
-          changedVsPreUpdate: changed
-            ? gtStatsDiff(snap, data, ["races", "pp", "exp", "quotes", "quotesUnranked", "chars", "playtime"])
-            : null,
-        }
+        `#${i + 1}/${QF_MAX_ATTEMPTS} — +${atMs}ms: new fields reflected [${newFields.join(", ")}] — committing + recalculating goals (logs below)`,
+        { attempt: i + 1, atMs, statsFetchMs: Math.round(gtStatsFetchMs), newFields: newDiff }
       );
 
       // Wait for prefetch to land before applyUserData triggers the eval —
@@ -8097,26 +8158,12 @@ async function getExpRankByUsername(username) {
       // back to sequential fetches (defeating the optimization).
       if (reqPrefetch) await reqPrefetch;
 
-      // Partially-reflected race (e.g. exp updated, counters not): hold the
-      // commit entirely and poll again. Committing now would pop the exp
-      // goals in this frame and the counter-based goals (race avg, chars,
-      // playtime, …) in a later one — exactly the stagger the single-frame
-      // path below exists to avoid. Fully-stale responses skip too (their
-      // old commit/render was a visual no-op anyway). The FINAL attempt
-      // always falls through, so partial data is never withheld forever.
-      if (!racesReflected && !lastAttempt) continue;
-
-      // ── Single-frame render path ───────────────────────────────
-      // We want every gain indicator (req and non-req) to appear in the
-      // SAME animation frame. The general applyUserData path renders
-      // first and triggers eval async, which produces a tiny stagger
-      // (req goals always pop ~1 microtask after non-req ones). Here
-      // we have full control over the sequence, so:
-      //   1. Commit stats (no render)
-      //   2. Run eval to update qualifyingProgress (no render — defer)
-      //   3. Render once with everything in place
-      //
-      // Followers and tabs without req goals just commit + render directly.
+      // ── Commit this poll's fields (state only, NO render) ──────
+      // Each poll commits whatever fields just landed and updates eval state,
+      // but does NOT render — the visible reveal is deferred to flushGoalRender()
+      // at settle so every card (incl. req/improvement gain indicators) moves in
+      // ONE frame instead of trickling as the server dribbles fields out. Eval
+      // runs with deferRender:true so it only updates qualifyingProgress here.
       const prevRaces = commitUserData(data);
       const racesChanged = isLeader && data.races != null && data.races !== prevRaces;
       const anyEvalGoals = (goalData.races || []).some(g => goalNeedsRaceList(g));
@@ -8146,60 +8193,62 @@ async function getExpRankByUsername(username) {
           console.error("[Goal Tracker] eval error in quote-finish path:", err);
         }
       }
-      // ── Standard-goal render + rival-card sync ─────────────────
-      // Stats are committed above, so the standard goals (max-quotes, …) are
-      // ready to render now. The rival card needs a SEPARATE /races fetch.
-      // Preference: render both in ONE frame. Cap: don't hold the standard
-      // goals longer than RIVAL_SYNC_THRESHOLD_MS — past that, render them
-      // immediately and let the rival card catch up when the fetch lands (the
-      // old decoupled behaviour). renderAllGoals() reads the live store, so in
-      // the synced case it shows the freshly merged rival bests too.
+      // ── Silent rival/self-store merge (render deferred to settle) ──
+      // Fire the rival /races merge + per-quote PB confirm for this race, but
+      // DON'T render — selfRender=false merges the store quietly. We collect the
+      // promise so flushGoalRender() can wait briefly and show merged bests in
+      // the single reveal. (gtPerf still logs the rival fetch lag internally.)
       if (racesChanged && ((goalData.rival || []).length > 0 || haveImprovementTargetGoals() || haveMaxCharsGoals())) {
         const gtPerfSession = gtPerf.startRivalLag(gtStatsFetchMs); // [GT-PERF] anchor: rival fetch kicked
-        // selfRender=false → the caller owns the render in this path.
         const maintainPromise = maintainSelfStoreFromRaces(gtPerfSession, false)
           .catch(e => { console.warn("[Goal Tracker] rival self-store maintenance failed:", e); return false; });
-        // Authoritative per-quote PB confirm for the just-finished quote, run in
-        // PARALLEL with the aggregate /races merge above. /races is gated on the
-        // stats tick and can lag the server's per-quote best, which strands the
-        // self store one quote stale — a silently-missed rival win, and (worse) the
-        // next visit to that quote then misreads the staleness as a server PP
-        // rebalance and wipes every store. The /users/<me>/quotes/<id> endpoint is
-        // per-quote and authoritative, so it closes the hole. Resolves to whether a
-        // new best merged.
         const confirmPromise = confirmSelfQuoteAfterRace(finishedQuoteId).catch(() => false);
-        const selfDone = Promise.all([maintainPromise, confirmPromise]);
-        const winner = await Promise.race([
-          selfDone.then(() => "synced"),
-          new Promise(res => setTimeout(res, RIVAL_SYNC_THRESHOLD_MS, "timeout")),
-        ]);
-        renderAllGoals(); // synced → standard + freshly-merged rival in one frame; timed out → standard now
-        if (winner === "timeout") {
-          // Slow fetch(es): re-render once they land if either merged something.
-          selfDone.then(([m, c]) => { if (m || c) renderAllGoals(); });
-        }
-      } else {
-        renderAllGoals();
+        pendingSelfWork.push(Promise.all([maintainPromise, confirmPromise]));
       }
       try {
         localStorage.setItem(STATS_CACHE_KEY, JSON.stringify({ data, timestamp: Date.now() }));
       } catch {}
-      channel?.postMessage({ type: 'stats', payload: data });
+      // State committed silently. The visible render + the single follower
+      // broadcast happen once, at settle, via flushGoalRender().
+      renderPending = true;
+      lastRenderData = data;
 
-      if (racesReflected) {
-        // We just freshly updated the goal display — push the fallback
-        // poll out to a full interval so we don't re-fetch immediately.
+      // Fast path — the whole expected set is in, so the race is fully
+      // reflected: reveal now rather than waiting ~2 polls to confirm quiet.
+      // (pp/quotes committed this same poll ride the exp write, so they're in
+      // the reveal too.)
+      if (QF_EXPECT_FIELDS.every(f => f in landing)) {
+        gtLog(
+          "Post-race stats chain settled",
+          `all expected fields in [${QF_EXPECT_FIELDS.join(", ")}] — revealing without waiting for quiet polls — landing timeline (ms after finish): ${Object.entries(landing).map(([f, t]) => `${f}@${t}`).join(", ")}`,
+          { finishedQuoteId, landingMs: landing, totalMs: atMs, attempts: i + 1, via: "expected-complete" }
+        );
+        await flushGoalRender();
         scheduleNextStatsPoll();
         return;
       }
+
+      // Record what we've now pushed to the goals, so the next poll only
+      // reports genuinely-new fields (and we can tell when things settle).
+      lastCommitted = {
+        races: data.races, pp: data.pp, exp: data.exp,
+        quotes: data.quotes, chars: data.chars, playtime: data.playtime,
+      };
     }
-    // Fell through all retries with no change — give up.
-    // The regular 20s poll will catch any eventual update.
+
+    // Window exhausted without hitting the settle grace. Everything observed
+    // IN-window was committed as it landed (never orphaned to the fallback);
+    // only a field still unreflected after the whole window falls to the 20s
+    // poll — rare, and no worse than a genuinely missed detection.
     gtLog(
-      "Post-race stats chain gave up",
-      "races count never reflected after all retries (unusual server lag?) — any partial stats were committed on the last attempt; the 20s fallback poll will catch the rest",
-      { statsSnapshotBeforeUpdate: snap, finishedQuoteId }
+      "Post-race stats chain window ended",
+      sawAnyChange
+        ? `committed every field that landed in-window; landing timeline (ms): ${Object.entries(landing).map(([f, t]) => `${f}@${t}`).join(", ")} — any later straggler goes to the 20s fallback poll`
+        : "no stat change at all after the full window (unusual server lag?) — the 20s fallback poll will catch it",
+      { finishedQuoteId, landingMs: landing, sawAnyChange }
     );
+    await flushGoalRender(); // reveal whatever landed in-window, in one frame
+    scheduleNextStatsPoll();
   }
 
   // Worker loop: coalesces rapid-fire quote-finishes into a single chain,
