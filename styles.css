@@ -29,7 +29,9 @@
      the .gt-widget-has-avg rule further down for the bumped value and
      why this is a per-widget toggle rather than a blanket increase. */
   min-width: 180px;
-  max-width: 480px;
+  /* No max-width: widgets may grow arbitrarily large (via the E/W width
+     handles or the content-scale zoom) — e.g. a huge goal card at a low
+     page-zoom level. */
 }
 
 .gt-header {
@@ -1522,7 +1524,7 @@
      .gt-widget-has-avg class bumps it for widgets that actually need
      the extra room. */
   min-width: 180px;
-  max-width: 480px;
+  /* No max-width — same as #goal-tracker above. */
 }
 
 /* Bumped min-width for widgets containing at least one average goal.

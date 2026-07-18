@@ -497,10 +497,13 @@ function gtMain() {
   //     CSS-px offset from it — so a widget keeps its spot relative to the window on resize/zoom.
   //     null for main = CSS default (top-right). Detached widgets always have a position.
   //     Legacy {xRatio,yRatio} fraction and {left,top}px formats migrate on first use.
-  //   - size: { width: "220px", scale: 1.4 } — width is the LAYOUT width (pre-scale CSS px,
-  //     what text wraps against); scale is a uniform content zoom applied via CSS transform,
-  //     so fonts / progress bars / padding all grow with it (rendered size = layout × scale).
-  //     null = auto / CSS default. Older { width } entries default to scale 1.
+  //   - size: { width: "220px", scale: 1.4, minH: "310px" } — width is the LAYOUT width
+  //     (pre-scale CSS px, what text wraps against); scale is a uniform content zoom applied
+  //     via CSS transform, so fonts / progress bars / padding all grow with it (rendered size
+  //     = layout × scale); minH is an optional layout-px min-height set by the N/S height
+  //     gesture so the card's edge can sit BETWEEN discrete text-wrap heights (see the
+  //     resize-gesture comments). null = auto / CSS default. Older entries default scale 1,
+  //     no minH.
   //   - goalIds: order is authoritative — determines DOM order within the widget.
   const GROUPS_KEY     = "gt-groups";
   const MAIN_GROUP_ID  = "main";
@@ -1639,7 +1642,11 @@ function gtMain() {
   // includes the transform, so anchor derivation needs no special handling.
   // (Floating goal sections are reparented to document.body during drag, so
   // the transform never creates a containing-block trap for position:fixed.)
-  const GT_MIN_SCALE = 0.6, GT_MAX_SCALE = 2.5;
+  // Lower bound only — shrinking below ~0.6× turns the widget into an
+  // ungrabbable speck. Growth is deliberately UNCAPPED (users may want a
+  // huge goal card at a low page zoom); the viewport clamp in
+  // applyWidgetPosition keeps even an oversized widget reachable on-screen.
+  const GT_MIN_SCALE = 0.6, GT_MAX_SCALE = Infinity;
   function gtWidgetScale(widgetEl) {
     const s = parseFloat(widgetEl.dataset.gtScale);
     return Number.isFinite(s) && s > 0 ? s : 1;
@@ -1653,6 +1660,34 @@ function gtMain() {
   function gtRenderedSize(widgetEl) {
     const s = gtWidgetScale(widgetEl);
     return { w: widgetEl.offsetWidth * s, h: widgetEl.offsetHeight * s };
+  }
+  // A stored min-height (set by the N/S height gesture) was captured against
+  // a specific goal composition. When a group LOSES a goal, the content
+  // shrinks but the min-height would keep the card at its old height —
+  // leaving dead blank space where the goal used to be. Reset it so the card
+  // collapses to its natural height. (GAINING a goal needs no reset: the
+  // taller content simply makes the min-height non-binding.) Caller saves.
+  function resetGroupMinHeight(groupId) {
+    const g = groupData[groupId];
+    if (g?.size?.minH) g.size.minH = null;
+    const w = widgetElForGroup(groupId);
+    if (w) w.style.minHeight = "";
+  }
+  // Re-derive a group's stored anchors from its widget's CURRENT rect — the
+  // sync point after a content change (goal moved in/out) so the anchors
+  // always describe the spot the widget is visibly at. Guarded: skipped when
+  // the rendered size doesn't fit the viewport (deep zoom), where the
+  // on-screen rect is a clamp artifact — deriving from one is the ratchet
+  // that once teleported bottom-right widgets to the top-right after a zoom
+  // round-trip. Caller is responsible for saveGroups().
+  function refreshGroupAnchors(groupId) {
+    const g = groupData[groupId];
+    if (!g || !g.position) return;
+    const w = widgetElForGroup(groupId);
+    if (!w) return;
+    const { w: vw, h: vh } = gtViewport();
+    const r = w.getBoundingClientRect();
+    if (r.width <= vw && r.height <= vh) g.position = widgetPositionAnchors(w);
   }
   // Classify a rect into per-axis anchors:
   //   xA: 'l' | 'r' | 'c' + xOff — px from the left edge, px from the right
@@ -1735,8 +1770,20 @@ function gtMain() {
     // the position anchors. Scale defaults to 1 (also clears a stale
     // transform if the stored size was reset).
     if (group.size?.width) widgetEl.style.width = group.size.width;
+    widgetEl.style.minHeight = group.size?.minH || "";
     setWidgetScale(widgetEl, group.size?.scale || 1);
-    applyWidgetPosition(widgetEl, normalizeGroupPosition(group, widgetEl));
+    // Position: project ONLY for widgets not yet placed (fresh element at
+    // startup / creation / after an import reset). This function runs on
+    // every render via renderGroupWidgets, and renders often follow content
+    // changes (a goal dropped in or out) — re-projecting THEN was the bug
+    // where bottom/centre-anchored widgets visibly shifted the moment their
+    // height changed: the projection re-asserted anchors captured at the
+    // OLD height. Placed widgets move only via user gestures and viewport
+    // (resize/zoom) repositioning; content changes keep the top-left and
+    // re-sync anchors instead (refreshGroupAnchors / the height observer).
+    if (widgetEl.dataset.gtPlaced !== "1") {
+      applyWidgetPosition(widgetEl, normalizeGroupPosition(group, widgetEl));
+    }
   }
 
   // ── Restore main widget position / width from stored group ────
@@ -1807,6 +1854,7 @@ function gtMain() {
     document.body.style.userSelect = "";
     // Persist position on the group (if the widget / group still exists)
     if (groupData[groupId]) {
+      widgetEl.dataset.gtPlaced = "1";
       groupData[groupId].position = widgetPositionAnchors(widgetEl);
       saveGroups();
     }
@@ -1824,12 +1872,28 @@ function gtMain() {
   //     width, content size unchanged. Dragging the W edge keeps the right
   //     edge fixed by compensating style.left.
   //   • N / S edges → HEIGHT only (rendered width held constant). Height
-  //     is content-driven, so "taller" means bigger content: the scale is
-  //     solved so the rendered height tracks the pointer, while the layout
-  //     width is compensated (renderedW ÷ scale) each step so the widget's
-  //     on-screen width doesn't change. Scale and wrap width interact
-  //     (narrower wrap → taller content), so a couple of fixed-point
-  //     iterations per mousemove settle both together.
+  //     is content-driven, so "taller" means bigger content: pick the wrap
+  //     width w, derive scale = renderedW ÷ w (keeping on-screen width
+  //     constant), and the rendered height R(w) = renderedW · layoutH(w) / w
+  //     is STRICTLY DECREASING in w — both a narrower wrap (taller text)
+  //     and a bigger scale push height up together. So a binary search over
+  //     w finds the unique width whose rendered height matches the pointer.
+  //     Monotone-solve on purpose: the earlier fixed-point iteration
+  //     (scale from height, then width from scale) had NO stable answer at
+  //     text-wrap boundaries — the unwrapped state implied a scale that
+  //     forced a wrap and vice versa — so consecutive mousemoves alternated
+  //     between the two states and the card visibly flickered in height.
+  //     Because wrap heights are DISCRETE, the natural height alone can't
+  //     reach every pointer position (a stall-then-snap dead band at each
+  //     wrap boundary). So the gesture picks the wrap state just SHORTER
+  //     than the pointer and tops the card up with a layout min-height —
+  //     the outer edge then tracks the cursor pixel-exactly, and the text
+  //     reflow at a boundary happens INSIDE a smoothly growing card. The
+  //     min-height persists with the size. The gesture is CAPPED at the
+  //     tallest natural wrap height: padding only ever bridges the small
+  //     gap between adjacent wrap states (≤ ~one line, transient), never
+  //     open-ended blank space — unlike width, extra height past the
+  //     densest wrap has nothing to show, so the drag stops there.
   //   • Corners → UNIFORM SCALE. The widget's zoom (fonts, bars, padding
   //     — see setWidgetScale) follows the diagonal distance from the
   //     anchored opposite corner, so growth is anchored and continuous.
@@ -1870,6 +1934,10 @@ function gtMain() {
     widgetEl.style.top   = r.top  + "px";
     const anchorX = dir.includes("w") ? r.right  : r.left;
     const anchorY = dir.includes("n") ? r.bottom : r.top;
+    // A width gesture redefines the wrap width, so a min-height captured
+    // against the OLD wrap (see the N/S branch) no longer means anything —
+    // drop it and let the height be content-natural again.
+    if (dir === "e" || dir === "w") widgetEl.style.minHeight = "";
     wResize = {
       widgetEl, groupId, dir,
       mode: (dir === "e" || dir === "w") ? "width" : "scale",
@@ -1883,7 +1951,8 @@ function gtMain() {
       // N/S mode holds this rendered width constant while scale changes.
       renderedW0: widgetEl.offsetWidth * gtWidgetScale(widgetEl),
       // Effective CSS layout-width bounds (min-width is 180 or 220 with the
-      // has-avg bump; max-width 480). N/S mode clamps the SCALE so the
+      // has-avg bump; max-width is unset → Infinity). N/S mode clamps the
+      // SCALE so the
       // compensated width renderedW0÷s never leaves these — otherwise the
       // CSS clamp silently freezes the layout width while scale keeps
       // changing, and the rendered width starts drifting (= the "height
@@ -1917,20 +1986,59 @@ function gtMain() {
       // are coupled (width = renderedW0 ÷ s → rewrap → new layout height →
       // new s), so run a few fixed-point iterations; text-wrap height is
       // step-wise but monotone in width, which settles this in 2–3 rounds.
-      const targetH = Math.max(24, Math.abs(e.clientY - z.anchorY));
-      // Scale bounds within which renderedW0÷s stays inside the CSS
-      // min/max layout width — the gesture stops at these instead of
-      // letting the width clamp break the constant-width guarantee.
-      // (Always a non-empty range: the pre-drag scale satisfies both.)
-      const sLo = Math.max(GT_MIN_SCALE, z.renderedW0 / z.widthMax);
-      const sHi = Math.min(GT_MAX_SCALE, z.renderedW0 / z.widthMin);
-      let sNew = gtWidgetScale(el);
-      for (let i = 0; i < 3; i++) {
-        sNew = setWidgetScale(el, gtClamp(targetH / el.offsetHeight, sLo, sHi));
-        // Width now always lands inside [min,max]-width, so what we set is
-        // what sticks and the rendered width holds exactly at renderedW0.
-        el.style.width = (z.renderedW0 / sNew) + "px";
+      const rawTargetH = Math.max(24, Math.abs(e.clientY - z.anchorY));
+      // Legal wrap-width range: inside the CSS min/max layout width AND
+      // keeping scale = renderedW0÷w ≥ GT_MIN_SCALE. (Non-empty: the
+      // pre-drag width satisfies all three.)
+      const wLo = z.widthMin;
+      const wHi = Math.max(wLo, Math.min(z.widthMax, z.renderedW0 / GT_MIN_SCALE));
+      // Rendered NATURAL height at wrap width w — sets style.width to
+      // measure the wrapped layout height; scale factor is renderedW0÷w
+      // (constant rendered width), applied to the transform only once at
+      // the end. min-height is cleared first so measurements see the pure
+      // content height, not a previous frame's padding.
+      el.style.minHeight = "";
+      const renderedH = (w) => {
+        el.style.width = w + "px";
+        return (z.renderedW0 / w) * el.offsetHeight;
+      };
+      // R(w) is strictly decreasing, so plain bisection: ~9 rounds ≈ sub-px
+      // width precision. Near a wrap boundary R jumps discontinuously and a
+      // whole band of target heights maps to the SAME boundary width —
+      // that's what makes this stable where the old fixed-point flickered.
+      // Cap at the tallest NATURAL height (max wrap density at the CSS
+      // min-width). Beyond it there's no more content to reflow — padding
+      // there would just be blank space — so the drag stops at this height
+      // instead. (Width growth has no analogous cap: a wider card genuinely
+      // shows more — longer progress bars, more breathing room for the
+      // right-side controls.)
+      const maxH = renderedH(wLo);
+      const targetH = Math.min(rawTargetH, maxH);
+      let w;
+      if      (targetH >= maxH)           w = wLo;
+      else if (targetH <= renderedH(wHi)) w = wHi;
+      else {
+        let lo = wLo, hi = wHi;
+        for (let i = 0; i < 9; i++) {
+          const mid = (lo + hi) / 2;
+          if (renderedH(mid) > targetH) lo = mid; // too tall → widen
+          else hi = mid;
+        }
+        // Take the HI side: loop invariant keeps R(hi) ≤ targetH, i.e. the
+        // wrap state just SHORTER than the pointer — min-height below then
+        // pads the card up to the exact target, so the outer height tracks
+        // the cursor continuously instead of stalling across a wrap gap and
+        // snapping at its far edge.
+        w = hi;
       }
+      el.style.width = w + "px";
+      const sNew = setWidgetScale(el, z.renderedW0 / w);
+      // Pixel-exact height: layout min-height = target ÷ scale. With the
+      // cap above, this only ever binds INSIDE a wrap gap (≤ ~one line of
+      // slack, gone as soon as the next wrap state catches up) — at the cap
+      // it equals the natural height exactly, so no open-ended blank space
+      // can accumulate. Harmlessly non-binding at the bottom of the range.
+      el.style.minHeight = (targetH / sNew) + "px";
       // Keep the anchored edge fixed. Left compensates for min/max-width
       // clamping (rendered width can deviate from renderedW0 at extremes):
       // E-side anchored for n/s is arbitrary, so hold the LEFT edge — the
@@ -1957,9 +2065,11 @@ function gtMain() {
       groupData[groupId].size = {
         width: widgetEl.offsetWidth + "px",
         scale: gtWidgetScale(widgetEl),
+        minH: widgetEl.style.minHeight || null,
       };
       // Rect is authoritative here — the user just sized/placed the widget —
       // so re-deriving anchors is legal (unlike zoom/resize handlers).
+      widgetEl.dataset.gtPlaced = "1";
       groupData[groupId].position = widgetPositionAnchors(widgetEl);
       saveGroups();
     }
@@ -1997,28 +2107,47 @@ function gtMain() {
   function observeWidgetResize(widgetEl, groupId) {
     let t, lastH = 0;
     new ResizeObserver(() => {
-      // Height changes (a restored widget's goal rendering in, a goal
-      // added/removed, content growth) simply RE-PROJECT the stored anchors:
-      // the anchored edge stays fixed, so a top-anchored widget grows
-      // downward, a bottom-anchored one grows UPWARD and keeps hugging its
-      // corner, and a centred one stays centred. The stored anchors are
-      // NEVER re-derived or rewritten here — display projection only — so a
-      // clamped deep-zoom rect can't leak into storage (the ratchet behind
-      // the old "bottom-right teleports to top-right after a zoom
-      // round-trip" bug: subpixel rewraps at odd zoom factors DO fire this
-      // observer, and the old code then saved a ratio derived from the
-      // clamped position). (Zoom itself is otherwise owned by the window
-      // 'resize' listener — CSS-px height is zoom-invariant — this observer
-      // owns content changes.)
+      // Height changes flow through two distinct cases:
+      //   1. FIRST populated layout — a restored widget was created (near-)
+      //      empty at its stored spot and its goals just rendered in:
+      //      RE-APPLY the stored anchors at the real height so it LANDS
+      //      correctly (a bottom/centre-anchored widget's on-screen top
+      //      depends on its height).
+      //   2. LATER content change — a goal added/removed, min-height reset,
+      //      or content growth. Keep the top-left FIXED: the widget grows
+      //      or shrinks downward in place. (Re-projecting the anchors here
+      //      instead made bottom/centre-anchored widgets visibly SHIFT the
+      //      moment a goal was dropped into them.) Then RE-DERIVE the
+      //      stored anchors from the new rect so future zooms/resizes
+      //      preserve this spot. Guarded: only derive when the widget's
+      //      rendered size FITS the viewport — at deep zoom it doesn't,
+      //      the on-screen rect is a clamp artifact, and deriving from one
+      //      is the ratchet that once teleported bottom-right widgets to
+      //      the top-right after a 500% zoom round-trip. When the guard
+      //      blocks: do nothing — display keeps, stored anchors stay
+      //      authoritative, zoom round-trips stay lossless.
+      // "Placed" is tracked on the ELEMENT (dataset), not a closure flag,
+      // so re-renders can't reset it; widget-drag and resize mouseups also
+      // set it, covering gesture-before-first-populated-fire orderings.
+      // (Zoom itself is owned by the window 'resize' listener — CSS-px
+      // height is zoom-invariant — this observer owns content changes.)
       if (wResize) return; // resize gesture owns geometry; mouseup persists
       const h = widgetEl.offsetHeight;
       if (h !== lastH) {
         lastH = h;
         const populated = !!widgetEl.querySelector(".gt-goal-section");
         if (populated && !wDrag && !dragInProgress) {
+          const firstPlace = widgetEl.dataset.gtPlaced !== "1";
+          widgetEl.dataset.gtPlaced = "1";
           const group = groupData[groupId];
           if (group && group.position) {
-            applyWidgetPosition(widgetEl, normalizeGroupPosition(group, widgetEl));
+            if (firstPlace) {
+              applyWidgetPosition(widgetEl, normalizeGroupPosition(group, widgetEl));
+            } else {
+              // Keep top-left; sync anchors to the new rect (guarded — see
+              // refreshGroupAnchors). Persisted by the debounced save below.
+              refreshGroupAnchors(groupId);
+            }
           }
         }
       }
@@ -2028,6 +2157,7 @@ function gtMain() {
         groupData[groupId].size = {
           width: widgetEl.offsetWidth + "px",
           scale: gtWidgetScale(widgetEl),
+          minH: widgetEl.style.minHeight || null,
         };
         saveGroups();
       }, 300);
@@ -2410,6 +2540,14 @@ function gtMain() {
           // card slides from its (floating-widget-interior) position
           // to its final slot — all via the same FLIP call.
           playFlip(firstRects, 200);
+
+          // Target grew in place (top fixed) — sync its anchors to the new
+          // rect NOW. Height changes during the drag were consumed by the
+          // observer's dragInProgress gate, so nothing else re-derives, and
+          // stale anchors would make the next zoom/resize snap the widget
+          // to its pre-merge spot.
+          refreshGroupAnchors(d.targetGroupId);
+          saveGroups();
         } else {
           // JUST MOVE: persist new position, widget stays put at cursor
           if (groupData[d.sourceGroupId]) {
@@ -2470,6 +2608,13 @@ function gtMain() {
           && groupData[sourceGroupId]?.goalIds.length === 0) {
         delete groupData[sourceGroupId];
         destroyedSource = true;
+      }
+
+      // The surviving source just lost a goal — drop its stale min-height so
+      // the empty slot's space collapses instead of lingering as blank card.
+      // Same-group reorders keep their composition, so nothing to reset.
+      if (sourceGroupId && sourceGroupId !== targetGroupId && groupData[sourceGroupId]) {
+        resetGroupMinHeight(sourceGroupId);
       }
 
       saveGroups();
@@ -2546,6 +2691,18 @@ function gtMain() {
       }
       // Siblings: FLIP them from their captured rects
       playFlip(firstRects, 180);
+
+      // Both affected widgets changed height in place (top fixed): the
+      // source shrank when the goal left, the target grew as it landed.
+      // Sync their anchors to the new rects NOW — the observer's
+      // dragInProgress gate consumed the height changes mid-drag, so
+      // without this the stale anchors would re-assert on the next
+      // zoom/resize and snap both widgets back toward their old spots.
+      // (A brand-new widget already derived above; deleted source has no
+      // group left — refreshGroupAnchors no-ops for both.)
+      if (sourceGroupId && sourceGroupId !== targetGroupId) refreshGroupAnchors(sourceGroupId);
+      if (!createdNewWidget) refreshGroupAnchors(targetGroupId);
+      saveGroups();
 
     } catch (err) {
       // Defensive: keep drag state from latching if anything above throws.
@@ -3493,6 +3650,10 @@ function gtMain() {
     container.style.top = "";
     container.style.right = "";
     container.style.width = "";
+    // The main widget element survives the import — clear its "placed" flag
+    // so applyWidgetTransform is allowed to project the IMPORTED position
+    // onto it (placed widgets are otherwise never moved by renders).
+    delete container.dataset.gtPlaced;
     applyWidgetTransform(container, MAIN_GROUP_ID);
 
     // Rebuild
@@ -7171,6 +7332,10 @@ async function getExpRankByUsername(username) {
         delete groupData[gid];
         const w = document.querySelector(`.gt-widget-detached[data-group-id="${gid}"]`);
         if (w) w.remove();
+      } else {
+        // Group survives with one goal fewer — stale min-height would keep
+        // the deleted goal's space as blank card. Let it collapse.
+        resetGroupMinHeight(gid);
       }
       saveGroups();
     }
