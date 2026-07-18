@@ -13,8 +13,13 @@
   box-shadow: 0 8px 16px -4px rgba(0,0,0,0.4);
   z-index: 9998;
   box-sizing: border-box;
-  resize: horizontal;
+  /* Native CSS resize replaced by the custom 8-direction .gt-rs handles
+     (see the resize-handles block near the end of this file) — they allow
+     resizing from any edge/corner and drive the content-scale zoom. */
   overflow: hidden;
+  /* Content scale (JS-driven transform: scale()) grows from the top-left
+     so style.left/top keep meaning the visual top-left corner. */
+  transform-origin: top left;
   /* Default min-width is sized for non-avg goals (rank, races, etc.),
      where the gain pill sits inline in the bottom row and has plenty
      of horizontal room. Widgets that actually contain an average goal
@@ -1508,11 +1513,11 @@
   box-sizing: border-box;
   /* "Drag the widget" affordance — any non-goal edge grabs the whole group. */
   cursor: move;
-  /* Resize handle (bottom-right corner) — matches main widget behavior.
-     The widget-drag handler in JS guards this corner so grabbing the
-     handle resizes without also initiating a drag. */
-  resize: horizontal;
+  /* Native CSS resize replaced by the custom .gt-rs handles — same as the
+     main widget. Handles stopPropagation on mousedown so grabbing one
+     never also starts a widget drag. */
   overflow: hidden;
+  transform-origin: top left;
   /* Same min-width as #goal-tracker — see the comment there. The
      .gt-widget-has-avg class bumps it for widgets that actually need
      the extra room. */
@@ -1560,6 +1565,9 @@
     - 80% opacity so the drop target below is visible
 */
 .gt-goal-section.gt-goal-dragging {
+  /* Floating sections may carry their source widget's content scale —
+     anchor it to the grab point's coordinate system (left/top). */
+  transform-origin: top left;
   z-index: 10000;
   pointer-events: none;
   background: linear-gradient(90deg, rgba(255, 255, 255, 0.03) 0%, rgba(255, 255, 255, 0.03) 100%), rgba(0, 3, 27, 0.45);
@@ -1908,3 +1916,57 @@ body.gt-app-loggedout .gt-widget-detached { display: none !important; }
 .gt-edit-reset-go:focus-visible { outline: 2px solid #fca5a5; outline-offset: 1px; }
 
 .gt-edit-popover-wide { min-width: 264px; }
+/* ── Custom resize handles ──────────────────────────────
+   8 invisible strips (4 edges + 4 corners) injected by JS into every
+   widget (ensureResizeHandles). They replace the native CSS resize
+   handle so widgets resize from ANY side:
+     • E/W edges  → layout width (text rewraps)
+     • N/S edges + corners → content scale (fonts / bars / padding zoom)
+   Kept fully inside the widget bounds (overflow:hidden would clip
+   anything poking outside). Corners win over edges via z-index and
+   painting order. Only the SE corner gets a visible grip — preserving
+   the affordance users knew from the old native handle — shown on
+   widget hover. Handles are disabled while a widget floats mid-drag
+   (pointer-events already off) and hidden for cursor hygiene. */
+.gt-rs {
+  position: absolute;
+  z-index: 6;
+  background: transparent;
+}
+.gt-rs-n  { top: 0;    left: 12px; right: 12px; height: 5px; cursor: ns-resize; }
+.gt-rs-s  { bottom: 0; left: 12px; right: 12px; height: 5px; cursor: ns-resize; }
+.gt-rs-e  { right: 0;  top: 12px; bottom: 12px; width: 5px;  cursor: ew-resize; }
+.gt-rs-w  { left: 0;   top: 12px; bottom: 12px; width: 5px;  cursor: ew-resize; }
+.gt-rs-ne { top: 0;    right: 0;  width: 12px; height: 12px; cursor: nesw-resize; z-index: 7; }
+.gt-rs-sw { bottom: 0; left: 0;   width: 12px; height: 12px; cursor: nesw-resize; z-index: 7; }
+.gt-rs-nw { top: 0;    left: 0;   width: 12px; height: 12px; cursor: nwse-resize; z-index: 7; }
+.gt-rs-se { bottom: 0; right: 0;  width: 14px; height: 14px; cursor: nwse-resize; z-index: 7; }
+
+/* SE grip: two short diagonal lines, like the native handle it replaces. */
+.gt-rs-se::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(135deg, transparent 0 58%, rgba(255,255,255,0.35) 58% 64%,
+                    transparent 64% 74%, rgba(255,255,255,0.35) 74% 80%, transparent 80%);
+  border-bottom-right-radius: 9px;
+  opacity: 0;
+  transition: opacity 0.15s;
+  pointer-events: none;
+}
+#goal-tracker:hover .gt-rs-se::before,
+.gt-widget-detached:hover .gt-rs-se::before { opacity: 1; }
+
+/* No resize affordance while the widget itself is floating mid-drag. */
+.gt-widget-dragging .gt-rs { display: none; }
+
+/* ── Global cursor lock during an active resize ──────────────
+   The handle strips are only a few px wide, so mid-drag the pointer
+   constantly leaves them; without this, the cursor flickers between the
+   widget's move cursor, the goal cards' grab cursor, and the page
+   default. While body.gt-resizing is set, JS puts the direction's
+   resize cursor on <body> inline, and this rule forces every element
+   to inherit it — deliberately NOT targeting body itself, so the
+   !important doesn't beat the inline value it's meant to propagate. */
+body.gt-resizing * { cursor: inherit !important; }
