@@ -55,7 +55,89 @@ function gtMain() {
   };
 
   // ── Cached stats (for target-mode hint in modal) ───────────────
-  let currentStats = { exp: null, pp: null, races: null, quotes: null, quotesUnranked: null, playtime: null, rank: null, expRank: JSON.parse(localStorage.getItem("gt-exp-rank"))?.rank ?? null };
+  let currentStats = { exp: null, pp: null, races: null, quotes: null, quotesUnranked: null, playtime: null, rank: null, country: null, countryRank: null, expRank: JSON.parse(localStorage.getItem("gt-exp-rank"))?.rank ?? null };
+
+  // ── Country leaderboards ───────────────────────────────────
+  // /leaders takes an optional ISO 3166-1 alpha-2 `country` code and returns
+  // that country's board instead of the global one. Only PP + rank goals use
+  // it; the code rides along on the goal as gd.country, and null / absent =
+  // the global board (the default, i.e. exactly the old behaviour).
+  const GT_GLOBE = "\u{1F310}";
+  const GT_COUNTRY_CODES = (
+    "AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ " +
+    "BL BM BN BO BQ BR BS BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR " +
+    "CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR " +
+    "GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU " +
+    "ID IE IL IM IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ " +
+    "LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ " +
+    "MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF " +
+    "PG PH PK PL PM PN PR PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI " +
+    "SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR " +
+    "TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW"
+  ).split(" ");
+
+  // Names come from Intl rather than a hand-kept table, so they stay correct
+  // and match the browser's own country naming. If the runtime has no
+  // DisplayNames, every name degrades to the bare code — still usable.
+  const gtRegionNames = (() => {
+    try { return new Intl.DisplayNames(["en"], { type: "region" }); } catch { return null; }
+  })();
+  function countryName(code) {
+    if (!code) return "Global";
+    try { return gtRegionNames?.of(code) || code; } catch { return code; }
+  }
+  // Emoji flag = the code's two letters as regional-indicator symbols.
+  // Windows ships no flag glyphs, so Chromium there renders the letter pair
+  // instead ("CH") — still a legible country marker, so no special-casing.
+  function countryFlag(code) {
+    if (!/^[A-Z]{2}$/.test(code || "")) return GT_GLOBE; // global board
+    return String.fromCodePoint(...[...code].map(c => 0x1F1E6 + c.charCodeAt(0) - 65));
+  }
+  // Fold case + accents so "cote" matches "Côte d’Ivoire".
+  function gtFoldText(s) {
+    return (s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  }
+  // Built once: alphabetical by display name, with the folded name / code
+  // cached for the dropdown's search (which runs on every keystroke).
+  const GT_COUNTRIES = GT_COUNTRY_CODES
+    .map(code => ({ code, name: countryName(code) }))
+    .sort((a, b) => a.name.localeCompare(b.name, "en"));
+  for (const c of GT_COUNTRIES) { c.fold = gtFoldText(c.name); c.codeFold = c.code.toLowerCase(); }
+
+  // The user's own rank on a given board: their global rank on the global
+  // board, their country rank on their own country's board, and null on any
+  // OTHER country's board — they simply aren't on it. Callers read null as
+  // "no rank of mine to compare against", which is exactly right when the
+  // goal is really "reach the PP of that board's #N".
+  function ownRankOnBoard(country) {
+    if (!country) return currentStats.rank;
+    return country === currentStats.country ? (currentStats.countryRank ?? null) : null;
+  }
+  // Next Rank means "the rank one above mine", so it only exists on a board
+  // the user is actually on.
+  // Modal-session cache. The search costs a handful of fetches, so don't redo
+  // it every time Next Rank is toggled off and back on.
+  const virtRankCache    = new Map();   // board -> Promise<rank>  (dedupes the search)
+  const virtRankResolved = new Map();   // board -> rank           (sync read, for the hint)
+  function rankOnBoardAsync(board) {
+    const own = ownRankOnBoard(board);
+    if (own != null) return Promise.resolve(own);        // a real rank always wins
+    if (currentStats.pp == null) return Promise.resolve(null);
+    if (!virtRankCache.has(board)) {
+      const pages = new Map();
+      virtRankCache.set(board, virtualRankOnBoard(board, currentStats.pp, p => {
+        if (!pages.has(p)) pages.set(p, fetchLeaderRows(p, board));
+        return pages.get(p);
+      }).then(r => { virtRankResolved.set(board, r); return r; })
+        .catch(err => { virtRankCache.delete(board); throw err; }));
+    }
+    return virtRankCache.get(board);
+  }
+  // The rank we can state RIGHT NOW, with no fetch: real, or a virtual one the
+  // search has already returned. null = not known yet.
+  function knownRankOnBoard(board) {
+    return ownRankOnBoard(board) ?? (board ? (virtRankResolved.get(board) ?? null) : null);
+  }
 
   // ── Gain delta tracking (for +X pop-up indicators) ─────────────
   // Stores the last known gain value per goal ID so renderAllGoals()
@@ -638,7 +720,7 @@ function gtMain() {
       document.getElementById(`${goalId}-remove-btn`).addEventListener("click", async () => {
         const gd = (goalData.rival || []).find(g => g.id === goalId);
         const labelText = gd ? `Rival · ${goalRivalNames(gd).join(", ") || "rival"} (${rivalMetric(goalRivalCfg(gd)).toUpperCase()})` : "Rival goal";
-        if (await confirmDeleteGoal(labelText)) removeGoal("rival", goalId);
+        if (await confirmDeleteGoal(labelText, goalId)) removeGoal("rival", goalId);
       });
 
       // Gear → the "manage rivals" modal (only shown for multi-rival goals).
@@ -697,7 +779,7 @@ function gtMain() {
         const gd = (goalData.improvement || []).find(g => g.id === goalId);
         const metricLbl = gd && gd.metric === "pp" ? "PP" : "WPM";
         const labelText = gd ? `Target \u00b7 ${metricLbl} \u2265 ${gd.target}` : "Target goal";
-        if (await confirmDeleteGoal(labelText)) removeGoal("improvement", goalId);
+        if (await confirmDeleteGoal(labelText, goalId)) removeGoal("improvement", goalId);
       });
       document.getElementById(`${goalId}-target-next`).addEventListener("click", () => {
         onTargetNextClicked(goalId);
@@ -787,7 +869,7 @@ function gtMain() {
     document.getElementById(`${goalId}-remove-btn`).addEventListener("click", async () => {
       const labelEl = document.getElementById(`${goalId}-label`);
       const labelText = labelEl ? labelEl.textContent : cfg.label;
-      if (await confirmDeleteGoal(labelText)) {
+      if (await confirmDeleteGoal(labelText, goalId)) {
         removeGoal(type, goalId);
       }
     });
@@ -848,6 +930,116 @@ function gtMain() {
       || goalIsAverage(g);
   }
 
+  // ── Reset-progress eligibility ────────────────────────────────
+  // "Reset progress" only makes sense for goals whose progress is an
+  // extension-tracked accumulator that we can zero back to its freshly-
+  // created state:
+  //   • gain (cumulative delta) goals  → re-baseline to the current stat
+  //   • average (rolling-window) goals → clear the window + best
+  //   • improvement (mode:"improvement") goals → zero accumulatedGain
+  //   • quote-chars GAIN goals → re-lock the distinct-quote baseline
+  // It is meaningless for goals whose "current" side is an immutable site
+  // stat or a fixed catalog figure — you can't lower those, so there is
+  // nothing to reset: rank / player / cumulative-TARGET (reach an absolute
+  // value), max-quotes / max-chars, improvement-TARGET, and rival goals.
+  function goalSupportsReset(type, g) {
+    if (!g) return false;
+    if (type === "rival") return false;              // comparison goal
+    if (goalIsAverage(g))     return true;           // rolling window → clearable
+    if (goalIsImprovement(g)) return true;           // accumulator (mode "improvement")
+    if (goalIsImprovementTarget(g)) return false;    // improvement "target" (threshold)
+    // Remaining cases are the cumulative types (exp/pp/races/quotes/playtime/chars).
+    if (g.targetRank != null || g.nextRank) return false;   // rank goal
+    if (g.targetUsername != null)           return false;   // player goal
+    if (g.maxQuotes || g.maxChars)          return false;   // max (fixed catalog total)
+    if (g.quoteCharsAbsoluteTarget != null) return false;   // reach-absolute quote-chars
+    // Gain vs reach-absolute("target"): only a gain delta re-baselines cleanly
+    // (re-baselining a reach-absolute goal would silently move the target).
+    // supportsRecurrence is set true for exactly the gain/avg/improvement modes
+    // and false for target/rank/player/max, so it's the right discriminator.
+    if (g.supportsRecurrence === true)  return true;
+    if (g.supportsRecurrence === false) return false;
+    // Flagless legacy goal: only safe to treat as a gain goal when it carries
+    // active recurrence (target/rank/player/max goals never do). Otherwise the
+    // gain-vs-absolute distinction is unknowable here → skip (leave it be).
+    return typeof g.recurrence === "string" && g.recurrence !== "none";
+  }
+
+  // Reset a goal to its freshly-created state, WITHOUT touching the streak /
+  // total-completions counters. The streak is deliberately preserved: if the
+  // user resets and then the period rolls over without re-completing the goal,
+  // the normal rollover logic sees completedThisPeriod === false and drops the
+  // streak then — same as never having finished it that period. This mirrors
+  // the per-type wipes in the period-rollover block of renderAllGoals, minus
+  // the streak/period advancement.
+  function resetGoalProgress(type, g) {
+    const cfg = GOAL_CONFIG[type];
+    const goalId = g.id;
+    g.completedThisPeriod = false;
+
+    // Improvement (accumulator): zero the banked gain + per-quote baselines,
+    // jump lastEvalRaces to now so pre-reset races don't leak back in.
+    if (goalIsImprovement(g)) {
+      g.accumulatedGain = 0;
+      g.quoteBests = {};
+      g.quoteAvgs  = {};
+      g.lastEvalRaces = currentStats.races ?? g.lastEvalRaces ?? 0;
+      delete prevGainMap[goalId];
+      saveGoals(type);
+      renderAllGoals();
+      // Re-seed the quote the user is currently on so the next finished race
+      // isn't dropped as "unseeded" (matches the rollover re-seed).
+      const liveQid = getCurrentQuoteIdLive();
+      if (liveQid) onQuoteStarted(liveQid);
+      if (isLeader) evaluateImprovementGuarded();
+      return;
+    }
+
+    // Average (rolling window): empty the window + best; refill from scratch.
+    if (goalIsAverage(g)) {
+      g.windowRaces = [];
+      g.bestAvg     = null;
+      if (g.uniqueOnly) g.windowQuoteIds = [];
+      g.lastEvalRaces = currentStats.races ?? g.lastEvalRaces ?? 0;
+      delete prevAvgMap[goalId];
+      delete prevBestMap[goalId];
+      delete prevGainMap[goalId];
+      saveGoals(type);
+      renderAllGoals();
+      return;
+    }
+
+    // Quote-chars GAIN: re-lock the distinct-quote baseline lazily (the next
+    // ready render captures the current tally, exactly like period rollover).
+    if (type === "chars" && g.quoteChars && !g.maxChars) {
+      g.baselineQuoteChars = null;
+      delete prevGainMap[goalId];
+      saveGoals(type);
+      renderAllGoals();
+      return;
+    }
+
+    // Cumulative gain (exp/pp/races/quotes/playtime/chars): re-baseline to the
+    // current stat so the delta goes back to zero. Race gain goals may track a
+    // filtered counter (quickplay/solo).
+    let currentVal;
+    if (type === "races" && g.filter === "quickplay")   currentVal = currentStats.quickplayRaces;
+    else if (type === "races" && g.filter === "solo")    currentVal = currentStats.soloRaces;
+    else                                                 currentVal = currentStats[type];
+    // No fresh stat available (stats not loaded) → leave the baseline as-is
+    // rather than writing null and producing a NaN gain.
+    if (currentVal != null) g[cfg.baselineKey] = currentVal;
+    // Requirement / unique gain goals track qualifyingProgress, not the delta.
+    if (goalIsGated(g)) {
+      g.qualifyingProgress = 0;
+      g.lastEvalRaces = currentStats.races ?? currentVal ?? g.lastEvalRaces ?? 0;
+      if (g.uniqueOnly) g.seenQuoteIds = [];
+    }
+    delete prevGainMap[goalId];
+    saveGoals(type);
+    renderAllGoals();
+  }
+
   // ── Per-goal edit popover ─────────────────────
   // Generalizes the count-view popover: one header button opens a small anchored
   // editor for the goal's in-place-tunable settings — amount, recurrence, and
@@ -902,7 +1094,8 @@ function gtMain() {
     const isImpTarget = (type === "improvement" && gd.mode === "target");
     const isRival = (type === "rival");
     const canAvg  = goalIsAverage(gd);
-    if (!canAmount && !canRec && !canView && !isImpTarget && !isRival && !canAvg) return;
+    const canReset = goalSupportsReset(type, gd);
+    if (!canAmount && !canRec && !canView && !isImpTarget && !isRival && !canAvg && !canReset) return;
 
     let draftView = goalCountView(gd);
 
@@ -1011,6 +1204,7 @@ function gtMain() {
       ${canAmount ? `<div class="gt-edit-label">Amount</div><input type="number" class="gt-custom-input gt-edit-amount" value="${gd.target}" min="1" step="1">` : ""}
       ${canRec ? `<div class="gt-edit-label">Recurrence</div><div class="gt-edit-rec-group">${recBtnsHtml}</div>${recResettable ? `<div class="gt-edit-note">Changing this resets the streak & completions.</div>` : ""}` : ""}
       ${canView ? `<div class="gt-edit-label">Display Format</div><div class="gt-edit-view-group"><button class="gt-mode-btn gt-edit-view-btn${draftView === "progress" ? " active" : ""}" data-view="progress">Progress</button><button class="gt-mode-btn gt-edit-view-btn${draftView === "remaining" ? " active" : ""}" data-view="remaining">Remaining</button></div>` : ""}
+      ${canReset ? `<div class="gt-edit-reset-wrap"></div>` : ""}
     `;
 
     const amountInput = pop.querySelector(".gt-edit-amount");
@@ -1295,27 +1489,72 @@ function gtMain() {
     document.body.appendChild(pop);
     goalEditPopoverEl = pop;
 
-    // Anchor (fixed) beside the card, mirroring the count-view popover.
-    const btnRect = anchorBtn.getBoundingClientRect();
-    const cardEl = anchorBtn.closest(".gt-goal-section");
-    const cardRect = cardEl ? cardEl.getBoundingClientRect() : btnRect;
-    const pw = pop.offsetWidth, ph = pop.offsetHeight;
-    const gap = 8;
-    let left;
-    if (cardRect.right + gap + pw <= window.innerWidth - 8) {
-      left = cardRect.right + gap;
-    } else if (cardRect.left - gap - pw >= 8) {
-      left = cardRect.left - gap - pw;
-    } else {
-      left = (cardRect.left > window.innerWidth - cardRect.right)
-        ? Math.max(8, cardRect.left - gap - pw)
-        : Math.min(window.innerWidth - 8 - pw, cardRect.right + gap);
+    // Anchor (fixed) beside the card, mirroring the count-view popover. Kept as a
+    // function so it can re-run after the popover's height changes (e.g. the reset
+    // button swapping to its inline confirm), keeping it clamped on-screen.
+    function positionPopover() {
+      const btnRect = anchorBtn.getBoundingClientRect();
+      const cardEl = anchorBtn.closest(".gt-goal-section");
+      const cardRect = cardEl ? cardEl.getBoundingClientRect() : btnRect;
+      const pw = pop.offsetWidth, ph = pop.offsetHeight;
+      const gap = 8;
+      let left;
+      if (cardRect.right + gap + pw <= window.innerWidth - 8) {
+        left = cardRect.right + gap;
+      } else if (cardRect.left - gap - pw >= 8) {
+        left = cardRect.left - gap - pw;
+      } else {
+        left = (cardRect.left > window.innerWidth - cardRect.right)
+          ? Math.max(8, cardRect.left - gap - pw)
+          : Math.min(window.innerWidth - 8 - pw, cardRect.right + gap);
+      }
+      let top = btnRect.top;
+      if (top + ph > window.innerHeight - 8) top = window.innerHeight - 8 - ph;
+      if (top < 8) top = 8;
+      pop.style.left = `${Math.round(left)}px`;
+      pop.style.top = `${Math.round(top)}px`;
     }
-    let top = btnRect.top;
-    if (top + ph > window.innerHeight - 8) top = window.innerHeight - 8 - ph;
-    if (top < 8) top = 8;
-    pop.style.left = `${Math.round(left)}px`;
-    pop.style.top = `${Math.round(top)}px`;
+    positionPopover();
+
+    // Reset progress: an inline two-step confirm that stays INSIDE the popover
+    // (no centered modal). Clicking "Reset progress" swaps the button for a short
+    // prompt + Cancel / Reset; Cancel restores the button, Reset wipes progress
+    // (streak preserved — see resetGoalProgress) and reverts to the button so the
+    // user sees the card update live behind the popover. Each swap re-clamps the
+    // popover so a taller confirm can't run off the bottom of the screen. The goal
+    // object is the same reference stored in goalData[type], so mutating it there
+    // is what saveGoals persists.
+    const resetWrap = pop.querySelector(".gt-edit-reset-wrap");
+    if (resetWrap) {
+      const showResetDefault = () => {
+        resetWrap.innerHTML = `<button class="gt-edit-reset-btn" type="button">Reset progress</button>`;
+        resetWrap.querySelector(".gt-edit-reset-btn").addEventListener("click", (e) => {
+          e.stopPropagation();
+          showResetConfirm();
+        });
+        positionPopover();
+      };
+      const showResetConfirm = () => {
+        resetWrap.innerHTML = `
+          <div class="gt-edit-reset-prompt">Reset this goal's progress?</div>
+          <div class="gt-edit-reset-actions">
+            <button class="gt-edit-reset-cancel" type="button">Cancel</button>
+            <button class="gt-edit-reset-go" type="button">Reset</button>
+          </div>`;
+        resetWrap.querySelector(".gt-edit-reset-cancel").addEventListener("click", (e) => {
+          e.stopPropagation();
+          showResetDefault();
+        });
+        resetWrap.querySelector(".gt-edit-reset-go").addEventListener("click", (e) => {
+          e.stopPropagation();
+          resetGoalProgress(type, gd);
+          showResetDefault();
+        });
+        positionPopover();
+        resetWrap.querySelector(".gt-edit-reset-cancel").focus();
+      };
+      showResetDefault();
+    }
 
     document.addEventListener("mousedown", onGoalEditDocDown, true);
     document.addEventListener("keydown", onGoalEditKey, true);
@@ -1968,9 +2207,18 @@ function gtMain() {
       if (!targetGroupId) {
         // Empty space → new detached widget at drop point
         targetGroupId = generateGroupId();
+        // Inherit the source widget's current rendered width so the pulled-out
+        // goal keeps the size it had. With size:null the fresh widget rendered
+        // at the stylesheet default (~220px) — larger than a minimized source,
+        // smaller than an enlarged one. Measured here (not at drag start): the
+        // source widget element still exists at drop time in this branch (main
+        // always does; a detached source with one goal takes the solo-mode
+        // path instead, which moves the widget element itself, size and all).
+        const srcWidgetEl = sourceGroupId ? widgetElForGroup(sourceGroupId) : null;
+        const srcWidth = srcWidgetEl ? Math.round(srcWidgetEl.getBoundingClientRect().width) : 0;
         groupData[targetGroupId] = {
           position: { left: (e.clientX - d.offX) + "px", top: (e.clientY - d.offY) + "px" },
-          size: null,
+          size: srcWidth > 0 ? { width: srcWidth + "px" } : null,
           goalIds: [],
         };
         targetIndex = 0;
@@ -2165,6 +2413,26 @@ function gtMain() {
           <button class="gt-mode-btn"        data-mode="average" id="gt-avg-btn" style="display:none;">Average</button>
           <button class="gt-mode-btn"        data-mode="improvement" id="gt-improvement-btn" style="display:none;">Improvement</button>
           </div>
+      </div>
+      <!-- Leaderboard row (PP + rank only): which /leaders board the target
+           rank is read from. Default is the global board; picking a country
+           re-points the goal at that country's board. A searchable custom
+           dropdown rather than a <select> because ~250 options need a filter
+           box, and a native select can't be styled to match the modal. -->
+      <div id="gt-country-row" style="display:none;">
+        <div class="gt-section-label">Leaderboard</div>
+        <div class="gt-country-select">
+          <button id="gt-country-btn" class="gt-country-btn" type="button" aria-haspopup="listbox" aria-expanded="false">
+            <span id="gt-country-btn-flag" class="gt-country-flag"></span>
+            <span id="gt-country-btn-name" class="gt-country-name">Global</span>
+            <span class="gt-country-caret" aria-hidden="true">▾</span>
+          </button>
+          <div id="gt-country-menu" class="gt-country-menu" style="display:none;">
+            <input id="gt-country-search" class="gt-country-search" type="text" placeholder="Search country…" autocomplete="off" spellcheck="false" />
+            <div id="gt-country-list" class="gt-country-list" role="listbox" aria-label="Leaderboard"></div>
+            <div id="gt-country-empty" class="gt-country-empty" style="display:none;">No matching country</div>
+          </div>
+        </div>
       </div>
       <!-- Average-mode controls (races + average only). The target-average
            row uses chip-style inputs (mirroring the requirements row in
@@ -3719,16 +3987,89 @@ function gtMain() {
   const REC_LABELS = { daily: "Daily", weekly: "Weekly", monthly: "Monthly" };
 
   // ── Rank → PP lookup ───────────────────────────────────────────
-  async function getPpByRank(targetRank) {
-    const perPage = 20;
-    const page    = Math.ceil(targetRank / perPage);
-    const url     = withLang(`https://api.typegg.io/v1/leaders?sort=totalPp&page=${page}&perPage=${perPage}`);
-    const response = await gtApiFetch(url, { headers: authHeaders() });
-    if (!response.ok) throw new Error("Leaderboard fetch failed");
-    const data = await response.json();
-    const targetUser = data.users?.find(u => u.stats?.ranking === targetRank);
-    if (!targetUser) throw new Error(`Rank #${targetRank} not found on page ${page}`);
-    return targetUser.stats.totalPp;
+  // `country` (ISO alpha-2) reads that country's board instead of the global
+  // one; on a filtered board the position within the country is countryRank
+  // (stats.ranking stays global there).
+  //
+  // Shared by the modal's pre-flight check and the background poller so the
+  // two can never disagree about what a rank resolves to — the modal saying
+  // "no such rank" about a goal the poller would happily track (or vice
+  // versa) would be worse than either behaviour on its own.
+  const GT_LEADERS_PER_PAGE = 20;
+  function leadersUrl(page, country) {
+    let path = `https://api.typegg.io/v1/leaders?sort=totalPp&page=${page}&perPage=${GT_LEADERS_PER_PAGE}`;
+    if (country) path += `&country=${encodeURIComponent(country)}`;
+    return withLang(path);
+  }
+  async function fetchLeaderRows(page, country) {
+    const r = await gtApiFetch(leadersUrl(page, country), { headers: authHeaders() });
+    if (!r.ok) throw new Error("Leaderboard fetch failed");
+    const rows = (await r.json()).users || [];
+    // Refusing rows from the wrong country matters: if the filter were ever
+    // ignored we'd silently read the GLOBAL board instead, quietly corrupting
+    // every goal that depends on it. Better to throw and retry.
+    if (country && rows.length && !rows.some(x => x.country === country)) {
+      throw new Error(`Leaderboard filter country=${country} was not applied`);
+    }
+    return rows;
+  }
+  function pickRankRow(rows, rank, country) {
+    const page = Math.ceil(rank / GT_LEADERS_PER_PAGE);
+    if (!country) {
+      const u = rows.find(x => x.stats?.ranking === rank);
+      if (!u) throw new Error(`Rank #${rank} not found on page ${page}`);
+      return u;
+    }
+    // Position within the country is countryRank; the row's place on the page
+    // is the fallback if that field ever goes away.
+    const u = rows.find(x => x.countryRank === rank) || rows[(rank - 1) % GT_LEADERS_PER_PAGE];
+    if (!u || u.country !== country) throw new Error(`${country} rank #${rank} not found on page ${page}`);
+    return u;
+  }
+  async function getPpByRank(targetRank, country) {
+    const page = Math.ceil(targetRank / GT_LEADERS_PER_PAGE);
+    return pickRankRow(await fetchLeaderRows(page, country), targetRank, country).stats.totalPp;
+  }
+
+  // ── Where the user WOULD rank on a board they aren't on ─────────
+  // "Next Rank" means "the rank above mine", which needs a rank of mine to
+  // step up from. On another country's board there isn't one — so derive a
+  // virtual rank: the slot the user's PP would take if they joined it. From
+  // there the feature works exactly as it does on the global board.
+  //
+  // The board is PP-sorted, so "is the user's slot at or before page p?" is
+  // monotonic in p: gallop to bracket the page, then bisect. O(log n) fetches
+  // rather than walking a board that could be thousands deep. `fetchPage`
+  // comes from the caller so it can share whatever page cache it already has
+  // — the gallop re-reads pages, and the bisect lands back on one of them.
+  const GT_MAX_BOARD_PAGES = 4096;
+  async function virtualRankOnBoard(country, userPp, fetchPage) {
+    const per = GT_LEADERS_PER_PAGE;
+    // Ties go to the incumbent: you don't outrank someone by merely matching
+    // their PP, so `<=` finds the first player you do NOT beat — that's your
+    // slot. Getting this backwards puts you one slot too low, which makes the
+    // rank above you the player you're tied with, i.e. a goal needing 0 more
+    // PP — the exact 0 / 0 card this whole check exists to prevent.
+    const slotAtOrBefore = async (p) => {
+      const rows = await fetchPage(p);
+      if (rows.length < per) return true;                      // short page = end of board
+      return rows[rows.length - 1].stats.totalPp <= userPp;    // page's tail is at/below the user
+    };
+    let lo = 0, hi = 1;
+    while (!(await slotAtOrBefore(hi))) {
+      lo = hi; hi *= 2;
+      if (hi > GT_MAX_BOARD_PAGES) throw new Error(`${country} board deeper than ${GT_MAX_BOARD_PAGES} pages`);
+    }
+    while (lo + 1 < hi) {                                     // slot page is in (lo, hi]
+      const mid = Math.floor((lo + hi) / 2);
+      if (await slotAtOrBefore(mid)) hi = mid; else lo = mid;
+    }
+    const rows = await fetchPage(hi);
+    // The user displaces the first player they aren't beaten by. If everyone on
+    // the final page beats them, they land one past the end of the board.
+    const idx = rows.findIndex(u => u.stats.totalPp <= userPp);
+    if (idx === -1) return (hi - 1) * per + rows.length + 1;
+    return rows[idx].countryRank ?? ((hi - 1) * per + idx + 1);
   }
 
   // ── Username → PP lookup ─────────────────────────────────────────
@@ -4141,7 +4482,6 @@ async function getExpRankByUsername(username) {
   let selectedTargetLenMin  = null, selectedTargetLenMax  = null;
 
   // rank mode state
-  let rankFetchedPp     = null; // PP fetched for the entered rank
   let rankFetchedExp    = null; // EXP fetched for the entered rank
   let rankFetchedRank   = null; // the rank number we fetched for
   let rankDebounce      = null;
@@ -4149,6 +4489,366 @@ async function getExpRankByUsername(username) {
 
   const nextRankRow        = document.getElementById("gt-next-rank-row");
   const nextRankToggleBtn  = document.getElementById("gt-next-rank-btn");
+
+  // ── Leaderboard (country) dropdown ─ PP + rank goals only ──────
+  // Searchable single-select: 🌐 Global (the default) pinned above every ISO
+  // country, sorted by name. The picked code becomes gd.country on the new
+  // goal and is passed straight through to /leaders?country=XX.
+  let selectedRankCountry = null;   // ISO alpha-2 code; null = global board
+  let countryMenuOpen     = false;
+  let countryActiveIdx    = -1;     // keyboard-highlighted row
+  let countryRendered     = [];     // the option objects currently in the list
+
+  const countryRow     = document.getElementById("gt-country-row");
+  const countryBtn     = document.getElementById("gt-country-btn");
+  const countryBtnFlag = document.getElementById("gt-country-btn-flag");
+  const countryBtnName = document.getElementById("gt-country-btn-name");
+  const countryMenu    = document.getElementById("gt-country-menu");
+  const countrySearch  = document.getElementById("gt-country-search");
+  const countryListEl  = document.getElementById("gt-country-list");
+  const countryEmptyEl = document.getElementById("gt-country-empty");
+
+  // The Global sentinel is an option like any other, with code === null.
+  const COUNTRY_GLOBAL = { code: null, name: "Global", fold: "global", codeFold: "" };
+
+  // The row is meaningful for PP rank goals only — EXP ranks come off the
+  // level board, which has no country filter wired up here.
+  function countryRowApplies() {
+    return selectedType === "pp" && selectedMode === "rank";
+  }
+  // Leaving PP+rank drops the pick, so an unrelated goal can never inherit a
+  // stale board. Call this BEFORE renderPresets so the Amount row is derived
+  // from the post-reset value.
+  function updateCountryRowVisibility() {
+    const show = countryRowApplies();
+    countryRow.style.display = show ? "block" : "none";
+    if (!show) {
+      closeCountryMenu();
+      if (selectedRankCountry !== null) { selectedRankCountry = null; reflectCountryButton(); }
+    }
+  }
+
+  function reflectCountryButton() {
+    countryBtnFlag.textContent = countryFlag(selectedRankCountry);
+    countryBtnName.textContent = countryName(selectedRankCountry);
+    // Emerald accent = a non-default board is active, matching how the Mode
+    // row marks its active button. Global stays neutral (it IS the default).
+    countryBtn.classList.toggle("gt-country-btn--set", !!selectedRankCountry);
+  }
+
+  // Filter + order the option list for the current search text. Name-prefix
+  // hits come first ("ind" → India, Indonesia before British Indian Ocean
+  // Territory), then substring hits; both halves stay alphabetical because
+  // GT_COUNTRIES already is. An exact code match ("ch") jumps to the top.
+  function filterCountries(q) {
+    if (!q) return [COUNTRY_GLOBAL, ...GT_COUNTRIES];
+    const exact = [], starts = [], contains = [];
+    for (const c of GT_COUNTRIES) {
+      if (c.codeFold === q)            exact.push(c);
+      else if (c.fold.startsWith(q))   starts.push(c);
+      else if (c.fold.includes(q))     contains.push(c);
+    }
+    const out = [...exact, ...starts, ...contains];
+    if (COUNTRY_GLOBAL.fold.startsWith(q)) out.unshift(COUNTRY_GLOBAL);
+    return out;
+  }
+
+  function renderCountryOptions() {
+    const q = gtFoldText(countrySearch.value.trim());
+    countryRendered = filterCountries(q);
+    countryListEl.innerHTML = countryRendered.map((c, i) => {
+      const sel  = c.code === selectedRankCountry;
+      const code = c.code ? `<span class="gt-country-opt-code">${c.code}</span>` : "";
+      // Hairline under Global when it heads an unfiltered list — it's the
+      // "no filter" option, not one of the countries.
+      const sep  = (c.code === null && countryRendered.length > 1) ? `<div class="gt-country-sep"></div>` : "";
+      return `<button type="button" class="gt-country-opt${sel ? " selected" : ""}" role="option"`
+        + ` aria-selected="${sel}" data-idx="${i}">`
+        + `<span class="gt-country-flag">${countryFlag(c.code)}</span>`
+        + `<span class="gt-country-name">${c.name}</span>${code}</button>${sep}`;
+    }).join("");
+    countryEmptyEl.style.display = countryRendered.length ? "none" : "block";
+    countryActiveIdx = -1;
+  }
+
+  function countryOptEl(idx) {
+    return idx >= 0 ? countryListEl.querySelector(`.gt-country-opt[data-idx="${idx}"]`) : null;
+  }
+  function setCountryActive(idx, scroll = true) {
+    const prev = countryOptEl(countryActiveIdx);
+    if (prev) prev.classList.remove("gt-country-opt--active");
+    countryActiveIdx = (idx >= 0 && idx < countryRendered.length) ? idx : -1;
+    const el = countryOptEl(countryActiveIdx);
+    if (el) {
+      el.classList.add("gt-country-opt--active");
+      if (scroll) el.scrollIntoView({ block: "nearest" });
+    }
+  }
+  function moveCountryActive(delta) {
+    if (!countryRendered.length) return;
+    const n = countryRendered.length;
+    // Wrap around; a fresh list (idx -1) enters at the top / bottom.
+    const next = countryActiveIdx < 0
+      ? (delta > 0 ? 0 : n - 1)
+      : (countryActiveIdx + delta + n) % n;
+    setCountryActive(next);
+  }
+
+  function openCountryMenu() {
+    if (countryMenuOpen) return;
+    countryMenuOpen = true;
+    countryMenu.style.display = "flex";
+    countryBtn.setAttribute("aria-expanded", "true");
+    countrySearch.value = "";
+    renderCountryOptions();
+    // Enter the list on the current pick so the arrow keys continue from
+    // where the user already is, and a scrolled-away pick is brought in view.
+    setCountryActive(countryRendered.findIndex(c => c.code === selectedRankCountry));
+    countrySearch.focus();
+    document.addEventListener("mousedown", onCountryDocDown, true);
+  }
+  function closeCountryMenu() {
+    if (!countryMenuOpen) return;
+    countryMenuOpen = false;
+    countryMenu.style.display = "none";
+    countryBtn.setAttribute("aria-expanded", "false");
+    document.removeEventListener("mousedown", onCountryDocDown, true);
+  }
+  function onCountryDocDown(e) {
+    if (countryMenu.contains(e.target) || countryBtn.contains(e.target)) return;
+    closeCountryMenu();
+  }
+
+  function selectCountry(code) {
+    const next = code || null;
+    closeCountryMenu();
+    countryBtn.focus();
+    if (next === selectedRankCountry) return;
+    selectedRankCountry = next;
+    reflectCountryButton();
+    // A different board means a different "your rank", so everything the
+    // Amount row derived from the old one is stale — rebuild it (which
+    // re-resolves Next Rank against the new board) and re-check a typed rank.
+    renderPresets();
+    if (!nextRankMode) validateRankInput();
+  }
+
+  countryBtn.addEventListener("click", () => {
+    countryMenuOpen ? closeCountryMenu() : openCountryMenu();
+  });
+  countrySearch.addEventListener("input", () => {
+    renderCountryOptions();
+    // Pre-arm the first hit so Enter picks the obvious match after typing.
+    setCountryActive(countryRendered.length ? 0 : -1, false);
+  });
+  countryMenu.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown")    { e.preventDefault(); moveCountryActive(1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); moveCountryActive(-1); }
+    else if (e.key === "Enter")   {
+      e.preventDefault();
+      const c = countryRendered[countryActiveIdx];
+      if (c) selectCountry(c.code);
+    }
+    else if (e.key === "Escape")  { e.preventDefault(); e.stopPropagation(); closeCountryMenu(); countryBtn.focus(); }
+    else if (e.key === "Tab")     { closeCountryMenu(); }
+  });
+  // Delegated: the list is re-rendered on every keystroke, so per-row
+  // listeners would have to be re-wired each time.
+  countryListEl.addEventListener("click", (e) => {
+    const opt = e.target.closest(".gt-country-opt");
+    if (!opt) return;
+    const c = countryRendered[Number(opt.dataset.idx)];
+    if (c) selectCountry(c.code);
+  });
+  countryListEl.addEventListener("mousemove", (e) => {
+    const opt = e.target.closest(".gt-country-opt");
+    if (opt) setCountryActive(Number(opt.dataset.idx), false);
+  });
+  reflectCountryButton();
+
+  // ── Rank hint / validation (board-aware) ────────────────────
+  function boardLabel(board) {
+    return `${countryFlag(board)} ${countryName(board)}`;
+  }
+  // The one "where you stand" sentence, for every board:
+  //   global           -> "You're #77"
+  //   your own country -> "You're #1 in 🇨🇭 Switzerland"
+  //   someone else's   -> "You'd be #4 in 🇮🇳 India"
+  // Only the mood changes, because that's the only thing that differs: on a
+  // board you're not on the rank is what your PP WOULD earn you. Every control
+  // on this row already runs on that number, so the line states it too.
+  function standingText(rank, board, virtual) {
+    return `${virtual ? "You'd be" : "You're"} #${rank}${board ? ` in ${boardLabel(board)}` : ""}`;
+  }
+  // `rank` is null while it's still unknown — either the virtual search is
+  // running (board-specific wording) or the stats haven't landed at all.
+  function rankBoardHint() {
+    const country = (selectedType === "pp") ? selectedRankCountry : null;
+    const own     = (selectedType === "pp") ? ownRankOnBoard(country) : currentStats.expRank;
+    const rank    = own ?? ((selectedType === "pp") ? knownRankOnBoard(country) : null);
+    if (rank != null) {
+      return { rank, virtual: own == null, text: standingText(rank, country, own == null) };
+    }
+    if (country && currentStats.pp != null) {
+      return { rank: null, virtual: true, text: `Working out where you'd rank in ${boardLabel(country)}…` };
+    }
+    return { rank: null, virtual: false, text: "Loading your rank…" };
+  }
+
+  // Guard for a search resolving after the user moved on. Board identity is the
+  // real check — the rank is cached per board, so a stale resolve for a board
+  // that's no longer selected simply has nothing to say.
+  function boardStillLive(board) {
+    return overlay.classList.contains("open") && selectedType === "pp"
+        && selectedMode === "rank" && selectedRankCountry === board;
+  }
+  // Make sure we know the user's rank on the selected board, refreshing the
+  // hint + gate once it lands. Global / own-country are already known, so this
+  // only ever fires on a foreign board — and only once per board per session.
+  function ensureBoardRank() {
+    const board = (selectedType === "pp") ? selectedRankCountry : null;
+    if (!board || knownRankOnBoard(board) != null || currentStats.pp == null) return;
+    rankOnBoardAsync(board).then(() => {
+      if (!boardStillLive(board)) return;
+      // Re-run only what consumes the rank — NOT renderPresets, which clears
+      // customInput and would eat a rank typed while the search was running.
+      if (nextRankMode) applyNextRank(rankBoardHint());
+      else validateRankInput();
+    }).catch(() => {
+      if (!boardStillLive(board)) return;
+      modeHint.textContent = `⚠ Couldn't read the ${boardLabel(board)} board`;
+      modeHint.className   = "gt-mode-hint gt-mode-hint-error";
+      confirmBtn.disabled  = true;
+    });
+  }
+
+  // ── Target-rank PP lookup ───────────────────────
+  // Comparing RANKS only works on a board you're on: it's PP-sorted and you
+  // sit somewhere in it, so "target rank is above mine" already implies
+  // "target's PP is above mine" — no fetch needed. On a board you're NOT on
+  // that shortcut is gone, and the only way to know whether the target is
+  // really ahead of you is to look its PP up. Without that check you can set
+  // a goal you have already met, which renders as a useless 0 / 0 card.
+  const rankPpCache = new Map();   // `${board}|${rank}` -> PP, per modal session
+  let   rankPpSeq      = 0;        // bumped to invalidate in-flight lookups
+  let   rankPpDebounce = null;
+
+  function cancelRankPpLookup() {
+    rankPpSeq++;                   // any pending resolve is now stale
+    clearTimeout(rankPpDebounce);
+    rankPpDebounce = null;
+  }
+  // "#5" on the global board, "<flag> Germany #5" on a country board.
+  function rankWhere(board, rank) {
+    return board ? `${boardLabel(board)} #${rank}` : `#${rank}`;
+  }
+  const fmtPp = v => Math.round(v).toLocaleString();
+
+  // Fold a resolved target PP into the hint + confirm state. Doubles as a
+  // safety net on boards the rank check already cleared: if the two ever
+  // disagree (stale stats), PP is the ground truth and wins.
+  function applyRankPp(pp, rank, board) {
+    const cur = currentStats.pp;
+    if (cur != null && pp <= cur) {
+      modeHint.textContent = `⚠ You're already past ${rankWhere(board, rank)} (${fmtPp(pp)} PP)`;
+      modeHint.className   = "gt-mode-hint gt-mode-hint-error";
+      confirmBtn.disabled  = true;
+      return;
+    }
+    // The lookup is paid for either way, so spend it: the target's PP and the
+    // gap to it are what you actually want to know before committing.
+    const togo = cur != null ? ` \u2014 ${fmtPp(pp - cur)} to go` : "";
+    modeHint.textContent = `${rankWhere(board, rank)} \u00b7 ${fmtPp(pp)} PP${togo}`;
+    modeHint.className   = "gt-mode-hint";
+    rankFetchedRank      = rank;
+    confirmBtn.disabled  = false;
+  }
+
+  // Turn a standing into the Next-Rank hint + confirm state. Takes the hint
+  // object so the "where you stand" half is the SAME sentence the manual
+  // sub-mode shows — Next Rank just appends the rank it's stepping up to,
+  // which the global board never used to say either.
+  function applyNextRank(hint) {
+    if (hint.rank == null) {          // still loading / searching
+      modeHint.textContent = hint.text;
+      modeHint.className   = "gt-mode-hint";
+      confirmBtn.disabled  = true;
+      return;
+    }
+    if (hint.rank <= 1) {
+      modeHint.textContent = `⚠ ${hint.text} — nothing above to chase`;
+      modeHint.className   = "gt-mode-hint gt-mode-hint-error";
+      confirmBtn.disabled  = true;
+      return;
+    }
+    // The target PP itself is resolved by updateRankGoals() and surfaces on
+    // the card; here we only need the rank being chased.
+    rankFetchedRank      = hint.rank - 1;
+    modeHint.textContent = `${hint.text} — chasing #${hint.rank - 1}`;
+    modeHint.className   = "gt-mode-hint";
+    confirmBtn.disabled  = false;
+  }
+
+  // Validate a manually-entered target rank against the user's rank on the
+  // selected board. Split out of the custom-input handler so switching the
+  // leaderboard can re-run it without faking an input event.
+  //
+  // The rank check now works on EVERY board: the virtual rank is derived from
+  // PP, so "target rank is above mine" implies "target's PP is above mine"
+  // there too. That makes the gate uniform and instant once the board's rank is
+  // known, and demotes the PP lookup to what it should always have been —
+  // information, not a gate. (It stays a safety net inside applyRankPp.)
+  function validateRankInput() {
+    const enteredRank = parseInt(customInput.value);
+    const hint        = rankBoardHint();
+    cancelRankPpLookup();
+
+    if (isNaN(enteredRank) || enteredRank < 1 || hint.rank == null) {
+      // Nothing typed yet, or the board's rank is still being worked out —
+      // ensureBoardRank() re-runs this once it lands.
+      modeHint.textContent = hint.text;
+      modeHint.className   = "gt-mode-hint";
+      confirmBtn.disabled  = true;
+      return;
+    }
+    if (enteredRank >= hint.rank) {
+      modeHint.textContent = `⚠ ${hint.text} — pick a rank above that`;
+      modeHint.className   = "gt-mode-hint gt-mode-hint-error";
+      confirmBtn.disabled  = true;
+      return;
+    }
+    // Past the gate — enable now. Everything below only enriches the hint.
+    modeHint.textContent = hint.text;
+    modeHint.className   = "gt-mode-hint";
+    rankFetchedRank      = enteredRank;
+    confirmBtn.disabled  = false;
+
+    // EXP ranks come off the level board, not /leaders — no PP to look up.
+    if (selectedType !== "pp") return;
+
+    const board = selectedRankCountry;
+    const key   = `${board || ""}|${enteredRank}`;
+    if (rankPpCache.has(key)) { applyRankPp(rankPpCache.get(key), enteredRank, board); return; }
+
+    const seq = ++rankPpSeq;
+    rankPpDebounce = setTimeout(async () => {
+      try {
+        const pp = await getPpByRank(enteredRank, board || undefined);
+        if (seq !== rankPpSeq) return;   // the rank or the board moved on
+        rankPpCache.set(key, pp);
+        applyRankPp(pp, enteredRank, board);
+      } catch {
+        if (seq !== rankPpSeq) return;
+        // Country boards are small, so "rank #50 on a 30-player board" is a
+        // routine typo rather than an edge case. It can never resolve, so it
+        // gets blocked on every board, global included.
+        const where = board ? boardLabel(board) : "global";
+        modeHint.textContent = `⚠ No rank #${enteredRank} on the ${where} board`;
+        modeHint.className   = "gt-mode-hint gt-mode-hint-error";
+        confirmBtn.disabled  = true;
+      }
+    }, 350);
+  }
 
   const maxQuotesRow       = document.getElementById("gt-max-quotes-row");
   const maxCharsRow        = document.getElementById("gt-max-chars-row");
@@ -4728,14 +5428,17 @@ async function getExpRankByUsername(username) {
       return;
     }
     if (selectedMode === "rank") {
-      // If Next Rank is toggled, allow setting immediately unless already #1
       if (nextRankMode) {
-        confirmBtn.disabled = (currentStats.rank === 1);
+        // Only set once a usable next rank resolved — including the virtual
+        // one on a board the user isn't on.
+        confirmBtn.disabled = (rankFetchedRank == null || rankFetchedRank < 1);
         return;
       }
-      // enabled only once we have PP that's above current
-      const cur = currentStats.pp;
-      confirmBtn.disabled = !(rankFetchedPp != null && cur != null && rankFetchedPp > cur);
+      // Same signal as Next Rank: rankFetchedRank is only set once a target
+      // rank cleared the board's rank check. A stray call here mustn't undo
+      // that just because the (informational) PP lookup hasn't landed yet —
+      // applyRankPp blocks directly if the PP ever disagrees.
+      confirmBtn.disabled = (rankFetchedRank == null || rankFetchedRank < 1);
       return;
     }
     if (selectedMode === "average") {
@@ -4779,7 +5482,7 @@ async function getExpRankByUsername(username) {
 
   function renderPresets() {
     const cfg = GOAL_CONFIG[selectedType];
-    selectedValue = null; rankFetchedPp = null; rankFetchedRank = null; maxQuotesFetched = null;
+    selectedValue = null; rankFetchedRank = null; maxQuotesFetched = null;
     confirmBtn.disabled = true; customInput.value = "";
     customInput.classList.remove("gt-custom-input--grow");
     if (rivalAddBtn) { rivalAddBtn.style.display = "none"; rivalAddBtn.classList.remove("gt-rival-add-inline-btn--reserved"); } // re-shown by the rival branch
@@ -4899,55 +5602,26 @@ async function getExpRankByUsername(username) {
       nextRankRow.style.display = "block";
       nextRankToggleBtn.textContent = "⚡ Next Rank";
 
+      // Both sub-modes need "where do I stand on this board", so resolve it
+      // once here rather than once per branch.
+      ensureBoardRank();
+
+      // The manual rank input stays visible in BOTH sub-modes, so a specific
+      // rank can be typed without un-toggling Next Rank first (typing
+      // deactivates it — see the input handler below).
+      customInput.style.display = "";
+      customInput.type          = "number";
+      customInput.placeholder   = "Rank #";
+      modeHint.style.display    = "block";
+      modeHint.className        = "gt-mode-hint";
+      nextRankToggleBtn.classList.toggle("active", nextRankMode);
+
       if (nextRankMode) {
-        // ── Next-rank sub-mode ─────────────────────────────────
-        // Keep the manual rank input visible so the user can switch to a
-        // specific rank without first un-toggling Next Rank. Typing into
-        // the input will deactivate Next Rank in the input handler below.
-        customInput.style.display = "";
-        customInput.type          = "number";
-        customInput.placeholder   = "Rank #";
-        nextRankToggleBtn.classList.add("active");
-
-        const isExpType = selectedType === "exp";
-        const currentRankValue = isExpType ? currentStats.expRank : currentStats.rank;
-        const nr = currentRankValue != null ? currentRankValue - 1 : null;
-
-        if (nr != null && nr >= 1) {
-          // Just show the user's current rank — the resolved EXP/PP for the
-          // next rank is loaded asynchronously by updateRankGoals() /
-          // updateExpRankGoals() and surfaces in the goal display itself.
-          modeHint.textContent   = `Your current rank: #${currentRankValue}`;
-          modeHint.className     = "gt-mode-hint";
-          modeHint.style.display = "block";
-          rankFetchedRank = nr;
-          validateConfirm();
-        } else if (currentRankValue === 1) {
-          modeHint.textContent   = "⚠ Already at rank #1!";
-          modeHint.className     = "gt-mode-hint gt-mode-hint-error";
-          modeHint.style.display = "block";
-          confirmBtn.disabled    = true;
-        } else {
-          modeHint.textContent   = "Loading your rank…";
-          modeHint.className     = "gt-mode-hint";
-          modeHint.style.display = "block";
-          confirmBtn.disabled    = true;
-        }
+        cancelRankPpLookup();
+        rankFetchedRank = null;
+        applyNextRank(rankBoardHint());
       } else {
-        // ── Manual rank input sub-mode ─────────────────────────
-        customInput.style.display = "";
-        customInput.type          = "number";
-        customInput.placeholder   = "Rank #";
-        nextRankToggleBtn.classList.remove("active");
-
-        const relevantRank = (selectedType === "exp") ? currentStats.expRank : currentStats.rank;
-        console.log(`relevant Rank: ${relevantRank}`)
-        console.log(`current EXP Rank: ${currentStats.expRank}`)
-        modeHint.textContent      = relevantRank != null
-          ? `Your current rank: #${relevantRank}`
-          : "Loading your rank…";
-        modeHint.className        = "gt-mode-hint";
-        modeHint.style.display    = "block";
+        modeHint.textContent = rankBoardHint().text;
       }
     } else if (isPlayerMode) {
       customInput.type = "text";
@@ -5199,26 +5873,7 @@ async function getExpRankByUsername(username) {
         nextRankToggleBtn.classList.remove("active");
       }
 
-      const enteredRank = parseInt(customInput.value);
-      const curRank     = selectedType === "pp" ? currentStats.rank : currentStats.expRank;
-
-      if (isNaN(enteredRank) || enteredRank < 1) {
-        modeHint.textContent = curRank != null ? `Your current rank: #${curRank}` : "Loading your rank…";
-        modeHint.className   = "gt-mode-hint";
-        confirmBtn.disabled  = true;
-        return;
-      }
-
-      if (curRank != null && enteredRank >= curRank) {
-        modeHint.textContent = `⚠ Must be above your current rank (#${curRank})`;
-        modeHint.className   = "gt-mode-hint gt-mode-hint-error";
-        confirmBtn.disabled  = true;
-      } else {
-        modeHint.textContent = curRank != null ? `Your current rank: #${curRank}` : "Loading your rank…";
-        modeHint.className   = "gt-mode-hint";
-        rankFetchedRank      = enteredRank;
-        confirmBtn.disabled  = false;
-      }
+      validateRankInput();
       return;
     }
 
@@ -5282,7 +5937,7 @@ async function getExpRankByUsername(username) {
     if (selectedMode === "rank") {
       // Handle next rank toggle for PP and EXP
       nextRankMode    = !nextRankMode;
-      rankFetchedPp   = null;
+      cancelRankPpLookup();
       rankFetchedExp  = null;
       rankFetchedRank = null;
       customInput.value = "";
@@ -5475,6 +6130,9 @@ async function getExpRankByUsername(username) {
     updateAvgRowVisibility();
     // Improvement-mode row: races + improvement only
     updateImprovementRowVisibility();
+    // Leaderboard row: pp + rank only
+    updateCountryRowVisibility();
+    cancelRankPpLookup();
 
     renderPresets();
   }));
@@ -5490,6 +6148,8 @@ async function getExpRankByUsername(username) {
     updateReqRowVisibility();
     updateAvgRowVisibility();
     updateImprovementRowVisibility();
+    updateCountryRowVisibility();
+    cancelRankPpLookup();
     renderPresets();
   }));
 
@@ -6030,7 +6690,9 @@ async function getExpRankByUsername(username) {
     modeBtns.forEach(b => b.classList.toggle("active", b.dataset.mode === "gain"));
     filterBtns.forEach(b => b.classList.toggle("active", b.dataset.filter === "all"));
     selectedType = "exp"; selectedRec = "none"; selectedMode = "gain"; selectedFilter = "all";
-    rankFetchedPp = null; rankFetchedRank = null; nextRankMode = false;
+    rankFetchedRank = null; nextRankMode = false;
+    cancelRankPpLookup(); rankPpCache.clear(); virtRankCache.clear(); virtRankResolved.clear();
+    selectedRankCountry = null; reflectCountryButton(); closeCountryMenu();
     maxQuotesMode = false; maxQuotesKind = null; maxQuotesFetched = null; maxQuotesBaseline = null;
     maxCharsMode = false; maxCharsKind = null;
     selectedCharsKind = "regular";
@@ -6064,12 +6726,15 @@ async function getExpRankByUsername(username) {
     improvementTrackRow.style.display = "none";
     improvementWindowRow.style.display = "none";
     resetTargetUI(); // hides the sub-mode toggle + all Target rows
+    updateCountryRowVisibility(); // hides the Leaderboard row (type is exp here)
     modeRow.style.display = "block"; recRow.style.display = "block";
     renderPresets();
   }
   function closeModal() {
     overlay.classList.remove("open");
-    selectedValue = null; rankFetchedPp = null; rankFetchedRank = null; nextRankMode = false;
+    selectedValue = null; rankFetchedRank = null; nextRankMode = false;
+    cancelRankPpLookup();
+    selectedRankCountry = null; reflectCountryButton(); closeCountryMenu();
     maxQuotesMode = false; maxQuotesKind = null; maxQuotesFetched = null; maxQuotesBaseline = null;
     maxCharsMode = false; maxCharsKind = null;
     rivalFetchedName = null; rivalPendingName = null; clearTimeout(rivalDebounce);
@@ -6138,6 +6803,9 @@ async function getExpRankByUsername(username) {
   //   title         — bold heading, e.g. "Delete goal?"
   //   message       — body text directly under the title
   //   detail        — optional highlighted box (multi-line ok via \n)
+  //   detailNode    — optional DOM element rendered between the message
+  //                   and the detail box (e.g. a cloned goal card). The
+  //                   node is adopted into the modal and removed with it.
   //   warning       — optional warning line under the detail box
   //   confirmLabel  — confirm button text (default: "Confirm")
   //   cancelLabel   — cancel button text  (default: "Cancel")
@@ -6147,6 +6815,7 @@ async function getExpRankByUsername(username) {
     title,
     message,
     detail = "",
+    detailNode = null,
     warning = "",
     confirmLabel = "Confirm",
     cancelLabel = "Cancel",
@@ -6159,6 +6828,7 @@ async function getExpRankByUsername(username) {
         <div class="gt-confirm-modal">
           <div class="gt-confirm-title"></div>
           <div class="gt-confirm-message"></div>
+          <div class="gt-confirm-preview" style="display:none;"></div>
           <div class="gt-confirm-detail" style="display:none;"></div>
           <div class="gt-confirm-warning" style="display:none;"></div>
           <div class="gt-confirm-actions">
@@ -6170,6 +6840,11 @@ async function getExpRankByUsername(username) {
 
       overlay.querySelector(".gt-confirm-title").textContent = title;
       overlay.querySelector(".gt-confirm-message").textContent = message;
+      if (detailNode) {
+        const el = overlay.querySelector(".gt-confirm-preview");
+        el.appendChild(detailNode);
+        el.style.display = "";
+      }
       if (detail) {
         const el = overlay.querySelector(".gt-confirm-detail");
         el.textContent = detail;
@@ -6207,12 +6882,41 @@ async function getExpRankByUsername(username) {
     });
   }
 
-  // Thin wrapper for the goal-row ✕ button.
-  function confirmDeleteGoal(goalLabel) {
+  // Builds a purely visual snapshot of a goal card for the delete-confirm
+  // modal: the live section is deep-cloned (so streaks, progress fill,
+  // badges, req lines etc. appear exactly as currently rendered), every id
+  // is stripped so the clone can never be targeted by getElementById-based
+  // stat updates or collide with the real card, and the clone is pinned to
+  // the card's current on-screen width so wrapping and progress-bar
+  // proportions match the (user-resizable) widget. The wrapper carries the
+  // widget's background/border styling and pointer-events:none (CSS), so
+  // the cloned buttons are inert decoration. Returns null if the card is
+  // not in the DOM (caller falls back to the text label).
+  function buildGoalCardPreview(goalId) {
+    const section = document.getElementById(`${goalId}-goal-section`);
+    if (!section) return null;
+    const clone = section.cloneNode(true);
+    clone.removeAttribute("id");
+    clone.querySelectorAll("[id]").forEach(el => el.removeAttribute("id"));
+    const w = Math.round(section.getBoundingClientRect().width);
+    if (w > 0) clone.style.width = w + "px";
+    clone.style.maxWidth = "100%";
+    const wrap = document.createElement("div");
+    wrap.className = "gt-confirm-goal-preview";
+    wrap.appendChild(clone);
+    return wrap;
+  }
+
+  // Thin wrapper for the goal-row ✕ button. Shows the actual goal card
+  // (visual clone) when a goalId is given and the card exists; otherwise
+  // falls back to the plain text label in the detail box.
+  function confirmDeleteGoal(goalLabel, goalId) {
+    const preview = goalId ? buildGoalCardPreview(goalId) : null;
     return showConfirmModal({
       title: "Delete goal?",
       message: "Are you sure you want to delete this goal?",
-      detail: goalLabel,
+      detail: preview ? "" : goalLabel,
+      detailNode: preview,
       confirmLabel: "Delete",
       danger: true,
     });
@@ -6523,6 +7227,9 @@ async function getExpRankByUsername(username) {
         target: gainTarget,
         targetRank: selectedMode === "rank" ? rankFetchedRank : undefined,
         nextRank: (selectedMode === "rank" && nextRankMode) || undefined,
+        // Country board this rank goal is read from; absent = global (so
+        // every pre-existing rank goal keeps behaving exactly as before).
+        country: (selectedType === "pp" && selectedMode === "rank" && selectedRankCountry) || undefined,
         targetUsername: selectedMode === "player" ? playerFetchedName : undefined,
         maxQuotes: isMaxQuotes || undefined,
         maxQuotesKind: maxQuotesKindForGoal || undefined,
@@ -7013,6 +7720,16 @@ async function getExpRankByUsername(username) {
       document.getElementById(`${goalId}-label`).textContent = `${cfg.label} (solo)`;
     }
 
+    // Country-filtered PP rank goals name their leaderboard on the sub-line
+    // beneath the title — the same treatment race goals give requirements,
+    // and for the same reason: it qualifies the goal without crowding the
+    // label. Global (the default) shows nothing; an unqualified "rank #5"
+    // already reads as global.
+    if (type === "pp" && gd.targetRank && gd.country && reqLineEl) {
+      reqLineEl.textContent   = `${countryFlag(gd.country)} ${countryName(gd.country)}`;
+      reqLineEl.style.display = "block";
+    }
+
     // ── Auto-reset completed next-rank goals ───────────────────
     // When a next-rank goal is reached, kick off a refresh to track
     // the NEW next rank after a 5s delay (delay is pure UX so the
@@ -7290,6 +8007,11 @@ async function getExpRankByUsername(username) {
       quotesUnranked: unrankedTyped,
       playtime:       data.stats?.playTime,
       rank:           data.globalRank ?? null,
+      // Country board position (and which board it is). Needed so a
+      // country-filtered PP rank goal can tell whether the user is already
+      // above its target rank — globalRank says nothing about that.
+      country:        data.country ?? null,
+      countryRank:    data.countryRank ?? null,
       chars:          data.stats?.completionCharactersTyped,
       quickplayRaces: data.stats?.quickplayRaces,
       soloRaces:      data.stats?.soloRaces,
@@ -7325,11 +8047,13 @@ async function getExpRankByUsername(username) {
     if (data.quotesUnranked !== undefined) currentStats.quotesUnranked = data.quotesUnranked;
     currentStats.playtime       = data.playtime;
     currentStats.rank           = data.rank;
+    currentStats.country        = data.country;
+    currentStats.countryRank    = data.countryRank;
     currentStats.chars          = data.chars;
     currentStats.quickplayRaces = data.quickplayRaces;
     currentStats.soloRaces      = data.soloRaces;
     const gtDiff = gtStatsDiff(gtPrevSnap, currentStats,
-      ["exp", "pp", "races", "quotes", "quotesUnranked", "playtime", "rank", "chars", "quickplayRaces", "soloRaces"]);
+      ["exp", "pp", "races", "quotes", "quotesUnranked", "playtime", "rank", "countryRank", "chars", "quickplayRaces", "soloRaces"]);
     if (Object.keys(gtDiff).length > 0) {
       gtLog("User stats changed", Object.keys(gtDiff).join(", "), gtDiff);
     }
@@ -9226,7 +9950,17 @@ async function getExpRankByUsername(username) {
     // Ranked entries ratchet their best on PP; unranked (PP always 0) on WPM.
     if (cur) {
       const better = realRanked ? (p > cur.pp + RIVAL_PP_EPS) : (w > (cur.wpm || 0));
-      if (!better) return metaTouched; // no improvement; entry unchanged
+      if (!better) {
+        // [GT-RIVALDIAG] Drift detector: a ranked result with a HIGHER WPM but
+        // NOT a higher PP is dropped by the PP ratchet, so the stored wpm can
+        // lag your true best-WPM until a per-quote reconcile corrects it.
+        // Seeing this fire (typically right after a race) confirms the
+        // ratchet-asymmetry theory for the card corrections.
+        if (realRanked && Number.isFinite(w) && w > (cur.wpm || 0) + 0.001) {
+          gtLog("RIVALDIAG ratchet DROP (higher WPM, not higher PP)", `quote ${quoteId}`, { incoming: { wpm: w, pp: p }, kept: { wpm: cur.wpm, pp: cur.pp } });
+        }
+        return metaTouched; // no improvement; entry unchanged
+      }
     }
     store.quotes[quoteId] = { wpm: Number.isFinite(w) ? w : (cur ? cur.wpm : 0), pp: realRanked ? p : 0 };
     return true;
@@ -9883,7 +10617,10 @@ async function getExpRankByUsername(username) {
         .then(best => {
           if (best == null) { rememberAbsent(key, quoteId); return; }
           const st = loadRivalStore(name);
-          if (rivalMergeEntry(st, quoteId, best.wpm, best.pp)) { saveRivalStore(name); renderAllGoals(); }
+          if (rivalMergeEntry(st, quoteId, best.wpm, best.pp)) {
+            gtLog("RIVALDIAG on-demand fill merged", `${name === RIVAL_SELF_NAME ? "self" : name} — quote ${quoteId}`, { wpm: best.wpm, pp: best.pp });
+            saveRivalStore(name); renderAllGoals();
+          }
         })
         .catch(() => { /* gtApiFetch already escalated the shared backoff */ })
         .finally(() => rivalQuoteBestInFlight.delete(inflightKey));
@@ -9925,14 +10662,42 @@ async function getExpRankByUsername(username) {
   const PP_REBALANCE_EPS = 0.5;          // sub-PP deltas are float noise, not a rebalance
   const ppRebalanceChecked = new Set();  // quoteIds reconciled this session (per-race cost cap)
   let ppRebalanceRefetchActive = false;  // re-entrancy guard for the store reset itself
-  // A genuine server PP rebalance moves ESSENTIALLY EVERY quote; a single quote
-  // disagreeing is almost always local staleness (a post-race PB the /races merge
-  // missed). So we track DISTINCT mismatched quotes and only escalate to the full
+  // A genuine server PP rebalance moves MANY quotes; a single quote disagreeing
+  // is almost always isolated (local staleness, or a one-off per-race re-rating).
+  // So we track DISTINCT mismatched quotes and only escalate to the full
   // multi-store wipe once enough of them disagree — below that we reconcile each
   // quote in place. This stops one missed merge from nuking every store into a
   // slow full re-bulk (the "Syncing… 0/0" thrash).
-  const ppRebalanceMismatches = new Set(); // distinct quoteIds seen disagreeing this session
-  const PP_REBALANCE_ESCALATE = 4;         // distinct disagreeing quotes that confirm a real rebalance
+  //
+  // PERSISTED, not in-memory: the rival "Next vs" button navigates via
+  // window.location.href, so every jump is a FULL page reload and an in-memory
+  // Set reset to 0 on every quote — the counter could never reach the
+  // escalation threshold and a gradual (rolling) server rebalance was never
+  // detected. The evidence now lives in localStorage (universe-namespaced by
+  // the gt* proxy) as { quoteId: timestampMs }, aged out after a TTL so stale
+  // one-offs from days ago can't combine into a phantom "rebalance".
+  const PP_REBALANCE_ESCALATE = 4;                    // distinct disagreeing quotes that confirm a real rebalance
+  const PP_MISMATCH_LS_KEY    = "gt-pp-mismatch-log"; // localStorage (namespaced): { quoteId: tsMs }
+  const PP_MISMATCH_TTL_MS    = 24 * 60 * 60 * 1000;  // evidence window for "broad" disagreement
+  // WPM analogue of PP_REBALANCE_EPS. In practice a re-rating that moves PP
+  // also moves WPM, but the reverse-only case (WPM moved, PP within noise)
+  // would otherwise never heal — the check is free, so cover it. Values carry
+  // two decimals; anything beyond half a hundredth is a real change.
+  const WPM_REBALANCE_EPS     = 0.005;
+  function loadPpMismatchLog() {
+    let m = {};
+    try { m = JSON.parse(localStorage.getItem(PP_MISMATCH_LS_KEY) || "{}") || {}; } catch {}
+    const cutoff = Date.now() - PP_MISMATCH_TTL_MS;
+    let pruned = false;
+    for (const k of Object.keys(m)) {
+      if (!(Number(m[k]) > cutoff)) { delete m[k]; pruned = true; }
+    }
+    if (pruned) savePpMismatchLog(m);
+    return m;
+  }
+  function savePpMismatchLog(m) {
+    try { localStorage.setItem(PP_MISMATCH_LS_KEY, JSON.stringify(m)); } catch {}
+  }
 
   async function maybePpRebalanceRefetch(quoteId) {
     if (!quoteId) return;
@@ -9964,8 +10729,25 @@ async function getExpRankByUsername(username) {
     // a transient miss), not a clear rebalance — don't nuke everything on it.
     if (!live || !Number.isFinite(Number(live.pp))) return;
 
-    if (Math.abs(Number(live.pp) - Number(cached.pp)) <= PP_REBALANCE_EPS) {
-      ppRebalanceMismatches.delete(quoteId); // realigned (our own confirm caught up) — drop it
+    // [GT-RIVALDIAG] Per-quote reconcile (runs once per quote per session, on
+    // arrival at the quote): cached self entry vs the server's live bestRace.
+    // When it overwrites below, that IS the small correction on the card.
+    const liveWpm = Number(live.wpm);
+    const ppMoved  = Math.abs(Number(live.pp) - Number(cached.pp)) > PP_REBALANCE_EPS;
+    const wpmMoved = Number.isFinite(liveWpm) && Number.isFinite(Number(cached.wpm))
+      && Math.abs(liveWpm - Number(cached.wpm)) > WPM_REBALANCE_EPS;
+    gtLog("RIVALDIAG reconcile check", `quote ${quoteId}`, {
+      cached: { wpm: cached.wpm, pp: cached.pp },
+      live:   { wpm: liveWpm, pp: Number(live.pp) },
+      wpmDelta: Number((liveWpm - (Number(cached.wpm) || 0)).toFixed(3)),
+      ppDelta:  Number((Number(live.pp) - Number(cached.pp)).toFixed(3)),
+      willOverwrite: ppMoved || wpmMoved,
+    });
+    if (!ppMoved && !wpmMoved) {
+      // Aligned. If this quote had persisted mismatch evidence, it has since
+      // realigned (e.g. our own re-fetch caught up) — drop it from the log.
+      const mlog = loadPpMismatchLog();
+      if (mlog[quoteId] != null) { delete mlog[quoteId]; savePpMismatchLog(mlog); }
       return;
     }
 
@@ -9976,23 +10758,76 @@ async function getExpRankByUsername(username) {
     // other store. `quoteId` is already in ppRebalanceChecked (claimed up-front),
     // so we won't re-fetch it this session.
     const sStore = loadRivalStore(RIVAL_SELF_NAME);
+    gtLog("RIVALDIAG reconcile OVERWRITE", `quote ${quoteId} — self entry replaced with server bestRace`, { from: { wpm: sStore.quotes[quoteId]?.wpm, pp: sStore.quotes[quoteId]?.pp }, to: { wpm: Number(live.wpm), pp: Number(live.pp) } });
     sStore.quotes[quoteId] = { wpm: Number(live.wpm) || (sStore.quotes[quoteId]?.wpm || 0), pp: Number(live.pp) || 0 };
     saveRivalStore(RIVAL_SELF_NAME);
-    ensureCurrentQuoteForRivals(quoteId); // rivals could have moved too (real rebalance); a no-op on plain staleness
+    // Rivals were re-rated the same way — force-reconcile their entries for
+    // this quote too. (ensureCurrentQuoteForRivals SKIPS stores that already
+    // hold the quote — post-bulk that's always — so re-rated rival values
+    // would otherwise stay stale forever and near-tie wins be misclassified.)
+    reconcileRivalsForQuote(quoteId);
     renderAllGoals();
 
     // Only a BROAD disagreement confirms a real server-side rebalance. Until the
-    // distinct-quote count crosses the threshold, treat each mismatch as isolated
-    // staleness (already fixed in place above) rather than wiping every store.
-    ppRebalanceMismatches.add(quoteId);
-    if (ppRebalanceMismatches.size < PP_REBALANCE_ESCALATE) {
-      console.warn(`[Goal Tracker] PP mismatch on quote ${quoteId} (cached ${cached.pp} vs server ${live.pp}) — reconciled in place (${ppRebalanceMismatches.size}/${PP_REBALANCE_ESCALATE} distinct before a full re-sync).`);
+    // distinct-quote count crosses the threshold (within the TTL window), treat
+    // each mismatch as isolated (already fixed in place above) rather than
+    // wiping every store. Persisted, so evidence survives the full page reload
+    // every "Next vs" jump performs.
+    const mlog = loadPpMismatchLog();
+    mlog[quoteId] = Date.now();
+    savePpMismatchLog(mlog);
+    const distinct = Object.keys(mlog).length;
+    if (distinct < PP_REBALANCE_ESCALATE) {
+      console.warn(`[Goal Tracker] Server/cache mismatch on quote ${quoteId} (pp ${cached.pp} → ${live.pp}, wpm ${cached.wpm} → ${liveWpm}) — reconciled in place (${distinct}/${PP_REBALANCE_ESCALATE} distinct within 24h before a full re-sync).`);
       return;
     }
 
-    console.warn(`[Goal Tracker] PP rebalance confirmed — ${ppRebalanceMismatches.size} distinct quotes disagreed with the server; re-fetching all PP stores.`);
-    ppRebalanceMismatches.clear();
+    console.warn(`[Goal Tracker] PP rebalance confirmed — ${distinct} distinct quotes disagreed with the server within 24h; re-fetching all PP stores.`);
+    savePpMismatchLog({});
     refetchAllPpStores();
+  }
+
+  // Force-reconcile each referenced rival's entry for ONE quote against the
+  // server's live bestRace. Unlike ensureCurrentQuoteForRivals this OVERWRITES
+  // (correct whether the re-rated value went up or down) and does NOT skip
+  // stores that already hold the quote. Distinct in-flight key so an
+  // overlapping on-demand fill can't double-fetch the same rival+quote.
+  // A 404 / error leaves the cached entry (ambiguous — same caution as the
+  // self path's 404 handling). One render after all rivals settle.
+  function reconcileRivalsForQuote(quoteId) {
+    if (!isLeader || !quoteId || !rivalIdbReady) return;
+    const refMap = referencedRivalMap();
+    if (refMap.size === 0) return;
+    const jobs = [];
+    for (const name of refMap.keys()) {
+      const key = rivalStoreKey(name);
+      const inflightKey = `${key}:${quoteId}:reconcile`;
+      if (rivalQuoteBestInFlight.has(inflightKey)) continue;
+      const fetchName = rivalFetchNameFor(name);
+      if (!fetchName) continue;
+      const p = fetchRivalQuoteBest(fetchName, quoteId)
+        .then(best => {
+          if (best == null) return; // 404 — never raced (or transient); don't touch the entry
+          const st  = loadRivalStore(name);
+          const cur = st.quotes[quoteId];
+          const nw = Number(best.wpm), np = Number(best.pp);
+          const same = cur
+            && Math.abs((Number(cur.wpm) || 0) - (Number.isFinite(nw) ? nw : 0)) <= WPM_REBALANCE_EPS
+            && Math.abs((Number(cur.pp)  || 0) - (Number.isFinite(np) ? np : 0)) <= PP_REBALANCE_EPS;
+          if (same) return; // rival unaffected by this quote's re-rating
+          gtLog("RIVALDIAG rival reconcile OVERWRITE", `${name} — quote ${quoteId}`, { from: cur ? { wpm: cur.wpm, pp: cur.pp } : null, to: { wpm: nw, pp: np } });
+          st.quotes[quoteId] = {
+            wpm: Number.isFinite(nw) ? nw : (cur?.wpm || 0),
+            pp:  Number.isFinite(np) ? np : (cur?.pp  || 0),
+          };
+          saveRivalStore(name);
+        })
+        .catch(() => { /* gtApiFetch already escalated the shared backoff */ })
+        .finally(() => rivalQuoteBestInFlight.delete(inflightKey));
+      rivalQuoteBestInFlight.set(inflightKey, p);
+      jobs.push(p);
+    }
+    if (jobs.length) Promise.allSettled(jobs).then(() => renderAllGoals());
   }
 
   // Full re-fetch of every PP-bearing store (self + all managed rivals). The
@@ -10472,6 +11307,32 @@ async function getExpRankByUsername(username) {
     try { localStorage.setItem(TARGET_NEXT_CURSOR_KEY, JSON.stringify(map)); } catch {}
   }
 
+  // ── SPA navigation (shared by every "Next quote" / "Next vs" button) ──
+  // TypeGG is a SvelteKit app: its router intercepts clicks on same-origin
+  // <a> elements via a document-level listener. Synthesizing such a click
+  // therefore performs a CLIENT-SIDE route change — the page (and this
+  // content script) stay alive, so the IDB-hydrated stores, quote catalog
+  // and post-race retry chain all survive, exactly like the site's own
+  // next-quote button. The old `window.location.href = url` forced a full
+  // reload, cold-booting the extension (IDB re-hydration + store scans)
+  // in parallel with the site's own boot — the source of the
+  // "Finding quotes…" + heavy jank after every ⚔ Next click.
+  // Built-in fallback: if the router does NOT intercept (not started yet,
+  // future framework change), the anchor's default action is a normal
+  // navigation to the same URL — i.e. exactly the old behavior.
+  function gtNavigate(url) {
+    try {
+      const a = document.createElement("a");
+      a.href = url;
+      a.style.display = "none";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } catch {
+      window.location.href = url; // last-resort hard nav
+    }
+  }
+
   function onTargetNextClicked(goalId) {
     const gd = (goalData.improvement || []).find(g => g.id === goalId && goalIsImprovementTarget(g));
     if (!gd) return;
@@ -10505,7 +11366,7 @@ async function getExpRankByUsername(username) {
       cursors[goalId] = { sort, served };
       saveTargetNextCursors(cursors);
     }
-    window.location.href = `${location.origin}/solo/${encodeURIComponent(pick)}`;
+    gtNavigate(`${location.origin}/solo/${encodeURIComponent(pick)}`);
   }
 
   // ── Rendering ───────────────────────────────────────────────────────────────────
@@ -11262,6 +12123,12 @@ async function getExpRankByUsername(username) {
       // different quotes.
       if (settled && wrapEl) {
         const prev = prevRivalYouMap[goalId];
+        // [GT-RIVALDIAG] Any change of YOUR displayed value while sitting on the
+        // SAME quote is either a real new PB (right after a race) or the
+        // correction under investigation (on arrival, without racing).
+        if (prev && prev.quoteId === liveQid && prev.metric === metric && Math.abs(sv - prev.value) > RIVAL_PP_EPS) {
+          gtLog("RIVALDIAG card value changed on same quote", `quote ${liveQid}: ${rivalFmt(prev.value)} \u2192 ${rivalFmt(sv)} (${metric})`, { delta: Number((sv - prev.value).toFixed(3)) });
+        }
         if (prev && prev.quoteId === liveQid && prev.metric === metric && prev.value > RIVAL_PP_EPS && sv > prev.value + RIVAL_PP_EPS) {
           const delta = sv - prev.value;
           if (Number(delta.toFixed(2)) > 0) {
@@ -11412,8 +12279,9 @@ async function getExpRankByUsername(username) {
   }
 
   // The sorted Next-vs modes walk the pool one quote per click, wrapping at the
-  // end. Because clicking the button does a full page navigation (which wipes
-  // in-memory state), the cursor is persisted to localStorage: per goal we store
+  // end. The cursor is persisted to localStorage so it survives reloads and tab
+  // closes (navigation is client-side now via gtNavigate, but the cursor should
+  // outlive the session regardless): per goal we store
   // the sort it was built under plus a `served` map { quoteId -> self value (on
   // the goal's metric) at the time it was served }. A served quote is skipped
   // until the cycle wraps UNLESS you've since improved your score on it (current
@@ -11492,7 +12360,7 @@ async function getExpRankByUsername(username) {
     const url = (rivalSettings.nextUsesVsLink && gd.rival)
       ? `${base}/vs/${encodeURIComponent(gd.rival)}`
       : base;
-    window.location.href = url;
+    gtNavigate(url);
   }
 
   // The single-rival analogue of rivalWorseSortedByGap: given an explicit names
@@ -11534,7 +12402,7 @@ async function getExpRankByUsername(username) {
   // Per-rival "Next vs" (manage-rivals modal row). Mirrors onRivalNextClicked but
   // scoped to ONE rival: navigates to the next quote where that rival beats you.
   // Honors the global nextSort + nextUsesVsLink settings; sorted modes walk a
-  // per-(goal, rival) cursor (a full page nav wipes in-memory state).
+  // per-(goal, rival) cursor (persisted so it outlives reloads / tab closes).
   function onRivalRowNextClicked(goalId, name) {
     const gd = (goalData.rival || []).find(g => g.id === goalId);
     if (!gd) return;
@@ -11582,7 +12450,7 @@ async function getExpRankByUsername(username) {
     const url = rivalSettings.nextUsesVsLink
       ? `${base}/vs/${encodeURIComponent(name)}`
       : base;
-    window.location.href = url;
+    gtNavigate(url);
   }
 
   // ── Rank goal target computation ──────────────────────────────
@@ -11621,50 +12489,65 @@ async function getExpRankByUsername(username) {
       // ── Within-run page cache ────────────────────────────────
       // If 3 goals target ranks 45/50/55, they all live on page 3
       // of a perPage=20 leaderboard — fetch that page ONCE, not 3x.
+      // Keyed by BOARD + page: page 3 of the global board and page 3 of the
+      // Swiss board are different pages of different leaderboards.
       const pageCache = new Map();
-      const ppByRank = async (rank) => {
-        const perPage = 20;
-        const page    = Math.ceil(rank / perPage);
-        if (!pageCache.has(page)) {
-          const url = withLang(`https://api.typegg.io/v1/leaders?sort=totalPp&page=${page}&perPage=${perPage}`);
-          pageCache.set(page, gtApiFetch(url, { headers: authHeaders() }).then(r => {
-            if (!r.ok) throw new Error("Leaderboard fetch failed");
-            return r.json();
-          }));
+      const rowsPage = (page, country) => {
+        const key = `${country || ""}|${page}`;
+        if (!pageCache.has(key)) pageCache.set(key, fetchLeaderRows(page, country));
+        return pageCache.get(key);
+      };
+      const ppByRank = async (rank, country) =>
+        pickRankRow(await rowsPage(Math.ceil(rank / GT_LEADERS_PER_PAGE), country), rank, country).stats.totalPp;
+
+      // Where the user stands on a board — their real rank, or on a foreign
+      // board the one their PP would earn them. Computed at most once per
+      // board per run: the search costs a handful of fetches, and several
+      // goals may well share a board.
+      const rankCache = new Map();
+      const rankOn = (board) => {
+        const own = ownRankOnBoard(board);
+        if (own != null) return Promise.resolve(own);
+        if (!rankCache.has(board)) {
+          rankCache.set(board, virtualRankOnBoard(board, currentStats.pp, p => rowsPage(p, board)));
         }
-        const data = await pageCache.get(page);
-        const u = data.users?.find(u => u.stats?.ranking === rank);
-        if (!u) throw new Error(`Rank #${rank} not found on page ${page}`);
-        return u.stats.totalPp;
+        return rankCache.get(board);
       };
 
       for (let i = 0; i < goals.length; i++) {
         let gd = goals[i];
         if (!gd.targetRank) continue;
 
+        // Which board this goal reads (undefined = global).
+        const board = gd.country || null;
+
         if (gd.nextRank) {
           // ── Next-rank goal ─────────────────────────────────────
-          if (currentStats.rank == null || currentStats.rank <= 1) continue;
-          const nextRank = currentStats.rank - 1;
+          // On a foreign board this is the virtual rank — the user isn't on
+          // it, so "the rank above mine" is measured from where their PP
+          // would place them. Only fetched for goals that need it.
+          const ownRank = await rankOn(board);
+          if (ownRank == null || ownRank <= 1) continue;
+          const nextRank = ownRank - 1;
 
           if (gd.targetRank !== nextRank) {
             // User ranked up — reset baseline to current PP and track new next rank
             gd.baselinePp  = currentStats.pp;
             gd.targetRank  = nextRank;
-            const newPp    = await ppByRank(nextRank);
+            const newPp    = await ppByRank(nextRank, board);
             gd.target      = Math.max(0, newPp - gd.baselinePp);
             gd.targetLoaded = true;
-            gtLog("Next-rank goal — ranked up", `now chasing rank #${nextRank}`, { targetRank: nextRank, newBaselinePp: gd.baselinePp, rankHolderPp: newPp, ppNeeded: gd.target });
+            gtLog("Next-rank goal — ranked up", `now chasing rank #${nextRank}`, { board: board || "global", targetRank: nextRank, newBaselinePp: gd.baselinePp, rankHolderPp: newPp, ppNeeded: gd.target });
             goals[i] = gd;
             saveGoals("pp");
             continue;
           }
 
           // Same rank — dynamically update target PP in case the leaderboard shifted
-          const newPp    = await ppByRank(nextRank);
+          const newPp    = await ppByRank(nextRank, board);
           const newTarget = Math.max(0, newPp - gd.baselinePp);
           if (Math.abs(newTarget - gd.target) > 0.01 || !gd.targetLoaded) {
-            gtLog("Next-rank goal target updated", `rank #${nextRank} PP shifted — PP needed ${gd.target} → ${Math.round(newTarget * 100) / 100}`, { targetRank: nextRank, rankHolderPp: newPp, baselinePp: gd.baselinePp, target: { from: gd.target, to: newTarget } });
+            gtLog("Next-rank goal target updated", `rank #${nextRank} PP shifted — PP needed ${gd.target} → ${Math.round(newTarget * 100) / 100}`, { board: board || "global", targetRank: nextRank, rankHolderPp: newPp, baselinePp: gd.baselinePp, target: { from: gd.target, to: newTarget } });
             gd.target   = newTarget;
             gd.targetLoaded = true;
             goals[i] = gd;
@@ -11674,15 +12557,20 @@ async function getExpRankByUsername(username) {
         }
 
         // ── Regular rank goal ──────────────────────────────────
-        // Track targetRank if currentRank > targetRank, else track targetRank+1
-        const trackedRank = (currentStats.rank == null || currentStats.rank > gd.targetRank)
+        // Track targetRank if currentRank > targetRank, else track targetRank+1.
+        // Left on the cheap sync rank: a foreign board reads null and just
+        // tracks targetRank, which is right — the modal already refuses goals
+        // the user is past, so there's nothing to correct for and no reason to
+        // pay for a virtual-rank search on every poll.
+        const ownRank = ownRankOnBoard(board);
+        const trackedRank = (ownRank == null || ownRank > gd.targetRank)
           ? gd.targetRank
           : gd.targetRank + 1;
-        const newPp = await ppByRank(trackedRank);
+        const newPp = await ppByRank(trackedRank, board);
         const newTarget = Math.max(0, newPp - gd.baselinePp);
 
         if (Math.abs(newTarget - gd.target) > 0.01 || !gd.targetLoaded) {
-          gtLog("Rank goal target updated", `tracking rank #${trackedRank} — PP needed ${gd.target} → ${Math.round(newTarget * 100) / 100}`, { trackedRank, rankHolderPp: newPp, baselinePp: gd.baselinePp, target: { from: gd.target, to: newTarget } });
+          gtLog("Rank goal target updated", `tracking rank #${trackedRank} — PP needed ${gd.target} → ${Math.round(newTarget * 100) / 100}`, { board: board || "global", trackedRank, rankHolderPp: newPp, baselinePp: gd.baselinePp, target: { from: gd.target, to: newTarget } });
           gd.target = newTarget;
           gd.targetLoaded = true;
           goals[i] = gd;

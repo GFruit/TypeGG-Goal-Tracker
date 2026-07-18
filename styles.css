@@ -744,6 +744,109 @@
   white-space: nowrap; /* Keeps the text on one line */
 }
 
+/* ── Leaderboard (country) dropdown — PP + rank goals ─────────────
+   A custom select: ~250 options need a search box, and a native <select>
+   can't be themed to match the modal. Chrome matches #gt-modal (panel
+   surface + hairline border + the shared modal-in animation) so it reads
+   as part of the same surface, and the accent colors follow the Mode row
+   it sits under: emerald = a non-default board is active. */
+.gt-country-select { position: relative; margin-bottom: 12px; }
+
+.gt-country-btn {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; box-sizing: border-box;
+  padding: 6px 10px; border-radius: 7px;
+  border: 1.5px solid #374151; background: #111827;
+  color: #d1d5db; font-size: 12px; font-weight: 500;
+  text-align: left; cursor: pointer; transition: all 0.15s;
+}
+.gt-country-btn:hover { border-color: #4b5563; color: #e5e7eb; }
+/* A country is picked — same emerald the Mode row uses for its active
+   button, so "not the default" is legible at a glance. Global stays
+   neutral: it IS the default. */
+.gt-country-btn--set { border-color: #10b981; background: #022c22; color: #6ee7b7; }
+.gt-country-btn[aria-expanded="true"] { border-color: #10b981; }
+.gt-country-caret {
+  font-size: 9px; color: #6b7280; flex-shrink: 0;
+  transition: transform 0.15s;
+}
+.gt-country-btn[aria-expanded="true"] .gt-country-caret { transform: rotate(180deg); }
+
+/* Fixed-width flag cell keeps the names in one column. Windows has no flag
+   glyphs and falls back to rendering the two letters — same footprint. */
+.gt-country-flag {
+  flex-shrink: 0; width: 20px;
+  font-size: 14px; line-height: 1; text-align: center;
+}
+.gt-country-name {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.gt-country-menu {
+  position: absolute; top: calc(100% + 4px); left: 0; right: 0;
+  z-index: 10003;
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 6px;
+  background: #13172C;
+  border: 1px solid #374151;
+  border-radius: 10px;
+  box-shadow: 0 20px 40px -8px rgba(0,0,0,0.6);
+  animation: gt-modal-in 0.12s ease;
+}
+
+.gt-country-search {
+  width: 100%; box-sizing: border-box;
+  padding: 6px 8px; border-radius: 6px;
+  border: 1.5px solid #374151; background: #111827;
+  color: #d1d5db; font-size: 12px; outline: none;
+  transition: border-color 0.15s;
+}
+.gt-country-search::placeholder { color: #6b7280; }
+.gt-country-search:focus { border-color: #3b82f6; }
+
+/* ~7 rows tall: enough to scan without the menu swallowing the modal. */
+.gt-country-list {
+  max-height: 208px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 1px;
+  scrollbar-width: thin; scrollbar-color: #374151 transparent;
+}
+.gt-country-list::-webkit-scrollbar { width: 8px; }
+.gt-country-list::-webkit-scrollbar-track { background: transparent; }
+.gt-country-list::-webkit-scrollbar-thumb { background: #374151; border-radius: 999px; }
+.gt-country-list::-webkit-scrollbar-thumb:hover { background: #4b5563; }
+
+.gt-country-opt {
+  display: flex; align-items: center; gap: 8px;
+  flex-shrink: 0; width: 100%; box-sizing: border-box;
+  padding: 6px 8px; border: none; border-radius: 6px;
+  background: transparent; color: #9ca3af;
+  font-size: 12px; text-align: left; cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+/* Two distinct states, and they stack: .selected = the current board,
+   --active = the keyboard cursor (kept in sync with hover, so the pointer
+   and the arrow keys never disagree about which row is "live"). */
+.gt-country-opt.selected { background: #022c22; color: #6ee7b7; }
+.gt-country-opt:hover,
+.gt-country-opt.gt-country-opt--active { background: #374151; color: #e5e7eb; }
+.gt-country-opt.selected:hover,
+.gt-country-opt.selected.gt-country-opt--active { background: #064e3b; color: #a7f3d0; }
+
+.gt-country-opt-code {
+  flex-shrink: 0; margin-left: auto;
+  font-size: 10px; letter-spacing: 0.06em; color: #4b5563;
+}
+.gt-country-opt.selected .gt-country-opt-code { color: #059669; }
+
+/* Hairline separating Global (the "no filter" option) from the countries. */
+.gt-country-sep { flex-shrink: 0; height: 1px; margin: 3px 4px; background: #374151; }
+
+.gt-country-empty {
+  padding: 12px 8px; text-align: center;
+  font-size: 11px; color: #6b7280;
+}
+
 .gt-presets { display: flex; flex-wrap: wrap; gap: 5px; flex: 1; }
 
 .gt-preset-chip {
@@ -870,6 +973,33 @@
   font-size: 12px;
   color: #9ca3af;
   margin-bottom: 10px;
+}
+
+/* Slot for a DOM preview (e.g. cloned goal card) between the message and
+   the text detail box. Centers its content so a card narrower than the
+   modal sits in the middle. */
+.gt-confirm-preview {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 12px;
+}
+
+/* Widget-look shell around the cloned goal card so the preview reads as
+   the exact card on the widget. Mirrors the #goal-tracker background,
+   border, radius and padding (minus positioning/resize). pointer-events
+   is killed for the whole subtree: the cloned ✕ / edit / next buttons
+   are decoration only. */
+.gt-confirm-goal-preview {
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.03) 0%, rgba(255, 255, 255, 0.03) 100%), rgba(0, 3, 27, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  color: white;
+  border-radius: 10px;
+  padding: 10px 12px;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
+  pointer-events: none;
+  user-select: none;
 }
 
 .gt-confirm-detail {
@@ -1709,5 +1839,72 @@ body.gt-app-loggedout .gt-widget-detached { display: none !important; }
   background: #172554;
   color: #93c5fd;
 }
+
+/* Destructive reset action at the bottom of the edit popover. The wrap owns the
+   divider + spacing so its contents can swap between the button and the inline
+   confirm without the separator moving. */
+.gt-edit-reset-wrap {
+  position: relative;
+  margin: 6px 4px 2px;
+  padding-top: 8px;
+}
+.gt-edit-reset-wrap:not(:first-child)::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 1px;
+  background: #374151;
+}
+.gt-edit-reset-btn {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid rgba(185, 28, 28, 0.5);
+  border-radius: 6px;
+  background: rgba(185, 28, 28, 0.14);
+  color: #fca5a5;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.gt-edit-reset-btn:hover {
+  background: #b91c1c;
+  border-color: #b91c1c;
+  color: #ffffff;
+}
+.gt-edit-reset-btn:focus-visible {
+  outline: 2px solid #fca5a5;
+  outline-offset: 1px;
+}
+
+/* Inline confirm state — replaces the button in place, stays in the popover. */
+.gt-edit-reset-prompt {
+  font-size: 11px;
+  line-height: 1.35;
+  color: #e5e7eb;
+  text-align: center;
+  padding: 1px 2px 7px;
+}
+.gt-edit-reset-actions { display: flex; gap: 6px; }
+.gt-edit-reset-cancel,
+.gt-edit-reset-go {
+  flex: 1;
+  padding: 7px 8px;
+  border: none;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.gt-edit-reset-cancel { background: #374151; color: #e5e7eb; }
+.gt-edit-reset-cancel:hover { background: #4b5563; }
+.gt-edit-reset-cancel:focus-visible { outline: 2px solid #60a5fa; outline-offset: 1px; }
+.gt-edit-reset-go { background: #b91c1c; color: #ffffff; }
+.gt-edit-reset-go:hover { background: #991b1b; }
+.gt-edit-reset-go:focus-visible { outline: 2px solid #fca5a5; outline-offset: 1px; }
 
 .gt-edit-popover-wide { min-width: 264px; }
