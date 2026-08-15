@@ -4459,7 +4459,40 @@ function gtMain() {
     if (!u || u.country !== country) throw new Error(`${country} rank #${rank} not found on page ${page}`);
     return u;
   }
+  // ── One-shot leaderboard rank calculator (/leaders/rank) ────────
+  // Answers "rank ⇄ value" in a single request instead of paginating the
+  // board. Pass exactly one selector: { userId } | { value } | { rank }.
+  //   userId → that user's { rank, value, valueUntilNextRank }
+  //   value  → the rank that value would land at (+ gap up one rank)
+  //   rank   → the value held at that rank
+  // valueUntilNextRank is null at rank 1; `country` filters to a country board.
+  // NOTE: this endpoint ignores the `language` param (verified), so it only
+  // speaks the global/English world. PP (totalPp) is language-scoped, so PP
+  // lookups use it ONLY in the English universe (GT_FAST_PP); other universes
+  // keep the paginated /leaders path. Level (EXP) is global everywhere, so it
+  // always uses this. Returns null on 404 (no such rank / user not on board).
+  async function leadersRankCalc(sort, selector, opts = {}) {
+    const url = new URL("https://api.typegg.io/v1/leaders/rank");
+    url.searchParams.set("sort", sort);
+    if      (selector.userId != null) url.searchParams.set("userId", selector.userId);
+    else if (selector.value  != null) url.searchParams.set("value",  selector.value);
+    else if (selector.rank   != null) url.searchParams.set("rank",   selector.rank);
+    if (opts.country) url.searchParams.set("country", opts.country);
+    const r = await gtApiFetch(url.toString(), { headers: authHeaders() });
+    if (r.status === 404) return null;
+    if (!r.ok) throw new Error(`leaders/rank ${sort} failed: ${r.status}`);
+    return r.json(); // { rank, value, valueUntilNextRank }
+  }
+  // PP (totalPp) may use the fast endpoint only in the English world, because
+  // /leaders/rank can't scope PP by language universe. EXP is global — always fast.
+  const GT_FAST_PP = (GT_LANGUAGE === "English");
+
   async function getPpByRank(targetRank, country) {
+    if (GT_FAST_PP) {
+      const r = await leadersRankCalc("totalPp", { rank: targetRank }, { country });
+      if (!r) throw new Error(`Rank #${targetRank} not found`);
+      return r.value;
+    }
     const page = Math.ceil(targetRank / GT_LEADERS_PER_PAGE);
     return pickRankRow(await fetchLeaderRows(page, country), targetRank, country).stats.totalPp;
   }
@@ -4477,6 +4510,12 @@ function gtMain() {
   // — the gallop re-reads pages, and the bisect lands back on one of them.
   const GT_MAX_BOARD_PAGES = 4096;
   async function virtualRankOnBoard(country, userPp, fetchPage) {
+    // English world: one request places the PP on the board — no page walk.
+    if (GT_FAST_PP) {
+      const r = await leadersRankCalc("totalPp", { value: userPp }, { country });
+      if (!r || r.rank == null) throw new Error(`Couldn't place PP on the ${country} board`);
+      return r.rank;
+    }
     const per = GT_LEADERS_PER_PAGE;
     // Ties go to the incumbent: you don't outrank someone by merely matching
     // their PP, so `<=` finds the first player you do NOT beat — that's your
@@ -4521,27 +4560,6 @@ function gtMain() {
     return data.stats.totalPp;
   }
 
-  async function getExpByRank(targetRank) {
-    const perPage = 20;
-    const page    = Math.ceil(targetRank / perPage);
-    
-    // Use sort=level to access the Experience/Level leaderboard
-    const url     = `https://api.typegg.io/v1/leaders?sort=level&page=${page}&perPage=${perPage}`;
-    
-    const response = await gtApiFetch(url, { headers: authHeaders() });
-    if (!response.ok) throw new Error("Leaderboard fetch failed");
-    
-    const data = await response.json();
-    
-    // Find the user whose ranking in the stats block matches your target
-    const targetUser = data.users?.find(u => u.stats?.ranking === targetRank);
-    
-    if (!targetUser) throw new Error(`Rank #${targetRank} not found on page ${page}`);
-    
-    // Return the raw experience value
-    return targetUser.stats.experience;
-}
-
 async function getExpByUsername(username) {
     const url = `https://api.typegg.io/v1/users/${encodeURIComponent(username)}`;
     
@@ -4559,71 +4577,11 @@ async function getExpByUsername(username) {
 }
 
 async function getExpRankByUsername(username) {
-  if (!username || typeof username !== 'string') {
-    throw new Error('Username is required');
-  }
-
-  const target = username.toLowerCase();
-  const perPage = 100;                    // actual enforced maximum
-
-  // Search a single page for the target user. Returns rank or null.
-  async function searchPage(page) {
-    const url = new URL('https://api.typegg.io/v1/leaders');
-    url.searchParams.set('sort', 'level');
-    url.searchParams.set('perPage', perPage.toString());
-    url.searchParams.set('page', page.toString());
-
-    const response = await gtApiFetch(url.toString(), {
-      headers: { 'Accept': 'application/json' },
-    });
-    if (!response.ok) {
-      throw new Error(`TypeGG API error: ${response.status} ${response.statusText}`);
-    }
-    const data = await response.json();
-    const user = data.users?.find(u => u.username.toLowerCase() === target);
-    return {
-      rank: user?.stats?.ranking ?? null,
-      totalPages: data.totalPages || 1,
-    };
-  }
-
-  try {
-    // ── Fast path: try the page where we last found the user ─────
-    // Rank drifts slowly, so the cached page is usually still correct.
-    // This replaces the 10-page scan with 1 request in the common case.
-    const cached = JSON.parse(localStorage.getItem("gt-exp-rank-page") || "null");
-    if (cached?.page) {
-      const { rank } = await searchPage(cached.page);
-      if (rank != null) {
-        console.log(`Found ${username} at rank ${rank} (cached page ${cached.page})`);
-        return rank;
-      }
-    }
-
-    // ── Slow path: full scan, saving the page for next time ──────
-    let page = 1;
-    let totalPages = 1;
-    while (page <= totalPages) {
-      // Skip the page we already tried in the fast path
-      if (cached?.page === page) { page++; continue; }
-      const result = await searchPage(page);
-      if (page === 1) totalPages = result.totalPages;
-      if (result.rank != null) {
-        console.log(`Found ${username} at rank ${result.rank} (page ${page})`);
-        localStorage.setItem("gt-exp-rank-page", JSON.stringify({ page }));
-        return result.rank;
-      }
-      page++;
-    }
-
-    // User not in the top 1000 — clear any stale cached page
-    console.log("user not found in top 1000");
-    localStorage.removeItem("gt-exp-rank-page");
-    return null;
-  } catch (error) {
-    console.error('Failed to fetch Level rank:', error);
-    throw error;
-  }
+  if (!username || typeof username !== "string") throw new Error("Username is required");
+  // One request: the level board is global in every universe, so there's no
+  // language scoping and no page scan. null = the user isn't on the board.
+  const r = await leadersRankCalc("level", { userId: username });
+  return r?.rank ?? null;
 }
 
 // ── EXP Rank tracking wrapper ────────────────────────────────────
@@ -12897,62 +12855,52 @@ async function getExpRankByUsername(username) {
   // ── Rank goal target computation ──────────────────────────────
   // Returns the effective target PP and the rank being tracked against,
   // based on where the player currently sits relative to their target rank.
-  async function computeRankTarget(targetRank, currentRank) {
-    // Player is still trying to reach the target rank — track that rank's PP
-    if (currentRank == null || currentRank > targetRank) {
-      const pp = await getPpByRank(targetRank);
-      return { pp, trackedRank: targetRank };
-    }
-    // Player is AT or ABOVE the target rank — track the rank just below (targetRank + 1)
-    // so the goal shows how much PP buffer they have before dropping
-    const pp = await getPpByRank(targetRank + 1);
-    return { pp, trackedRank: targetRank + 1 };
-  }
-
-  async function computeExpRankTarget(targetRank, currentRank) {
-    // Player is still trying to reach the target rank — track that rank's EXP
-    if (currentRank == null || currentRank > targetRank) {
-      const exp = await getExpByRank(targetRank);
-      return { exp, trackedRank: targetRank };
-    }
-    // Player is AT or ABOVE the target rank — track the rank just below (targetRank + 1)
-    // so the goal shows how much EXP buffer they have before dropping
-    const exp = await getExpByRank(targetRank + 1);
-    return { exp, trackedRank: targetRank + 1 };
-  }
-
   async function updateRankGoals() {
     try {
       const goals = goalData.pp;
       if (!goals || goals.length === 0) return;
       if (currentStats.pp == null) return;
+      let changed = false;
 
-      // ── Within-run page cache ────────────────────────────────
-      // If 3 goals target ranks 45/50/55, they all live on page 3
-      // of a perPage=20 leaderboard — fetch that page ONCE, not 3x.
-      // Keyed by BOARD + page: page 3 of the global board and page 3 of the
-      // Swiss board are different pages of different leaderboards.
-      const pageCache = new Map();
-      const rowsPage = (page, country) => {
-        const key = `${country || ""}|${page}`;
-        if (!pageCache.has(key)) pageCache.set(key, fetchLeaderRows(page, country));
-        return pageCache.get(key);
+      const self = getAuth().username;
+
+      // PP held at a given rank on a board. Deduped within the run since
+      // several goals may want the same rank. getPpByRank uses the fast
+      // /leaders/rank path in the English world and the paginated /leaders
+      // path in a language universe.
+      const ppAtCache = new Map();               // `${board}|${rank}` → Promise<pp>
+      const ppAtRank = (rank, board) => {
+        const key = `${board || ""}|${rank}`;
+        if (!ppAtCache.has(key)) ppAtCache.set(key, getPpByRank(rank, board || undefined));
+        return ppAtCache.get(key);
       };
-      const ppByRank = async (rank, country) =>
-        pickRankRow(await rowsPage(Math.ceil(rank / GT_LEADERS_PER_PAGE), country), rank, country).stats.totalPp;
 
-      // Where the user stands on a board — their real rank, or on a foreign
-      // board the one their PP would earn them. Computed at most once per
-      // board per run: the search costs a handful of fetches, and several
-      // goals may well share a board.
-      const rankCache = new Map();
-      const rankOn = (board) => {
-        const own = ownRankOnBoard(board);
-        if (own != null) return Promise.resolve(own);
-        if (!rankCache.has(board)) {
-          rankCache.set(board, virtualRankOnBoard(board, currentStats.pp, p => rowsPage(p, board)));
-        }
-        return rankCache.get(board);
+      // My rank on a board + the PP held by the rank directly above me
+      // (ppAbove is null when I'm already #1). English world: a single
+      // /leaders/rank request gives both — userId on a board I'm on, value on
+      // a foreign one, where valueUntilNextRank is the gap up from my slot. A
+      // language universe falls back to my real/virtual rank plus a paginated
+      // lookup of the rank above. Computed once per board per run.
+      const standingCache = new Map();           // board → Promise<{rank, ppAbove}|null>
+      const myStanding = (board) => {
+        if (!standingCache.has(board)) standingCache.set(board, (async () => {
+          if (GT_FAST_PP) {
+            const onBoard = !board || board === currentStats.country;
+            const sel = (onBoard && self) ? { userId: self } : { value: currentStats.pp };
+            const r = await leadersRankCalc("totalPp", sel, { country: board || undefined });
+            if (!r || r.rank == null) return null;
+            const ppAbove = r.valueUntilNextRank == null ? null : currentStats.pp + r.valueUntilNextRank;
+            return { rank: r.rank, ppAbove };
+          }
+          const own = ownRankOnBoard(board);
+          const rank = own != null
+            ? own
+            : await virtualRankOnBoard(board, currentStats.pp, p => fetchLeaderRows(p, board));
+          if (rank == null) return null;
+          const ppAbove = rank > 1 ? await ppAtRank(rank - 1, board) : null;
+          return { rank, ppAbove };
+        })());
+        return standingCache.get(board);
       };
 
       for (let i = 0; i < goals.length; i++) {
@@ -12964,34 +12912,36 @@ async function getExpRankByUsername(username) {
 
         if (gd.nextRank) {
           // ── Next-rank goal ─────────────────────────────────────
-          // On a foreign board this is the virtual rank — the user isn't on
-          // it, so "the rank above mine" is measured from where their PP
-          // would place them. Only fetched for goals that need it.
-          const ownRank = await rankOn(board);
-          if (ownRank == null || ownRank <= 1) continue;
-          const nextRank = ownRank - 1;
+          // myStanding gives my rank on the board and the PP held by the rank
+          // directly above me. On a foreign board the rank is the virtual one
+          // (where my PP would place me), so the feature works there too.
+          const st = await myStanding(board);
+          if (!st || st.rank == null || st.rank <= 1 || st.ppAbove == null) continue;
+          const nextRank = st.rank - 1;
+          const newPp    = st.ppAbove; // PP held by the rank above me
 
           if (gd.targetRank !== nextRank) {
-            // User ranked up — reset baseline to current PP and track new next rank
-            gd.baselinePp  = currentStats.pp;
-            gd.targetRank  = nextRank;
-            const newPp    = await ppByRank(nextRank, board);
-            gd.target      = Math.max(0, newPp - gd.baselinePp);
+            // User ranked up (or slipped) — reset baseline to current PP and
+            // track whoever is one rank above now.
+            gd.baselinePp   = currentStats.pp;
+            gd.targetRank   = nextRank;
+            gd.target       = Math.max(0, newPp - gd.baselinePp);
             gd.targetLoaded = true;
             gtLog("Next-rank goal — ranked up", `now chasing rank #${nextRank}`, { board: board || "global", targetRank: nextRank, newBaselinePp: gd.baselinePp, rankHolderPp: newPp, ppNeeded: gd.target });
             goals[i] = gd;
+            changed = true;
             saveGoals("pp");
             continue;
           }
 
-          // Same rank — dynamically update target PP in case the leaderboard shifted
-          const newPp    = await ppByRank(nextRank, board);
+          // Same rank — refresh the target in case the rank above shifted PP.
           const newTarget = Math.max(0, newPp - gd.baselinePp);
           if (Math.abs(newTarget - gd.target) > 0.01 || !gd.targetLoaded) {
             gtLog("Next-rank goal target updated", `rank #${nextRank} PP shifted — PP needed ${gd.target} → ${Math.round(newTarget * 100) / 100}`, { board: board || "global", targetRank: nextRank, rankHolderPp: newPp, baselinePp: gd.baselinePp, target: { from: gd.target, to: newTarget } });
             gd.target   = newTarget;
             gd.targetLoaded = true;
             goals[i] = gd;
+            changed = true;
             saveGoals("pp");
           }
           continue;
@@ -13007,7 +12957,7 @@ async function getExpRankByUsername(username) {
         const trackedRank = (ownRank == null || ownRank > gd.targetRank)
           ? gd.targetRank
           : gd.targetRank + 1;
-        const newPp = await ppByRank(trackedRank, board);
+        const newPp = await ppAtRank(trackedRank, board);
         const newTarget = Math.max(0, newPp - gd.baselinePp);
 
         if (Math.abs(newTarget - gd.target) > 0.01 || !gd.targetLoaded) {
@@ -13015,9 +12965,11 @@ async function getExpRankByUsername(username) {
           gd.target = newTarget;
           gd.targetLoaded = true;
           goals[i] = gd;
+          changed = true;
           saveGoals("pp");
         }
       }
+      if (changed) renderAllGoals();
     } catch (err) {
       console.error("Rank update failed:", err);
     }
@@ -13030,23 +12982,20 @@ async function getExpRankByUsername(username) {
       const goals = goalData.exp;
       if (!goals || goals.length === 0) return;
       if (currentStats.exp == null) return;
+      let changed = false;
 
-      // ── Within-run page cache (same pattern as updateRankGoals) ─
-      const pageCache = new Map();
-      const expByRank = async (rank) => {
-        const perPage = 20;
-        const page    = Math.ceil(rank / perPage);
-        if (!pageCache.has(page)) {
-          const url = `https://api.typegg.io/v1/leaders?sort=level&page=${page}&perPage=${perPage}`;
-          pageCache.set(page, gtApiFetch(url, { headers: authHeaders() }).then(r => {
-            if (!r.ok) throw new Error("Leaderboard fetch failed");
-            return r.json();
+      // XP held at a given rank — one /leaders/rank request each (the level
+      // board is global in every universe). Deduped within the run so two
+      // goals targeting the same rank share a request.
+      const expAtCache = new Map();              // rank → Promise<xp>
+      const expByRank = (rank) => {
+        if (!expAtCache.has(rank)) {
+          expAtCache.set(rank, leadersRankCalc("level", { rank }).then(r => {
+            if (!r) throw new Error(`EXP rank #${rank} not found`);
+            return r.value;
           }));
         }
-        const data = await pageCache.get(page);
-        const u = data.users?.find(u => u.stats?.ranking === rank);
-        if (!u) throw new Error(`Rank #${rank} not found on page ${page}`);
-        return u.stats.experience;
+        return expAtCache.get(rank);
       };
 
       for (let i = 0; i < goals.length; i++) {
@@ -13067,6 +13016,7 @@ async function getExpRankByUsername(username) {
             gd.targetLoaded = true;
             gtLog("Next-EXP-rank goal — ranked up", `now chasing EXP rank #${nextRank}`, { targetRank: nextRank, newBaselineExp: gd.baselineExp, rankHolderExp: newExp, expNeeded: gd.target });
             goals[i] = gd;
+            changed = true;
             saveGoals("exp");
             continue;
           }
@@ -13079,6 +13029,7 @@ async function getExpRankByUsername(username) {
             gd.target   = newTarget;
             gd.targetLoaded = true;
             goals[i] = gd;
+            changed = true;
             saveGoals("exp");
           }
           continue;
@@ -13096,9 +13047,11 @@ async function getExpRankByUsername(username) {
           gd.target = newTarget;
           gd.targetLoaded = true;
           goals[i] = gd;
+          changed = true;
           saveGoals("exp");
         }
       }
+      if (changed) renderAllGoals();
     } catch (err) {
       console.error("Exp rank update failed:", err);
     }
