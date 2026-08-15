@@ -4,6 +4,50 @@ function gtMain() {
   // don't build a second one.
   if (document.getElementById("goal-tracker")) return;
 
+  // ── Show / hide from the toolbar popup ──────────────────────────
+  // The browser-action popup (popup.html) flips a single chrome.storage
+  // key, "gtHideGoals". We mirror it onto a class on <html> and let one
+  // injected CSS rule hide every widget (main plus detached, current or
+  // future) at once. We use visibility:hidden, NOT display:none: a
+  // display:none widget reports 0x0 for offsetWidth / getBoundingClientRect,
+  // and the position system re-derives each widget's edge anchors from those
+  // zeros (ResizeObserver / refreshGroupAnchors), which would resave them at
+  // the top-left corner and lose the real spot. visibility:hidden keeps the
+  // layout box, so geometry reads stay correct while hidden; pointer-events:
+  // none lets clicks pass through. chrome.storage.get is async, so a user
+  // who chose "hidden" may briefly see the widgets before this resolves;
+  // that flash is the only trade-off and it keeps the wiring tiny.
+  (function gtVisibilityFromPopup() {
+    const HIDE_KEY = "gtHideGoals";
+
+    if (!document.getElementById("gt-visibility-style")) {
+      const style = document.createElement("style");
+      style.id = "gt-visibility-style";
+      style.textContent = "html.gt-goals-hidden .gt-widget { visibility: hidden !important; pointer-events: none !important; }";
+      (document.head || document.documentElement).appendChild(style);
+    }
+
+    const apply = (hidden) => {
+      document.documentElement.classList.toggle("gt-goals-hidden", !!hidden);
+    };
+
+    // storage / onChanged are available to content scripts, but guard anyway
+    // to stay in step with the rest of this file's defensive style.
+    if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
+      chrome.storage.local.get(HIDE_KEY, (res) => {
+        // Ignore lookup failures (e.g. context invalidated on reload).
+        if (chrome.runtime && chrome.runtime.lastError) return;
+        apply(res && res[HIDE_KEY]);
+      });
+
+      if (chrome.storage.onChanged) {
+        chrome.storage.onChanged.addListener((changes, area) => {
+          if (area === "local" && changes[HIDE_KEY]) apply(changes[HIDE_KEY].newValue);
+        });
+      }
+    }
+  })();
+
   // ── Language universes ("profiles") ────────────────────────────
   // Each universe (typegg.io, de.typegg.io, fr.typegg.io, …) is a separate
   // origin, but we ALSO namespace all of OUR own state (localStorage keys,
@@ -12023,9 +12067,12 @@ async function getExpRankByUsername(username) {
       if (sv > rv + RIVAL_PP_EPS) { wins++; continue; } // you beat them all here
       // Not a win → candidate for the "⚔ Next vs" pool (a quote to go beat):
       if (se) {
-        // You have a recorded time and you're behind (ties are neither a win
-        // nor a target — you've matched but not beaten the leader).
-        if (sv < rv - RIVAL_PP_EPS) worse.push(qid);
+        // You have a recorded time and you're behind OR tied. A tie is not a
+        // win (a win means strictly beating the leader), so it still counts as
+        // an outstanding win on the Wins line — which means it must also be a
+        // "⚔ Next vs" target, or the button would claim "All Quotes beaten"
+        // while the wins line still shows some to go.
+        worse.push(qid);
       } else if (!requireBoth && selfDone) {
         // Default ("Rival's quotes") mode: a quote you've NEVER raced is a valid
         // target — you want to beat all the rival scores, including new ones.
@@ -12654,7 +12701,8 @@ async function getExpRankByUsername(username) {
   }
 
   // The Next-vs pool sorted by gap on the goal's OWN metric. Gap = rival value −
-  // your value (always > 0 for worse quotes). "closest" → smallest gap first,
+  // your value (> 0 when behind, ≈ 0 for a tie — ties are targets since a win
+  // requires strictly beating the leader). "closest" → smallest gap first,
   // "biggest" → largest first. Returns an array of quoteIds. Recomputed every
   // click off the live stores, so it tracks the rival's new quotes / PBs.
   function rivalWorseSortedByGap(gd, sort) {

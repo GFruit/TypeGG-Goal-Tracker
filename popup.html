@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Goal Tracker</title>
+  <style>
+    /* Mirrors the on-page widget: glassy dark-navy surface, faint white
+       border, 10px radius, uppercase gray header, blue (#3b82f6) accent. */
+    html, body {
+      margin: 0;
+      background: #02030f;
+    }
+
+    body {
+      width: 240px;
+      padding: 10px;
+      box-sizing: border-box;
+      color: #fff;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 12px;
+      line-height: 1.4;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    * { box-sizing: border-box; }
+
+    .panel {
+      background: linear-gradient(90deg, rgba(255, 255, 255, 0.03) 0%, rgba(255, 255, 255, 0.03) 100%), rgba(0, 3, 27, 0.45);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 10px;
+      box-shadow: 0 8px 16px -4px rgba(0, 0, 0, 0.4);
+      padding: 10px 12px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
+    .brand img {
+      width: 20px;
+      height: 20px;
+      display: block;
+      flex: 0 0 auto;
+    }
+
+    .brand .name {
+      font-size: 12px;
+      font-weight: 600;
+      color: #9ca3af;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .row .label {
+      font-size: 12.5px;
+      font-weight: 500;
+      color: #e5e7eb;
+    }
+
+    /* Toggle switch, styled after the widget's active (#3b82f6 / #1e3a5f) state. */
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 40px;
+      height: 22px;
+      flex: 0 0 auto;
+    }
+
+    .switch input {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      opacity: 0;
+      cursor: pointer;
+    }
+
+    .track {
+      position: absolute;
+      inset: 0;
+      background: #1e2231;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 999px;
+      transition: background 0.15s, border-color 0.15s;
+    }
+
+    .thumb {
+      position: absolute;
+      top: 3px;
+      left: 3px;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #9ca3af;
+      transition: transform 0.15s, background 0.15s;
+    }
+
+    .switch input:checked ~ .track {
+      background: #1e3a5f;
+      border-color: #3b82f6;
+    }
+
+    .switch input:checked ~ .thumb {
+      transform: translateX(18px);
+      background: #bfdbfe;
+    }
+
+    .switch input:focus-visible ~ .track {
+      outline: 2px solid #3b82f6;
+      outline-offset: 2px;
+    }
+
+    .status {
+      margin-top: 9px;
+      padding-top: 9px;
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+      color: #9ca3af;
+      font-size: 11px;
+    }
+  </style>
+</head>
+<body>
+  <div class="panel">
+    <div class="brand">
+      <img src="extension_icon@128px.png" alt="">
+      <span class="name">Goal Tracker</span>
+    </div>
+
+    <div class="row">
+      <span class="label">Show goals</span>
+      <label class="switch">
+        <input type="checkbox" id="show-goals" aria-label="Show goals on the page">
+        <span class="track"></span>
+        <span class="thumb"></span>
+      </label>
+    </div>
+
+    <div class="status" id="status">Loading...</div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
