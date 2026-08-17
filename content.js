@@ -11498,16 +11498,24 @@ async function getExpRankByUsername(username) {
     const store = loadRivalStore(RIVAL_SELF_NAME);
     let changed = false;
     const gtMerged = []; // [GT log] new personal bests merged this pass
+    const touched = [];  // { qid, prevEntry } — feeds the incremental cache patch below
     for (const race of races) {
-      if (race && rivalMergeEntry(store, race.quoteId, race.wpm, race.pp)) {
+      if (!race) continue;
+      const prevEntry = store.quotes[race.quoteId];
+      if (rivalMergeEntry(store, race.quoteId, race.wpm, race.pp)) {
         changed = true;
         gtMerged.push({ quoteId: race.quoteId, wpm: race.wpm, pp: race.pp });
+        touched.push({ qid: race.quoteId, prevEntry });
       }
     }
     if (changed) gtLog("Self store updated from /races", `${gtMerged.length} new personal best(s) merged`, { merged: gtMerged });
     // selfRender=false lets the quote-finish path render once (so the rival
     // merge lands in the same frame as the standard goals when it's fast).
-    if (changed) { saveRivalStore(RIVAL_SELF_NAME); if (selfRender) renderAllGoals(); }
+    if (changed) {
+      saveRivalStore(RIVAL_SELF_NAME); // bumps rivalStoreEpoch once for the whole batch
+      for (const { qid, prevEntry } of touched) patchDerivedCachesForQuote(qid, prevEntry, store.quotes[qid]);
+      if (selfRender) renderAllGoals();
+    }
     if (gtPerfSession) gtPerf.endRivalLag(gtPerfSession, gtRacesFetchMs, changed); // [GT-PERF]
     return changed;
   }
@@ -11530,9 +11538,11 @@ async function getExpRankByUsername(username) {
     catch { return false; }
     if (!best) return false; // 404 (never raced) or no bestRace — nothing to merge
     const store = loadRivalStore(RIVAL_SELF_NAME);
+    const prevEntry = store.quotes[quoteId];
     if (rivalMergeEntry(store, quoteId, best.wpm, best.pp)) {
       gtLog("Self store — post-race per-quote confirm merged a new best", `quote ${quoteId}`, { quoteId, wpm: best.wpm, pp: best.pp });
       saveRivalStore(RIVAL_SELF_NAME);
+      patchDerivedCachesForQuote(quoteId, prevEntry, store.quotes[quoteId]);
       return true;
     }
     return false;
@@ -11570,9 +11580,12 @@ async function getExpRankByUsername(username) {
         .then(best => {
           if (best == null) { rememberAbsent(key, quoteId); return; }
           const st = loadRivalStore(name);
+          const prevEntry = st.quotes[quoteId]; // always absent here (the guard above skips known quotes)
           if (rivalMergeEntry(st, quoteId, best.wpm, best.pp)) {
             gtLog("RIVALDIAG on-demand fill merged", `${name === RIVAL_SELF_NAME ? "self" : name} — quote ${quoteId}`, { wpm: best.wpm, pp: best.pp });
-            saveRivalStore(name); renderAllGoals();
+            saveRivalStore(name);
+            if (name === RIVAL_SELF_NAME) patchDerivedCachesForQuote(quoteId, prevEntry, st.quotes[quoteId]);
+            renderAllGoals();
           }
         })
         .catch(() => { /* gtApiFetch already escalated the shared backoff */ })
@@ -12622,6 +12635,138 @@ async function getExpRankByUsername(username) {
     // Every listed rival fully synced (so the pools are settled).
     const rivalDone = names.length > 0 && names.every(n => rivalBulkDone(loadRivalStore(n)));
     return { total, wins, worse, rivalDone, selfDone };
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // Incremental cache patching for a single self-store quote change
+  // ══════════════════════════════════════════════════════════════
+  // Every derived-standings cache below (rival, target, max-chars, max-quotes-
+  // language) is invalidated wholesale by rivalStoreEpoch bumping on ANY
+  // self-store write, then rebuilt by a full walk over the whole catalog on
+  // the next read — that walk is what made every card update slowly after a
+  // race on a large catalog. rivalMergeEntry only RATCHETS (a race can only
+  // raise a quote's stored PP/WPM, never lower it — see its comment above), so
+  // a single quote's before/after contribution to each cache is a one-quote
+  // diff, not a full rescan. Called right after a successful self-store merge
+  // (post-race, per-quote confirm, or on-demand fill), with the quote's entry
+  // captured immediately before and after that merge.
+  //
+  // Each sub-patcher skips (falls back to the existing full-rescan-on-next-
+  // read, unchanged) whenever its cache isn't populated yet or its cached
+  // signature no longer matches the goal's current config — those states are
+  // rare and already handled correctly by the pre-existing invalidation
+  // (rivalRivalsEpoch / catalogEpoch / a changed filter signature).
+
+  function patchRivalStandingsForQuote(qid, prevEntry, newEntry) {
+    for (const gd of (goalData.rival || [])) {
+      const cached = rivalStandingsCache.get(gd.id);
+      if (!cached || !cached.selfDone) continue;
+      const rs = goalRivalCfg(gd);
+      const metric = rivalMetric(rs), scope = rivalScope(rs), requireBoth = !!rs.requireBoth;
+      const names = goalRivalNames(gd);
+      const namesSig = names.map(n => String(n).toLowerCase()).sort().join(",");
+      const filterSig = rivalFilterSig(rs, gd);
+      if (cached.metric !== metric || cached.scope !== scope || cached.requireBoth !== requireBoth
+          || cached.namesSig !== namesSig || cached.filterSig !== filterSig) continue;
+
+      const composite = buildRivalComposite(names, metric);
+      const c = composite[qid];
+      if (!c) continue; // this quote isn't in this rival goal's pool at all
+      if (!rivalQuoteInScope(c, scope)) continue;
+      const filter = rivalFilterState(rs, gd);
+      if ((filter.dActive || filter.lActive) && !rivalQuotePassesFilter(c, filter)) continue;
+      const mf = rivalMetricFilterState(rs, gd);
+      if (mf.rActive && !rivalMetricPasses(c.v, mf)) continue;
+
+      const rv = c.v;
+      const oldSv = prevEntry ? (Number(prevEntry[metric]) || 0) : 0;
+      const newSv = newEntry  ? (Number(newEntry[metric])  || 0) : 0;
+      const wasCounted = requireBoth ? !!prevEntry : true;
+      const isCounted  = requireBoth ? !!newEntry  : true;
+      const res = cached.result;
+      if (!wasCounted && isCounted) {
+        res.total++;
+        if (newSv > rv + RIVAL_PP_EPS) res.wins++;
+        else res.worse.push(qid);
+      } else if (wasCounted && isCounted) {
+        const wasWin = oldSv > rv + RIVAL_PP_EPS;
+        const isWin  = newSv > rv + RIVAL_PP_EPS;
+        if (!wasWin && isWin) {
+          res.wins++;
+          const idx = res.worse.indexOf(qid);
+          if (idx !== -1) res.worse.splice(idx, 1);
+        }
+        // !wasWin && !isWin: still behind — already sitting in `worse` from
+        // being an unraced target or a prior raced-but-behind pass. wasWin &&
+        // isWin can't happen (a win never un-wins through this ratchet path).
+      }
+      cached.epoch = rivalStoreEpoch;
+    }
+  }
+
+  function patchTargetCacheForQuote(qid, prevEntry, newEntry) {
+    const m = quoteCatalog[qid];
+    if (!m) return;
+    for (const gd of (goalData.improvement || [])) {
+      if (!goalIsImprovementTarget(gd)) continue;
+      const c = targetStandingsCache.get(gd.id);
+      if (!c || c.catEpoch !== catalogEpoch || c.sig !== targetFilterSig(gd)) continue;
+      if (!targetQuotePassesMeta(m, gd)) continue;
+      const metric = targetMetricOf(gd);
+      const target = Number(gd.target) || 0;
+      const playedOnly = gd.played === "played";
+      const oldBest = prevEntry ? (Number(prevEntry[metric]) || 0) : 0;
+      const newBest = newEntry  ? (Number(newEntry[metric])  || 0) : 0;
+      let { hit, total, catalogSynced, selfDone } = c.result;
+      if (playedOnly && !prevEntry && newEntry) total++;
+      if (newBest >= target && !(oldBest >= target)) hit++;
+      c.result = { hit, total, catalogSynced, selfDone };
+      c.selfEpoch = rivalStoreEpoch;
+    }
+  }
+
+  function patchMaxCharsCacheForQuote(qid, prevEntry, newEntry) {
+    if (prevEntry) return; // chars are presence-only — an existing entry improving is a no-op
+    const m = quoteCatalog[qid];
+    if (!m) return;
+    const len = Number(m.l);
+    if (!Number.isFinite(len) || len <= 0) return;
+    for (const c of maxCharsCache.values()) {
+      if (c.catEpoch !== catalogEpoch) continue;
+      if (!maxCharsScopeOk(m.r, c.kind)) continue;
+      c.typed += len;
+      c.selfEpoch = rivalStoreEpoch;
+    }
+  }
+
+  function patchMaxQuotesLangCacheForQuote(qid, prevEntry, newEntry) {
+    if (prevEntry) return; // same presence-only shape as max-chars
+    const m = quoteCatalog[qid];
+    if (!m) return;
+    const langMatches = (langsSig) => !langsSig || langsSig.split(",").includes(m.lang);
+    for (const c of maxQuotesLangCache.values()) {
+      if (c.catEpoch !== catalogEpoch) continue;
+      if (!maxCharsScopeOk(m.r, c.kind)) continue;
+      if (!langMatches(c.langsSig)) continue;
+      c.typed += 1;
+      c.selfEpoch = rivalStoreEpoch;
+    }
+    for (const c of maxQuotesNextPoolCache.values()) {
+      if (c.catEpoch !== catalogEpoch) continue;
+      if (!maxCharsScopeOk(m.r, c.kind)) continue;
+      if (!langMatches(c.langsSig)) continue;
+      const idx = c.pool.indexOf(qid);
+      if (idx !== -1) c.pool.splice(idx, 1); // no longer a "next quote" candidate
+      c.selfEpoch = rivalStoreEpoch;
+    }
+  }
+
+  // Single entry point called from every self-store single-quote merge site.
+  function patchDerivedCachesForQuote(qid, prevEntry, newEntry) {
+    patchRivalStandingsForQuote(qid, prevEntry, newEntry);
+    patchTargetCacheForQuote(qid, prevEntry, newEntry);
+    patchMaxCharsCacheForQuote(qid, prevEntry, newEntry);
+    patchMaxQuotesLangCacheForQuote(qid, prevEntry, newEntry);
   }
 
   function computeRivalStandings(gd) {
