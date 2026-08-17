@@ -549,6 +549,20 @@
   margin-bottom: 7px;
 }
 
+/* Same look as .gt-sync-line, but positioned below the progress bar (that
+   one's negative margin-top is tuned to sit snug under a text line, e.g.
+   "Wins: X/Y" -- placed after .gt-progress-bar instead it pulled up into
+   the bar). */
+.gt-maxquotes-filter-line {
+  font-size: 10px;
+  font-weight: 500;
+  color: #6b7280;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.3px;
+  margin-top: 6px;
+  margin-bottom: 7px;
+}
+
 .gt-rival-next-btn {
   width: 100%;
   border-radius: 7px;

@@ -912,7 +912,7 @@ function gtMain() {
         <span id="${goalId}-avg-progress" class="gt-avg-progress">0 / 0</span>
       </div>
       <div id="${goalId}-countdown" class="gt-countdown" style="display:none;"></div>
-      ${(curGoal && curGoal.maxQuotes) ? `<div id="${goalId}-maxquotes-filter-line" class="gt-sync-line" style="display:none;"></div>` : ""}
+      ${(curGoal && curGoal.maxQuotes) ? `<div id="${goalId}-maxquotes-filter-line" class="gt-maxquotes-filter-line" style="display:none;"></div>` : ""}
       ${(curGoal && curGoal.maxQuotes) ? `<button id="${goalId}-maxquotes-next" class="gt-rival-next-btn" disabled>⏭ Next quote</button>` : ""}
     `;
 
@@ -8569,7 +8569,11 @@ async function getExpRankByUsername(username) {
         }
         if (maxQuotesFilterLine) {
           if (maxQuotesFilterActive(gd)) {
-            maxQuotesFilterLine.textContent = `Filtered: ${(total - pool.length).toLocaleString()} / ${total.toLocaleString()}`;
+            // Follows the same Progress/Remaining display-format toggle as
+            // the goal's main gain text (remainingView, computed above).
+            maxQuotesFilterLine.textContent = remainingView
+              ? `Filtered: ${pool.length.toLocaleString()} to go`
+              : `Filtered: ${(total - pool.length).toLocaleString()} / ${total.toLocaleString()}`;
             maxQuotesFilterLine.style.display = "block";
           } else {
             maxQuotesFilterLine.style.display = "none";
