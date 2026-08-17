@@ -549,6 +549,20 @@
   margin-bottom: 7px;
 }
 
+/* Same look as .gt-sync-line, but positioned below the progress bar (that
+   one's negative margin-top is tuned to sit snug under a text line, e.g.
+   "Wins: X/Y" -- placed after .gt-progress-bar instead it pulled up into
+   the bar). */
+.gt-maxquotes-filter-line {
+  font-size: 10px;
+  font-weight: 500;
+  color: #6b7280;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.3px;
+  margin-top: 6px;
+  margin-bottom: 7px;
+}
+
 .gt-rival-next-btn {
   width: 100%;
   border-radius: 7px;
@@ -744,6 +758,11 @@
 }
 #gt-max-quotes-row .gt-mode-btn,
 #gt-max-chars-row .gt-mode-btn { white-space: nowrap; padding-left: 4px; padding-right: 4px; }
+
+/* #gt-max-quotes-row alone wraps: the three kind buttons stay on their own
+   line, and the language picker + its chips (added below the buttons, each
+   width:100%) drop to their own lines instead of squeezing into the row. */
+#gt-max-quotes-row { flex-wrap: wrap; }
 
 #gt-next-rank-btn {
   width: auto; /* Overrides the previous 100% width */

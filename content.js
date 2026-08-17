@@ -912,6 +912,8 @@ function gtMain() {
         <span id="${goalId}-avg-progress" class="gt-avg-progress">0 / 0</span>
       </div>
       <div id="${goalId}-countdown" class="gt-countdown" style="display:none;"></div>
+      ${(curGoal && curGoal.maxQuotes) ? `<div id="${goalId}-maxquotes-filter-line" class="gt-maxquotes-filter-line" style="display:none;"></div>` : ""}
+      ${(curGoal && curGoal.maxQuotes) ? `<button id="${goalId}-maxquotes-next" class="gt-rival-next-btn" disabled>⏭ Next quote</button>` : ""}
     `;
 
     (parentContent || container.querySelector(".gt-content")).appendChild(section);
@@ -930,6 +932,13 @@ function gtMain() {
     if (viewToggleBtn) {
       viewToggleBtn.addEventListener("mousedown", (e) => e.stopPropagation());
       viewToggleBtn.addEventListener("click", (e) => { e.stopPropagation(); openGoalEditPopover(type, goalId, viewToggleBtn); });
+    }
+
+    // Jump to a random not-yet-typed quote matching this goal's kind +
+    // language filter (mirrors the rival/target "Next" buttons above).
+    const maxQuotesNextBtn = document.getElementById(`${goalId}-maxquotes-next`);
+    if (maxQuotesNextBtn) {
+      maxQuotesNextBtn.addEventListener("click", () => onMaxQuotesNextClicked(goalId));
     }
 
     // Wire goal-level drag
@@ -1144,9 +1153,10 @@ function gtMain() {
     const canView   = goalHasToggleableLine(type, gd);
     const isImpTarget = (type === "improvement" && gd.mode === "target");
     const isRival = (type === "rival");
+    const isMaxQuotesGoal = (type === "quotes" && !!gd.maxQuotes);
     const canAvg  = goalIsAverage(gd);
     const canReset = goalSupportsReset(type, gd);
-    if (!canAmount && !canRec && !canView && !isImpTarget && !isRival && !canAvg && !canReset) return;
+    if (!canAmount && !canRec && !canView && !isImpTarget && !isRival && !canAvg && !canReset && !isMaxQuotesGoal) return;
 
     let draftView = goalCountView(gd);
 
@@ -1236,6 +1246,34 @@ function gtMain() {
       <input type="number" class="gt-custom-input gt-edit-avg-window" value="${gd.windowSize}" min="1" step="1">
     ` : "";
 
+    // ── Max-quotes editor (kind + language filter) ──────────────────
+    // Editing either just updates the goal's fields and re-renders — the
+    // baseline/target bookkeeping is purely internal and self-corrects on the
+    // next render (updateMaxQuotesLangGoalSection / updateMaxQuotesGoals both
+    // recompute target from live data every tick; baseline cancels out of
+    // what's displayed either way), so there's no migration step needed here.
+    // Select options + chips are populated via DOM after pop.innerHTML is set
+    // (below), not interpolated into the template string — language names
+    // come from the TypeGG API, so they're rendered with textContent rather
+    // than raw HTML interpolation.
+    const mqKindCur = isMaxQuotesGoal ? maxQuotesKindOf(gd) : "ranked";
+    const mqKindBtns = [["all", "All"], ["ranked", "Ranked"], ["unranked", "Unranked"]]
+      .map(([v, l]) => `<button class="gt-mode-btn${v === mqKindCur ? " active" : ""}" data-mq-kind="${v}">${l}</button>`).join("");
+    const mqDiffRangeId = `gt-edit-mq-diff-range-${goalId}`, mqDiffReadoutId = `gt-edit-mq-diff-readout-${goalId}`, mqDiffTicksId = `gt-edit-mq-diff-ticks-${goalId}`;
+    const mqLenRangeId  = `gt-edit-mq-len-range-${goalId}`,  mqLenReadoutId  = `gt-edit-mq-len-readout-${goalId}`,  mqLenTicksId  = `gt-edit-mq-len-ticks-${goalId}`;
+    const maxQuotesEditHtml = isMaxQuotesGoal ? `
+      <div class="gt-edit-label">Quotes</div>
+      <div class="gt-edit-rec-group">${mqKindBtns}</div>
+      <div class="gt-edit-label">Language</div>
+      <div style="display:flex; align-items:center; gap:6px;">
+        <select class="gt-custom-input gt-custom-input--grow gt-edit-mq-lang-select"></select>
+        <button type="button" class="gt-rival-add-inline-btn gt-edit-mq-lang-add">+ Add</button>
+      </div>
+      <div class="gt-edit-mq-lang-chips" style="display:flex; flex-wrap:wrap; gap:4px; margin-top:4px;"></div>
+      ${impSlider(mqDiffRangeId, mqDiffReadoutId, mqDiffTicksId, "Difficulty filter (Next quote only)", "Minimum difficulty", "Maximum difficulty")}
+      ${impSlider(mqLenRangeId, mqLenReadoutId, mqLenTicksId, "Quote length filter (Next quote only)", "Minimum length", "Maximum length")}
+    ` : "";
+
     const recOrder = ["none", "daily", "weekly", "monthly"];
     const recLabel = (r) => (r === "none") ? "None" : (REC_LABELS[r] || r);
     const curRec = canRec ? (gd.recurrence || "none") : "none";
@@ -1245,12 +1283,13 @@ function gtMain() {
     const recResettable = canRec && ((gd.streak > 0) || (gd.totalCompletions > 0));
 
     const pop = document.createElement("div");
-    pop.className = "gt-view-popover gt-edit-popover" + ((isImpTarget || isRival) ? " gt-edit-popover-wide" : "");
+    pop.className = "gt-view-popover gt-edit-popover" + ((isImpTarget || isRival || isMaxQuotesGoal) ? " gt-edit-popover-wide" : "");
     pop.dataset.goalId = goalId;
     pop.innerHTML = `
       <div class="gt-view-popover-title">Edit goal<span class="gt-settings-saved-indicator gt-edit-saved">Settings saved</span><button class="gt-edit-close" type="button" title="Close" aria-label="Close">×</button></div>
       ${impTargetHtml}
       ${rivalEditHtml}
+      ${maxQuotesEditHtml}
       ${avgEditHtml}
       ${canAmount ? `<div class="gt-edit-label">Amount</div><input type="number" class="gt-custom-input gt-edit-amount" value="${gd.target}" min="1" step="1">` : ""}
       ${canRec ? `<div class="gt-edit-label">Recurrence</div><div class="gt-edit-rec-group">${recBtnsHtml}</div>${recResettable ? `<div class="gt-edit-note">Changing this resets the streak & completions.</div>` : ""}` : ""}
@@ -1535,6 +1574,124 @@ function gtMain() {
       });
       // Initial build, deferred so the popover is attached (sliders bind by id).
       requestAnimationFrame(buildRivalSliders);
+    }
+
+    // Max-quotes controls: kind buttons + language chip picker, both writing
+    // straight through to gd and re-rendering (same apply-in-place pattern as
+    // the improvement-target / rival editors above). No re-fetch is needed —
+    // updateMaxQuotesLangGoalSection / updateMaxQuotesGoals both recompute
+    // target from already-cached data (catalog+self-store, or the stats poll)
+    // on the very next render.
+    if (isMaxQuotesGoal) {
+      const mqSelect = pop.querySelector(".gt-edit-mq-lang-select");
+      const mqAddBtn = pop.querySelector(".gt-edit-mq-lang-add");
+      const mqChips  = pop.querySelector(".gt-edit-mq-lang-chips");
+
+      function mqApply() {
+        saveGoals(type);
+        renderAllGoals();
+        flashSaved();
+        // "All languages" (langs cleared) needs the stat-driven path's totals,
+        // which may not be cached yet (e.g. switching to unranked/all for the
+        // first time) — kick it now instead of waiting for the next poll.
+        if (!(gd.maxQuotesLangs && gd.maxQuotesLangs.length)) updateMaxQuotesGoals();
+      }
+      function refreshMqLangUI() {
+        const chosen = gd.maxQuotesLangs || [];
+        if (mqSelect) {
+          const prevValue = mqSelect.value;
+          mqSelect.innerHTML = "";
+          const allOpt = document.createElement("option");
+          allOpt.value = ""; allOpt.textContent = "All languages";
+          mqSelect.appendChild(allOpt);
+          for (const lang of maxQuotesLangOptions()) {
+            if (chosen.includes(lang)) continue;
+            const opt = document.createElement("option");
+            opt.value = lang; opt.textContent = lang;
+            mqSelect.appendChild(opt);
+          }
+          const stillValid = Array.from(mqSelect.options).some(o => o.value === prevValue);
+          mqSelect.value = stillValid ? prevValue : "";
+        }
+        if (mqChips) {
+          mqChips.innerHTML = "";
+          for (const lang of chosen) {
+            const chip = document.createElement("span");
+            chip.className = "gt-rival-list-chip";
+            const label = document.createElement("span");
+            label.textContent = lang;
+            const x = document.createElement("button");
+            x.type = "button";
+            x.className = "gt-rival-list-x";
+            x.textContent = "✕";
+            x.title = `Remove ${lang}`;
+            x.addEventListener("click", (e) => {
+              e.stopPropagation();
+              gd.maxQuotesLangs = (gd.maxQuotesLangs || []).filter(l => l !== lang);
+              refreshMqLangUI();
+              mqApply();
+            });
+            chip.appendChild(label);
+            chip.appendChild(x);
+            mqChips.appendChild(chip);
+          }
+        }
+      }
+      // Difficulty/length filter — Next-quote pool only (never the goal's
+      // main progress, see computeMaxQuotesNextInfo). Debounced apply since
+      // the sliders fire continuously on drag; changing either takes effect
+      // immediately off the already-cached catalog, no resync/refetch — same
+      // reasoning as the language/kind controls above.
+      let mqRangeTimer = null;
+      const scheduleMqApply = () => { clearTimeout(mqRangeTimer); mqRangeTimer = setTimeout(mqApply, 250); };
+      const buildMqSliders = () => {
+        const axis = catalogAxis(maxQuotesKindOf(gd), "all");
+        const clampD = (v) => Math.max(axis.diffMin, Math.min(axis.diffMax, v));
+        const clampL = (v) => Math.max(axis.lenMin,  Math.min(axis.lenMax,  v));
+        const dLo = gd.diffMin == null ? axis.diffMin : clampD(gd.diffMin);
+        const dHi = gd.diffMax == null ? axis.diffMax : clampD(gd.diffMax);
+        const lLo = gd.lenMin  == null ? axis.lenMin  : clampL(gd.lenMin);
+        const lHi = gd.lenMax  == null ? axis.lenMax  : clampL(gd.lenMax);
+        setupTargetRange(mqDiffRangeId, mqDiffReadoutId, mqDiffTicksId, {
+          min: axis.diffMin, max: axis.diffMax, step: 0.1, decimals: true,
+          ticks: [String(axis.diffMin), `${axis.diffMax}+`], lo: dLo, hi: dHi,
+          set: (lo, hi) => { gd.diffMin = lo; gd.diffMax = hi; scheduleMqApply(); },
+        });
+        setupTargetRange(mqLenRangeId, mqLenReadoutId, mqLenTicksId, {
+          min: axis.lenMin, max: axis.lenMax, step: 1, decimals: false,
+          ticks: [String(axis.lenMin), `${axis.lenMax}+`], lo: lLo, hi: lHi,
+          set: (lo, hi) => { gd.lenMin = lo; gd.lenMax = hi; scheduleMqApply(); },
+        });
+      };
+      pop.querySelectorAll("[data-mq-kind]").forEach(btn => {
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const val = btn.dataset.mqKind;
+          if (val === maxQuotesKindOf(gd)) return;
+          pop.querySelectorAll("[data-mq-kind]").forEach(b => b.classList.toggle("active", b === btn));
+          gd.maxQuotesKind = val;
+          // Kind moves the catalog axis — reset the filter handles to full
+          // range and rebuild, same as Improvement-Target's onImpPoolChange.
+          gd.diffMin = gd.diffMax = gd.lenMin = gd.lenMax = null;
+          buildMqSliders();
+          mqApply();
+        });
+      });
+      // Initial build, deferred so the popover is attached (sliders bind by id).
+      requestAnimationFrame(buildMqSliders);
+      if (mqAddBtn) {
+        mqAddBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const val = mqSelect ? mqSelect.value : "";
+          const chosen = gd.maxQuotesLangs || [];
+          if (!val) gd.maxQuotesLangs = [];                       // "All languages" → clear the set
+          else if (!chosen.includes(val)) gd.maxQuotesLangs = [...chosen, val];
+          else return;
+          refreshMqLangUI();
+          mqApply();
+        });
+      }
+      refreshMqLangUI();
     }
 
     document.body.appendChild(pop);
@@ -3058,6 +3215,42 @@ function gtMain() {
             <button id="gt-max-all-btn"      class="gt-mode-btn">⚡ Max all</button>
             <button id="gt-max-ranked-btn"   class="gt-mode-btn">⚡ Max ranked</button>
             <button id="gt-max-unranked-btn" class="gt-mode-btn">⚡ Max unranked</button>
+            <!-- Language filter: pick zero or more languages (chips below);
+                 empty selection = "All languages". Mirrors the rival goal's
+                 multi-rival tag field (select + Add → removable chip). -->
+            <div style="display:flex; align-items:center; gap:6px; width:100%; margin-top:6px;">
+              <select id="gt-max-quotes-lang-select" class="gt-custom-input gt-custom-input--grow">
+                <option value="">All languages</option>
+              </select>
+              <button id="gt-max-quotes-lang-add-btn" class="gt-rival-add-inline-btn" type="button">+ Add</button>
+            </div>
+            <div id="gt-max-quotes-lang-chips" style="display:flex; flex-wrap:wrap; gap:4px; width:100%; margin-top:4px;"></div>
+            <!-- Difficulty/length filter for the "Next quote" button's pool
+                 only — mirrors the rival goal's filter sliders exactly, and
+                 doesn't affect this goal's main progress count. Hidden until
+                 a kind is picked (the axis bounds come from the kind). -->
+            <div id="gt-max-quotes-filter-block" style="display:none; width:100%;">
+              <div class="gt-section-label" style="margin-top:14px;">Difficulty filter (Next quote only)<span class="gt-range-readout" id="gt-max-quotes-diff-readout"></span></div>
+              <div class="gt-range-row" id="gt-max-quotes-diff-ticks">
+                <span class="gt-range-end gt-range-end-lo"></span>
+                <div class="gt-range" id="gt-max-quotes-diff-range">
+                  <div class="gt-range-track"><div class="gt-range-fill"></div></div>
+                  <input class="gt-range-input gt-range-lo" type="range" aria-label="Minimum difficulty" />
+                  <input class="gt-range-input gt-range-hi" type="range" aria-label="Maximum difficulty" />
+                </div>
+                <span class="gt-range-end gt-range-end-hi"></span>
+              </div>
+              <div class="gt-section-label" style="margin-top:14px;">Quote length filter (Next quote only)<span class="gt-range-readout" id="gt-max-quotes-len-readout"></span></div>
+              <div class="gt-range-row" id="gt-max-quotes-len-ticks">
+                <span class="gt-range-end gt-range-end-lo"></span>
+                <div class="gt-range" id="gt-max-quotes-len-range">
+                  <div class="gt-range-track"><div class="gt-range-fill"></div></div>
+                  <input class="gt-range-input gt-range-lo" type="range" aria-label="Minimum length" />
+                  <input class="gt-range-input gt-range-hi" type="range" aria-label="Maximum length" />
+                </div>
+                <span class="gt-range-end gt-range-end-hi"></span>
+              </div>
+            </div>
           </div>
           <div id="gt-max-chars-row" style="display:none;">
             <button id="gt-max-chars-all-btn"      class="gt-mode-btn">⚡ Max all</button>
@@ -4680,7 +4873,10 @@ async function getExpRankByUsername(username) {
   // goal is actually present.
   function quotesNeedUnrankedData() {
     const goals = goalData?.quotes || [];
-    return goals.some(g => g.maxQuotes && (g.maxQuotesKind === 'unranked' || g.maxQuotesKind === 'all'));
+    // Language-filtered goals never read this stat (they tally the catalog
+    // instead), so they don't count toward needing it.
+    return goals.some(g => g.maxQuotes && !(g.maxQuotesLangs && g.maxQuotesLangs.length)
+      && (g.maxQuotesKind === 'unranked' || g.maxQuotesKind === 'all'));
   }
 
   // Map a goal's stored kind to a canonical value (legacy goals saved
@@ -5247,6 +5443,10 @@ async function getExpRankByUsername(username) {
   const maxRankedBtn       = document.getElementById("gt-max-ranked-btn");
   const maxUnrankedBtn     = document.getElementById("gt-max-unranked-btn");
   const maxQuotesBtns = { all: maxAllBtn, ranked: maxRankedBtn, unranked: maxUnrankedBtn };
+  const maxQuotesLangSelect = document.getElementById("gt-max-quotes-lang-select");
+  const maxQuotesLangAddBtn = document.getElementById("gt-max-quotes-lang-add-btn");
+  const maxQuotesLangChips  = document.getElementById("gt-max-quotes-lang-chips");
+  const maxQuotesFilterBlock = document.getElementById("gt-max-quotes-filter-block");
   const maxCharsAllBtn      = document.getElementById("gt-max-chars-all-btn");
   const maxCharsRankedBtn   = document.getElementById("gt-max-chars-ranked-btn");
   const maxCharsUnrankedBtn = document.getElementById("gt-max-chars-unranked-btn");
@@ -5398,6 +5598,16 @@ async function getExpRankByUsername(username) {
   let maxQuotesKind = null;  // "ranked" | "unranked" | "all" when active
   let maxQuotesFetched = null; // total quotes count for the selected kind
   let maxQuotesBaseline = null; // user's currently-typed count for the selected kind (becomes the goal baseline)
+  // Chosen languages for the max-quotes language filter (also editable later
+  // via the goal's edit popover). Empty = "All languages". Chip-based like the
+  // rival goal's multi-rival list.
+  let selectedMaxQuotesLangs = [];
+  // Difficulty/length filter for the max-quotes "Next quote" pool (also
+  // editable later via the edit popover). null = open end, same convention as
+  // Improvement-Target/Rival goals. Doesn't affect the goal's main progress —
+  // see maxQuotesFilterActive / computeMaxQuotesNextInfo.
+  let selectedMaxQuotesDiffMin = null, selectedMaxQuotesDiffMax = null;
+  let selectedMaxQuotesLenMin  = null, selectedMaxQuotesLenMax  = null;
   let maxCharsMode = false; // "max" toggle for chars (distinct-quote chars; any kind active)
   let maxCharsKind = null;  // "ranked" | "unranked" | "all" when active
   // Chars-kind toggle (chars type): "regular" = repeatable cumulative chars
@@ -5520,6 +5730,13 @@ async function getExpRankByUsername(username) {
   // otherwise their gain pill lags the stat-driven Max-quotes pill by a fetch.
   function haveMaxCharsGoals() {
     return (goalData.chars || []).some(g => g && g.maxChars);
+  }
+  // Any max-quotes goal reads the self store now: language-filtered ones tally
+  // over the catalog instead of the site-wide quotesTyped stat, and EVERY
+  // max-quotes goal's "Next quote" button needs the self store to know which
+  // quotes are already done. Same gating need as max-chars goals above.
+  function haveMaxQuotesLangGoals() {
+    return (goalData.quotes || []).some(g => g && g.maxQuotes);
   }
 
   // Does this goal need the racesEndpoint (for window math or req eval)?
@@ -6044,9 +6261,33 @@ async function getExpRankByUsername(username) {
       for (const [kind, btn] of Object.entries(maxQuotesBtns)) {
         btn.classList.toggle("active", maxQuotesMode && maxQuotesKind === kind);
       }
+      populateMaxQuotesLangSelect();
+      renderMaxQuotesLangChips();
+      if (maxQuotesFilterBlock) maxQuotesFilterBlock.style.display = (maxQuotesMode && maxQuotesKind) ? "block" : "none";
+      requestAnimationFrame(buildMaxQuotesCreateSliders); // deferred so the block is laid out (sliders bind by id)
 
-      if (maxQuotesMode && maxQuotesKind) {
-        // ── A max kind is selected ─────────────────────────────
+      if (maxQuotesMode && maxQuotesKind && selectedMaxQuotesLangs.length) {
+        // ── Language filter chosen — preview from the catalog tally, not
+        // the site-wide API total (quotesTyped/getTypeGGTotalQuotes aren't
+        // language-scoped, so they can't answer "how many French quotes").
+        const pv = previewMaxQuotesLang(maxQuotesKind, selectedMaxQuotesLangs);
+        const langLabel = selectedMaxQuotesLangs.join(", ");
+        modeHint.style.display = "block";
+        if (!pv.ready) {
+          modeHint.textContent = "Syncing quote catalog…";
+          modeHint.className   = "gt-mode-hint";
+          confirmBtn.disabled  = true;
+        } else if (pv.total <= pv.typed) {
+          modeHint.textContent = `⚠ You've already typed all ${pv.total.toLocaleString()} matching quotes!`;
+          modeHint.className   = "gt-mode-hint gt-mode-hint-error";
+          confirmBtn.disabled  = true;
+        } else {
+          modeHint.textContent = `Max: ${pv.total.toLocaleString()} quotes (${langLabel})`;
+          modeHint.className   = "gt-mode-hint";
+          confirmBtn.disabled  = false;
+        }
+      } else if (maxQuotesMode && maxQuotesKind) {
+        // ── A max kind is selected, all languages ──────────────
         const kind = maxQuotesKind;            // capture for the async guard
 
         // Input stays visible (the click handler clears any prior value);
@@ -6336,6 +6577,98 @@ async function getExpRankByUsername(username) {
     }
   });
 
+  // ── Max-quotes language filter (chip picker) ────────────────────────
+  // Distinct language values seen in the catalog so far, plus "English"
+  // (guaranteed even before the catalog has filled in — everything else
+  // populates as the catalog builds). Not hardcoded to the site's mirror
+  // languages (fr/it/ru/es/vi/de): the catalog has already surfaced values
+  // outside that list (e.g. "Portuguese").
+  function maxQuotesLangOptions() {
+    const set = new Set(["English"]);
+    for (const qid in quoteCatalog) { const l = quoteCatalog[qid].lang; if (l) set.add(l); }
+    return [...set].sort();
+  }
+  function populateMaxQuotesLangSelect() {
+    if (!maxQuotesLangSelect) return;
+    const chosen = new Set(selectedMaxQuotesLangs);
+    const prevValue = maxQuotesLangSelect.value;
+    maxQuotesLangSelect.innerHTML = "";
+    const allOpt = document.createElement("option");
+    allOpt.value = ""; allOpt.textContent = "All languages";
+    maxQuotesLangSelect.appendChild(allOpt);
+    for (const lang of maxQuotesLangOptions()) {
+      if (chosen.has(lang)) continue; // already added as a chip — don't offer it twice
+      const opt = document.createElement("option");
+      opt.value = lang; opt.textContent = lang;
+      maxQuotesLangSelect.appendChild(opt);
+    }
+    const stillValid = Array.from(maxQuotesLangSelect.options).some(o => o.value === prevValue);
+    maxQuotesLangSelect.value = stillValid ? prevValue : "";
+  }
+  // Removable chips for the chosen languages — mirrors renderRivalList's
+  // chip pattern (same .gt-rival-list-chip / .gt-rival-list-x classes).
+  function renderMaxQuotesLangChips() {
+    if (!maxQuotesLangChips) return;
+    maxQuotesLangChips.innerHTML = "";
+    for (const lang of selectedMaxQuotesLangs) {
+      const chip = document.createElement("span");
+      chip.className = "gt-rival-list-chip";
+      const label = document.createElement("span");
+      label.textContent = lang;
+      const x = document.createElement("button");
+      x.type = "button";
+      x.className = "gt-rival-list-x";
+      x.textContent = "✕";
+      x.title = `Remove ${lang}`;
+      x.addEventListener("click", () => {
+        selectedMaxQuotesLangs = selectedMaxQuotesLangs.filter(l => l !== lang);
+        renderMaxQuotesLangChips();
+        populateMaxQuotesLangSelect();
+        renderPresets();
+      });
+      chip.appendChild(label);
+      chip.appendChild(x);
+      maxQuotesLangChips.appendChild(chip);
+    }
+  }
+  if (maxQuotesLangAddBtn) {
+    maxQuotesLangAddBtn.addEventListener("click", () => {
+      const val = maxQuotesLangSelect ? maxQuotesLangSelect.value : "";
+      if (!val) selectedMaxQuotesLangs = [];               // "All languages" → clear the set
+      else if (!selectedMaxQuotesLangs.includes(val)) selectedMaxQuotesLangs = [...selectedMaxQuotesLangs, val];
+      renderMaxQuotesLangChips();
+      populateMaxQuotesLangSelect();
+      renderPresets();
+    });
+  }
+
+  // Difficulty/length sliders for the max-quotes Next-quote filter (creation
+  // modal). Mirrors buildImpSliders / buildRivalCreateSliders: axis bounds
+  // come from the catalog for the selected kind (reused via catalogAxis,
+  // status="all" played since this filter isn't about played/unplayed), the
+  // set() callback writes the draft vars, and setupTargetRange is idempotent
+  // so re-showing the block just re-binds against the current values.
+  function buildMaxQuotesCreateSliders() {
+    if (!maxQuotesFilterBlock || maxQuotesFilterBlock.style.display === "none") return;
+    const axis = catalogAxis(maxQuotesKind || "all", "all");
+    const clampD = (v) => Math.max(axis.diffMin, Math.min(axis.diffMax, v));
+    const clampL = (v) => Math.max(axis.lenMin,  Math.min(axis.lenMax,  v));
+    const dLo = selectedMaxQuotesDiffMin == null ? axis.diffMin : clampD(selectedMaxQuotesDiffMin);
+    const dHi = selectedMaxQuotesDiffMax == null ? axis.diffMax : clampD(selectedMaxQuotesDiffMax);
+    const lLo = selectedMaxQuotesLenMin  == null ? axis.lenMin  : clampL(selectedMaxQuotesLenMin);
+    const lHi = selectedMaxQuotesLenMax  == null ? axis.lenMax  : clampL(selectedMaxQuotesLenMax);
+    setupTargetRange("gt-max-quotes-diff-range", "gt-max-quotes-diff-readout", "gt-max-quotes-diff-ticks", {
+      min: axis.diffMin, max: axis.diffMax, step: 0.1, decimals: true,
+      ticks: [String(axis.diffMin), `${axis.diffMax}+`], lo: dLo, hi: dHi,
+      set: (lo, hi) => { selectedMaxQuotesDiffMin = lo; selectedMaxQuotesDiffMax = hi; },
+    });
+    setupTargetRange("gt-max-quotes-len-range", "gt-max-quotes-len-readout", "gt-max-quotes-len-ticks", {
+      min: axis.lenMin, max: axis.lenMax, step: 1, decimals: false,
+      ticks: [String(axis.lenMin), `${axis.lenMax}+`], lo: lLo, hi: lHi,
+      set: (lo, hi) => { selectedMaxQuotesLenMin = lo; selectedMaxQuotesLenMax = hi; },
+    });
+  }
+
   // Max-quotes kind buttons (quotes + target mode). Clicking a kind selects
   // it; clicking the already-active kind toggles back to manual entry.
   for (const [kind, btn] of Object.entries(maxQuotesBtns)) {
@@ -6350,6 +6683,11 @@ async function getExpRankByUsername(username) {
       }
       maxQuotesFetched  = null;
       maxQuotesBaseline = null;
+      // The kind change moves the catalog axis — reset the difficulty/length
+      // handles to full range (mirrors onImpPoolChange) rather than carrying
+      // over values that may no longer make sense for the new axis.
+      selectedMaxQuotesDiffMin = selectedMaxQuotesDiffMax = null;
+      selectedMaxQuotesLenMin  = selectedMaxQuotesLenMax  = null;
       customInput.value = "";
       renderPresets();
     });
@@ -7085,6 +7423,9 @@ async function getExpRankByUsername(username) {
     cancelRankPpLookup(); rankPpCache.clear(); virtRankCache.clear(); virtRankResolved.clear();
     selectedRankCountry = null; reflectCountryButton(); closeCountryMenu();
     maxQuotesMode = false; maxQuotesKind = null; maxQuotesFetched = null; maxQuotesBaseline = null;
+    selectedMaxQuotesLangs = []; renderMaxQuotesLangChips();
+    selectedMaxQuotesDiffMin = selectedMaxQuotesDiffMax = null;
+    selectedMaxQuotesLenMin  = selectedMaxQuotesLenMax  = null;
     maxCharsMode = false; maxCharsKind = null;
     selectedCharsKind = "regular";
     charsKindBtns.forEach(b => b.classList.toggle("active", b.dataset.charsKind === "regular"));
@@ -7127,6 +7468,9 @@ async function getExpRankByUsername(username) {
     cancelRankPpLookup();
     selectedRankCountry = null; reflectCountryButton(); closeCountryMenu();
     maxQuotesMode = false; maxQuotesKind = null; maxQuotesFetched = null; maxQuotesBaseline = null;
+    selectedMaxQuotesLangs = []; renderMaxQuotesLangChips();
+    selectedMaxQuotesDiffMin = selectedMaxQuotesDiffMax = null;
+    selectedMaxQuotesLenMin  = selectedMaxQuotesLenMax  = null;
     maxCharsMode = false; maxCharsKind = null;
     rivalFetchedName = null; rivalPendingName = null; clearTimeout(rivalDebounce);
     resetRequirementsUI();
@@ -7457,6 +7801,7 @@ async function getExpRankByUsername(username) {
       let isMaxQuotes = false;
       let maxQuotesBaselineOverride = null; // kind-appropriate typed count for unranked/all
       let maxQuotesKindForGoal = null;      // captured kind written onto the goal
+      let maxQuotesLangsForGoal = null;     // chosen languages, or null for "all languages"
       let isMaxChars = false;
       let maxCharsKindForGoal = null;
       const isQuoteChars = selectedType === "chars" && selectedCharsKind === "quote";
@@ -7493,8 +7838,20 @@ async function getExpRankByUsername(username) {
       if (selectedValue == null || selectedValue <= 0) return;
       gainTarget = selectedValue;
     } else if (selectedMode === "target" && cfg.supportsTarget) {
-        if (selectedType === "quotes" && maxQuotesMode && maxQuotesKind) {
-          // ── Max quotes mode (ranked / unranked / all) ──────────
+        if (selectedType === "quotes" && maxQuotesMode && maxQuotesKind && selectedMaxQuotesLangs.length) {
+          // ── Max quotes mode, filtered to specific language(s) ──
+          // Same shape as max-chars below: a computed catalog goal (no
+          // cumulative target here at creation). baselineQuotes/target lock
+          // lazily on the first ready render (updateMaxQuotesLangGoalSection)
+          // once the catalog + self store are synced, so creation isn't
+          // blocked on either — quotesTyped/getTypeGGTotalQuotes aren't
+          // language-scoped, so they can't seed this baseline anyway.
+          maxQuotesKindForGoal  = maxQuotesKind;
+          maxQuotesLangsForGoal = selectedMaxQuotesLangs.slice();
+          gainTarget = 0;
+          isMaxQuotes = true;
+        } else if (selectedType === "quotes" && maxQuotesMode && maxQuotesKind) {
+          // ── Max quotes mode (ranked / unranked / all), all languages ──
           if (maxQuotesFetched == null) return;   // total count failed to load
           const kind = maxQuotesKind;
 
@@ -7628,6 +7985,14 @@ async function getExpRankByUsername(username) {
         targetUsername: selectedMode === "player" ? playerFetchedName : undefined,
         maxQuotes: isMaxQuotes || undefined,
         maxQuotesKind: maxQuotesKindForGoal || undefined,
+        maxQuotesLangs: (maxQuotesLangsForGoal && maxQuotesLangsForGoal.length) ? maxQuotesLangsForGoal : undefined,
+        // Difficulty/length filter for the Next-quote pool only (never the
+        // main progress count — see computeMaxQuotesNextInfo). Same field
+        // names/null-is-open-end convention as Improvement-Target/Rival goals.
+        diffMin: isMaxQuotes ? selectedMaxQuotesDiffMin : undefined,
+        diffMax: isMaxQuotes ? selectedMaxQuotesDiffMax : undefined,
+        lenMin:  isMaxQuotes ? selectedMaxQuotesLenMin  : undefined,
+        lenMax:  isMaxQuotes ? selectedMaxQuotesLenMax  : undefined,
         maxChars: isMaxChars || undefined,
         maxCharsKind: maxCharsKindForGoal || undefined,
         quoteChars: isQuoteChars || undefined,
@@ -7635,7 +8000,12 @@ async function getExpRankByUsername(username) {
         quoteCharsAbsoluteTarget: quoteCharsAbsoluteTarget != null ? quoteCharsAbsoluteTarget : undefined,
         filter: (selectedType === "races" || selectedType === "improvement") ? selectedFilter : undefined,
         targetLoaded: selectedMode === "rank" ? false : true, // false for rank goals — target is loaded async by updateRankGoals/updateExpRankGoals
-        [cfg.baselineKey]: maxQuotesBaselineOverride != null ? maxQuotesBaselineOverride : currentVal,
+        // Language-filtered max-quotes goals leave baselineQuotes unset —
+        // updateMaxQuotesLangGoalSection locks it lazily off the catalog tally
+        // on the first ready render, since currentVal (quotesTyped) isn't
+        // language-scoped and would seed the wrong baseline here.
+        [cfg.baselineKey]: (maxQuotesLangsForGoal && maxQuotesLangsForGoal.length) ? undefined
+          : (maxQuotesBaselineOverride != null ? maxQuotesBaselineOverride : currentVal),
         recurrence: selectedRec,
         supportsRecurrence: (selectedMode === "gain" || selectedMode === "average" || selectedMode === "improvement"),
         periodStart: isRecurring ? getCurrentPeriodStart(selectedRec) : null,
@@ -8085,7 +8455,8 @@ async function getExpRankByUsername(username) {
       const suffix = kind === "unranked" ? "max unranked"
                    : kind === "all"      ? "max all"
                    :                       "max ranked";
-      document.getElementById(`${goalId}-label`).textContent = `${cfg.label} → ${suffix}`;
+      const langSuffix = (gd.maxQuotesLangs && gd.maxQuotesLangs.length) ? ` (${gd.maxQuotesLangs.join(", ")})` : "";
+      document.getElementById(`${goalId}-label`).textContent = `${cfg.label} → ${suffix}${langSuffix}`;
     } else if (goalIsImprovement(gd)) {
       const metricLbl = (gd.improvementMetric === "pp") ? "PP" : "WPM";
       const filterStr = (gd.filter && gd.filter !== "all") ? ` (${gd.filter})` : "";
@@ -8175,6 +8546,40 @@ async function getExpRankByUsername(username) {
 
       // Self-remove after animation completes so the DOM stays clean
       indicator.addEventListener("animationend", () => indicator.remove());
+    }
+
+    // ── "Next quote" button + filtered-count line (max-quotes goals only) ──
+    // The difficulty/length filter narrows ONLY these two — the goal's own
+    // X/Y above always reflects kind+language alone, per computeMaxQuotesNextInfo.
+    const maxQuotesNextBtn = document.getElementById(`${goalId}-maxquotes-next`);
+    const maxQuotesFilterLine = document.getElementById(`${goalId}-maxquotes-filter-line`);
+    if (maxQuotesNextBtn) {
+      if (!maxQuotesLangReady()) {
+        maxQuotesNextBtn.textContent = "⏭ Finding quotes…";
+        maxQuotesNextBtn.disabled = true;
+        if (maxQuotesFilterLine) maxQuotesFilterLine.style.display = "none";
+      } else {
+        const { pool, total } = computeMaxQuotesNextInfo(gd);
+        if (pool.length > 0) {
+          maxQuotesNextBtn.textContent = "⏭ Next quote";
+          maxQuotesNextBtn.disabled = false;
+        } else {
+          maxQuotesNextBtn.textContent = "✓ All quotes done 🥇";
+          maxQuotesNextBtn.disabled = true;
+        }
+        if (maxQuotesFilterLine) {
+          if (maxQuotesFilterActive(gd)) {
+            // Follows the same Progress/Remaining display-format toggle as
+            // the goal's main gain text (remainingView, computed above).
+            maxQuotesFilterLine.textContent = remainingView
+              ? `Filtered: ${pool.length.toLocaleString()} to go`
+              : `Filtered: ${(total - pool.length).toLocaleString()} / ${total.toLocaleString()}`;
+            maxQuotesFilterLine.style.display = "block";
+          } else {
+            maxQuotesFilterLine.style.display = "none";
+          }
+        }
+      }
     }
   }
 
@@ -8602,6 +9007,137 @@ async function getExpRankByUsername(username) {
     updateGoalSection(goalId, type, cfg, gd, gain, isRecurring, gainDelta);
   }
 
+  // ── Max-quotes goals with a language filter ───────────────────────
+  // Same shape as max-chars above (tally over the catalog + self store
+  // instead of the site-wide quotesTyped stat), because quotesTyped isn't
+  // language-scoped and /v1/quotes' `language` query param is silently
+  // ignored server-side (verified). Only used when gd.maxQuotesLangs is
+  // non-empty; goals left on "All languages" keep the cheap stat-driven path
+  // in updateMaxQuotesGoals.
+  function tallyMaxQuotesLang(kind, langs) {
+    const sq = loadRivalStore(RIVAL_SELF_NAME).quotes;
+    let total = 0, typed = 0;
+    for (const qid in quoteCatalog) {
+      const m = quoteCatalog[qid];
+      if (!maxCharsScopeOk(m.r, kind)) continue; // same ranked/unranked/all semantics
+      if (langs.length && !langs.includes(m.lang)) continue;
+      total++;
+      if (sq[qid]) typed++;
+    }
+    return { typed, total };
+  }
+  function maxQuotesLangReady() {
+    return catalogFullySynced() && rivalBulkDone(loadRivalStore(RIVAL_SELF_NAME));
+  }
+  // Not-yet-typed candidate pool for a max-quotes goal's "Next quote" button —
+  // kind + language + the optional difficulty/length filter (gd.diffMin/
+  // diffMax/lenMin/lenMax, same fields and null-is-open-end convention as
+  // Improvement-Target/Rival goals — checked via the existing
+  // targetQuotePassesMeta, reused as-is). This filter narrows ONLY the Next-
+  // button's pool, never the goal's main X/Y progress (computeMaxQuotesLang /
+  // the stat-driven path deliberately don't look at it) — the user asked for
+  // the two to stay independent, with the filtered count shown as its own
+  // line (maxQuotesFilterActive / the -maxquotes-filter-line element).
+  // `total` here is every filter-matching quote regardless of typed state
+  // (for that line); `pool` is the untyped subset (what Next draws from).
+  // Epoch-memoized like computeMaxChars/computeMaxQuotesLang: this is read on
+  // every render tick (button/line state), not just on click.
+  const maxQuotesNextPoolCache = new Map(); // goalId -> { catEpoch, selfEpoch, kind, langsSig, filterSig, pool, total }
+  function maxQuotesFilterSig(gd) {
+    return `${gd.diffMin},${gd.diffMax},${gd.lenMin},${gd.lenMax}`;
+  }
+  function maxQuotesFilterActive(gd) {
+    return gd.diffMin != null || gd.diffMax != null || gd.lenMin != null || gd.lenMax != null;
+  }
+  function computeMaxQuotesNextInfo(gd) {
+    const kind = maxQuotesKindOf(gd);
+    const langs = gd.maxQuotesLangs || [];
+    const langsSig = langs.slice().sort().join(",");
+    const filterSig = maxQuotesFilterSig(gd);
+    const catEpoch = catalogEpoch, selfEpoch = rivalStoreEpoch;
+    const c = maxQuotesNextPoolCache.get(gd.id);
+    if (c && c.catEpoch === catEpoch && c.selfEpoch === selfEpoch && c.kind === kind
+        && c.langsSig === langsSig && c.filterSig === filterSig) return c;
+    const sq = loadRivalStore(RIVAL_SELF_NAME).quotes;
+    const pool = [];
+    let total = 0;
+    for (const qid in quoteCatalog) {
+      const m = quoteCatalog[qid];
+      if (!maxCharsScopeOk(m.r, kind)) continue;
+      if (langs.length && !langs.includes(m.lang)) continue;
+      if (!targetQuotePassesMeta(m, gd)) continue; // gd.status is unset for max-quotes goals, so only diff/len apply
+      total++;
+      if (sq[qid]) continue; // already typed
+      pool.push(qid);
+    }
+    const res = { catEpoch, selfEpoch, kind, langsSig, filterSig, pool, total };
+    maxQuotesNextPoolCache.set(gd.id, res);
+    return res;
+  }
+  function maxQuotesNextPool(gd) { return computeMaxQuotesNextInfo(gd).pool; }
+  // Creation-modal preview, mirroring previewMaxChars.
+  function previewMaxQuotesLang(kind, langs) {
+    const { typed, total } = tallyMaxQuotesLang(kind, langs);
+    return { typed, total, ready: maxQuotesLangReady() };
+  }
+  const maxQuotesLangCache = new Map(); // goalId -> { catEpoch, selfEpoch, kind, langsSig, typed, total }
+  function computeMaxQuotesLang(gd) {
+    const kind = maxQuotesKindOf(gd);
+    const langs = gd.maxQuotesLangs || [];
+    const langsSig = langs.slice().sort().join(",");
+    const catEpoch = catalogEpoch, selfEpoch = rivalStoreEpoch;
+    const c = maxQuotesLangCache.get(gd.id);
+    if (c && c.catEpoch === catEpoch && c.selfEpoch === selfEpoch && c.kind === kind && c.langsSig === langsSig) return c;
+    const { typed, total } = tallyMaxQuotesLang(kind, langs);
+    const res = { catEpoch, selfEpoch, kind, langsSig, typed, total };
+    maxQuotesLangCache.set(gd.id, res);
+    return res;
+  }
+  // Render a max-quotes goal that has a language filter set. Mirrors
+  // updateQuoteCharsGoalSection above: shows "Syncing… (N%)" until the
+  // catalog + self store are ready, locks gd.baselineQuotes once, keeps
+  // gd.target current as the site's quote count for this kind+language set
+  // grows (new quotes get added over time — same idea as updateMaxQuotesGoals'
+  // stat-driven target refresh), then delegates to the shared updateGoalSection
+  // exactly like the stat-driven path does, so the card renders identically.
+  function updateMaxQuotesLangGoalSection(goalId, type, cfg, gd, isRecurring) {
+    const gainTextEl = document.getElementById(`${goalId}-gain-text`);
+    const fillEl     = document.getElementById(`${goalId}-progress-fill`);
+    if (!maxQuotesLangReady()) {
+      const labelEl = document.getElementById(`${goalId}-label`);
+      if (labelEl) labelEl.textContent = cfg.label;
+      const syncPct = targetSyncPercent();
+      if (gainTextEl) gainTextEl.textContent = syncPct == null ? "Syncing…" : `Syncing… (${syncPct}%)`;
+      if (fillEl) { fillEl.style.width = `${syncPct == null ? 0 : syncPct}%`; fillEl.style.background = "#60a5fa"; }
+      return;
+    }
+    const { typed, total } = computeMaxQuotesLang(gd);
+    const goals = goalData[type];
+    const live  = goals && goals.find(g => g.id === goalId);
+    if (live) {
+      let changed = false;
+      if (live.baselineQuotes == null) { live.baselineQuotes = typed; changed = true; }
+      const newTarget = Math.max(0, total - live.baselineQuotes);
+      if (Math.abs(newTarget - live.target) > 0.01) { live.target = newTarget; changed = true; }
+      if (changed) saveGoals(type);
+      gd = live;
+    }
+    const baseline = gd.baselineQuotes || 0;
+    const gain = Math.max(0, typed - baseline);
+
+    const prev = prevGainMap[goalId];
+    let gainDelta = 0;
+    if (prev != null && gain > prev) gainDelta = gain - prev;
+    prevGainMap[goalId] = gain;
+
+    if (isRecurring && !gd.completedThisPeriod && gain >= gd.target) {
+      const idx = goals ? goals.findIndex(g => g.id === goalId) : -1;
+      if (idx >= 0) { goals[idx] = { ...goals[idx], completedThisPeriod: true }; saveGoals(type); gd = goals[idx]; }
+    }
+
+    updateGoalSection(goalId, type, cfg, gd, gain, isRecurring, gainDelta);
+  }
+
   // Render a max-chars goal into the standard gain-row + progress-bar layout --
   // visually identical to a Max quotes goal, just chars instead of a count.
   function updateMaxCharsGoalSection(goalId, type, cfg, gd) {
@@ -8890,6 +9426,13 @@ async function getExpRankByUsername(username) {
         }
         if (type === "chars" && gd.quoteChars) {
           updateQuoteCharsGoalSection(goalId, type, cfg, gd, isRecurring);
+          continue;
+        }
+        // Max-quotes with a language filter: quotesTyped isn't language-scoped,
+        // so this bypasses the stat-driven path below (same reasoning as the
+        // max-chars/quote-chars catalog-driven branches above it).
+        if (type === "quotes" && gd.maxQuotes && gd.maxQuotesLangs && gd.maxQuotesLangs.length) {
+          updateMaxQuotesLangGoalSection(goalId, type, cfg, gd, isRecurring);
           continue;
         }
 
@@ -9317,7 +9860,7 @@ async function getExpRankByUsername(username) {
       // DON'T render — selfRender=false merges the store quietly. We collect the
       // promise so flushGoalRender() can wait briefly and show merged bests in
       // the single reveal. (gtPerf still logs the rival fetch lag internally.)
-      if (racesChanged && ((goalData.rival || []).length > 0 || haveImprovementTargetGoals() || haveMaxCharsGoals())) {
+      if (racesChanged && ((goalData.rival || []).length > 0 || haveImprovementTargetGoals() || haveMaxCharsGoals() || haveMaxQuotesLangGoals())) {
         const gtPerfSession = gtPerf.startRivalLag(gtStatsFetchMs); // [GT-PERF] anchor: rival fetch kicked
         const maintainPromise = maintainSelfStoreFromRaces(gtPerfSession, false)
           .catch(e => { console.warn("[Goal Tracker] rival self-store maintenance failed:", e); return false; });
@@ -9897,9 +10440,26 @@ async function getExpRankByUsername(username) {
   // delta-refreshed. Stored lean as qid → { d, l, r } (NO text). Built
   // leader-only and ONLY when at least one improvement-Target goal exists —
   // never fetch 14k quotes for users without one.
-  let quoteCatalog = Object.create(null);   // qid → { d, l, r }
+  let quoteCatalog = Object.create(null);   // qid → { d, l, r, lang }
   // Persisted sync state (resume cursor + counts). phase: "idle"|"bulk"|"done".
-  let quoteCatalogMeta = { totalCount: 0, totalPages: null, nextPage: 1, phase: "idle", lastFullSync: null, lastReconcile: null };
+  let quoteCatalogMeta = { totalCount: 0, totalPages: null, nextPage: 1, phase: "idle", lastFullSync: null, lastReconcile: null, catalogMetaV: 0 };
+  // Catalog schema version.
+  //   v1: { d, l, r } only.
+  //   v2: adds `lang` (the API's `language` string) for the max-quotes language filter.
+  // A catalog below the current version gets one full re-bulk (backfillCatalog-
+  // MetaIfNeeded) so every row picks up `lang` without a bespoke migration path.
+  const CATALOG_META_V = 2;
+  // Force one full re-page when the persisted catalog predates CATALOG_META_V.
+  // Existing rows stay (merges are idempotent) — this just resets the cursor so
+  // runQuoteCatalogDriver re-walks status=any and backfills `lang` into every
+  // row, then stamps the version so it never fires again.
+  function backfillCatalogMetaIfNeeded() {
+    if (quoteCatalogMeta.catalogMetaV === CATALOG_META_V) return;
+    quoteCatalogMeta.phase = "bulk";
+    quoteCatalogMeta.nextPage = 1;
+    quoteCatalogMeta.syncBurst = true;
+    quoteCatalogMeta.catalogMetaV = CATALOG_META_V;
+  }
   let catalogReady = false;     // hydrated from IDB? (mirrors rivalIdbReady)
   let catalogBulkActive = false; // exactly one catalog driver runs at a time
   // Monotonic version bumped whenever the catalog changes — the render/eval
@@ -10201,6 +10761,7 @@ async function getExpRankByUsername(username) {
               phase:       (value.phase === "bulk" || value.phase === "done") ? value.phase : "idle",
               lastFullSync: value.lastFullSync || null,
               lastReconcile: value.lastReconcile || null,
+              catalogMetaV: Number(value.catalogMetaV) || 0,
             };
           }
           continue;
@@ -10216,6 +10777,7 @@ async function getExpRankByUsername(username) {
       console.warn("[Goal Tracker] IndexedDB unavailable — rival data won't persist this session:", e);
     } finally {
       rivalIdbReady = true;
+      backfillCatalogMetaIfNeeded(); // pre-v2 catalogs: one-time re-bulk to backfill `lang`
       catalogReady = true;       // catalog hydrated from IDB (empty map if none)
       rivalStoreEpoch++;
       rivalRivalsEpoch++;        // rival stores just hydrated from IDB — composite cache is stale
@@ -10940,16 +11502,24 @@ async function getExpRankByUsername(username) {
     const store = loadRivalStore(RIVAL_SELF_NAME);
     let changed = false;
     const gtMerged = []; // [GT log] new personal bests merged this pass
+    const touched = [];  // { qid, prevEntry } — feeds the incremental cache patch below
     for (const race of races) {
-      if (race && rivalMergeEntry(store, race.quoteId, race.wpm, race.pp)) {
+      if (!race) continue;
+      const prevEntry = store.quotes[race.quoteId];
+      if (rivalMergeEntry(store, race.quoteId, race.wpm, race.pp)) {
         changed = true;
         gtMerged.push({ quoteId: race.quoteId, wpm: race.wpm, pp: race.pp });
+        touched.push({ qid: race.quoteId, prevEntry });
       }
     }
     if (changed) gtLog("Self store updated from /races", `${gtMerged.length} new personal best(s) merged`, { merged: gtMerged });
     // selfRender=false lets the quote-finish path render once (so the rival
     // merge lands in the same frame as the standard goals when it's fast).
-    if (changed) { saveRivalStore(RIVAL_SELF_NAME); if (selfRender) renderAllGoals(); }
+    if (changed) {
+      saveRivalStore(RIVAL_SELF_NAME); // bumps rivalStoreEpoch once for the whole batch
+      for (const { qid, prevEntry } of touched) patchDerivedCachesForQuote(qid, prevEntry, store.quotes[qid]);
+      if (selfRender) renderAllGoals();
+    }
     if (gtPerfSession) gtPerf.endRivalLag(gtPerfSession, gtRacesFetchMs, changed); // [GT-PERF]
     return changed;
   }
@@ -10972,9 +11542,11 @@ async function getExpRankByUsername(username) {
     catch { return false; }
     if (!best) return false; // 404 (never raced) or no bestRace — nothing to merge
     const store = loadRivalStore(RIVAL_SELF_NAME);
+    const prevEntry = store.quotes[quoteId];
     if (rivalMergeEntry(store, quoteId, best.wpm, best.pp)) {
       gtLog("Self store — post-race per-quote confirm merged a new best", `quote ${quoteId}`, { quoteId, wpm: best.wpm, pp: best.pp });
       saveRivalStore(RIVAL_SELF_NAME);
+      patchDerivedCachesForQuote(quoteId, prevEntry, store.quotes[quoteId]);
       return true;
     }
     return false;
@@ -11012,9 +11584,12 @@ async function getExpRankByUsername(username) {
         .then(best => {
           if (best == null) { rememberAbsent(key, quoteId); return; }
           const st = loadRivalStore(name);
+          const prevEntry = st.quotes[quoteId]; // always absent here (the guard above skips known quotes)
           if (rivalMergeEntry(st, quoteId, best.wpm, best.pp)) {
             gtLog("RIVALDIAG on-demand fill merged", `${name === RIVAL_SELF_NAME ? "self" : name} — quote ${quoteId}`, { wpm: best.wpm, pp: best.pp });
-            saveRivalStore(name); renderAllGoals();
+            saveRivalStore(name);
+            if (name === RIVAL_SELF_NAME) patchDerivedCachesForQuote(quoteId, prevEntry, st.quotes[quoteId]);
+            renderAllGoals();
           }
         })
         .catch(() => { /* gtApiFetch already escalated the shared backoff */ })
@@ -11032,7 +11607,7 @@ async function getExpRankByUsername(username) {
     if (!isLeader || !rivalIdbReady) return;
     if (apiHardThrottled()) return; // a genuine rate-limit is still in effect
     const haveRival = (goalData.rival || []).length > 0;
-    if (!haveRival && !haveImprovementTargetGoals() && !haveMaxCharsGoals()) return;
+    if (!haveRival && !haveImprovementTargetGoals() && !haveMaxCharsGoals() && !haveMaxQuotesLangGoals()) return;
     // Pull your latest /races into the self store (fills the just-set PB the
     // gated finish missed), then fill the live quote's bests for each rival.
     maintainSelfStoreFromRaces().catch(() => {});
@@ -11287,9 +11862,11 @@ async function getExpRankByUsername(username) {
     };
   }
 
-  // Merge one catalog row into the lean qid → { d, l, r } map. NO text stored.
-  // Returns true iff the entry was added or changed. A missing `ranked` defaults
-  // to true (the API's ranked-only default), but status=any rows always carry it.
+  // Merge one catalog row into the lean qid → { d, l, r, lang } map. NO text
+  // stored. Returns true iff the entry was added or changed. A missing
+  // `ranked` defaults to true (the API's ranked-only default), but status=any
+  // rows always carry it. `lang` is the API's raw `language` string (e.g.
+  // "English", "French") — used for the max-quotes language filter.
   function mergeCatalogQuote(q) {
     const qid = q && q.quoteId;
     if (!qid) return false;
@@ -11299,8 +11876,9 @@ async function getExpRankByUsername(username) {
     const d = Number.isFinite(dn) ? dn : (cur ? cur.d : undefined);
     const l = Number.isFinite(ln) ? ln : (cur ? cur.l : undefined);
     const r = (typeof q.ranked === "boolean") ? q.ranked : (cur ? cur.r : true);
-    if (cur && cur.d === d && cur.l === l && cur.r === r) return false;
-    quoteCatalog[qid] = { d, l, r };
+    const lang = (typeof q.language === "string" && q.language) ? q.language : (cur ? cur.lang : undefined);
+    if (cur && cur.d === d && cur.l === l && cur.r === r && cur.lang === lang) return false;
+    quoteCatalog[qid] = { d, l, r, lang };
     return true;
   }
 
@@ -11764,6 +12342,22 @@ async function getExpRankByUsername(username) {
     gtNavigate(`${location.origin}/solo/${encodeURIComponent(pick)}`);
   }
 
+  // Max-quotes "Next quote" button: jump to a random not-yet-typed quote
+  // matching the goal's kind + language filter. Simpler than the Target/Rival
+  // Next buttons above — progress here is binary (done/not-done), so there's
+  // no gap/metric to sort candidates by, just a uniform random pick from the
+  // not-done pool (mirrors their "random" mode).
+  function onMaxQuotesNextClicked(goalId) {
+    const gd = (goalData.quotes || []).find(g => g.id === goalId && g.maxQuotes);
+    if (!gd) return;
+    const pool = maxQuotesNextPool(gd);
+    if (pool.length === 0) return;
+    const liveQid = getCurrentQuoteIdLive();
+    const candidates = (liveQid && pool.length > 1) ? pool.filter(q => q !== liveQid) : pool;
+    const pick = candidates[Math.floor(Math.random() * candidates.length)];
+    gtNavigate(`${location.origin}/solo/${encodeURIComponent(pick)}`);
+  }
+
   // ── Rendering ───────────────────────────────────────────────────────────────────
   // Values are shown with two decimals to match how TypeGG displays WPM/PP.
   function rivalFmt(v) {
@@ -12046,6 +12640,139 @@ async function getExpRankByUsername(username) {
     const rivalDone = names.length > 0 && names.every(n => rivalBulkDone(loadRivalStore(n)));
     return { total, wins, worse, rivalDone, selfDone };
   }
+
+  // ══════════════════════════════════════════════════════════════
+  // Incremental cache patching for a single self-store quote change
+  // ══════════════════════════════════════════════════════════════
+  // Every derived-standings cache below (rival, target, max-chars, max-quotes-
+  // language) is invalidated wholesale by rivalStoreEpoch bumping on ANY
+  // self-store write, then rebuilt by a full walk over the whole catalog on
+  // the next read — that walk is what made every card update slowly after a
+  // race on a large catalog. rivalMergeEntry only RATCHETS (a race can only
+  // raise a quote's stored PP/WPM, never lower it — see its comment above), so
+  // a single quote's before/after contribution to each cache is a one-quote
+  // diff, not a full rescan. Called right after a successful self-store merge
+  // (post-race, per-quote confirm, or on-demand fill), with the quote's entry
+  // captured immediately before and after that merge.
+  //
+  // Each sub-patcher skips (falls back to the existing full-rescan-on-next-
+  // read, unchanged) whenever its cache isn't populated yet or its cached
+  // signature no longer matches the goal's current config — those states are
+  // rare and already handled correctly by the pre-existing invalidation
+  // (rivalRivalsEpoch / catalogEpoch / a changed filter signature).
+
+  function patchRivalStandingsForQuote(qid, prevEntry, newEntry) {
+    for (const gd of (goalData.rival || [])) {
+      const cached = rivalStandingsCache.get(gd.id);
+      if (!cached || !cached.selfDone) continue;
+      const rs = goalRivalCfg(gd);
+      const metric = rivalMetric(rs), scope = rivalScope(rs), requireBoth = !!rs.requireBoth;
+      const names = goalRivalNames(gd);
+      const namesSig = names.map(n => String(n).toLowerCase()).sort().join(",");
+      const filterSig = rivalFilterSig(rs, gd);
+      if (cached.metric !== metric || cached.scope !== scope || cached.requireBoth !== requireBoth
+          || cached.namesSig !== namesSig || cached.filterSig !== filterSig) continue;
+
+      const composite = buildRivalComposite(names, metric);
+      const c = composite[qid];
+      if (!c) continue; // this quote isn't in this rival goal's pool at all
+      if (!rivalQuoteInScope(c, scope)) continue;
+      const filter = rivalFilterState(rs, gd);
+      if ((filter.dActive || filter.lActive) && !rivalQuotePassesFilter(c, filter)) continue;
+      const mf = rivalMetricFilterState(rs, gd);
+      if (mf.rActive && !rivalMetricPasses(c.v, mf)) continue;
+
+      const rv = c.v;
+      const oldSv = prevEntry ? (Number(prevEntry[metric]) || 0) : 0;
+      const newSv = newEntry  ? (Number(newEntry[metric])  || 0) : 0;
+      const wasCounted = requireBoth ? !!prevEntry : true;
+      const isCounted  = requireBoth ? !!newEntry  : true;
+      const res = cached.result;
+      if (!wasCounted && isCounted) {
+        res.total++;
+        if (newSv > rv + RIVAL_PP_EPS) res.wins++;
+        else res.worse.push(qid);
+      } else if (wasCounted && isCounted) {
+        const wasWin = oldSv > rv + RIVAL_PP_EPS;
+        const isWin  = newSv > rv + RIVAL_PP_EPS;
+        if (!wasWin && isWin) {
+          res.wins++;
+          const idx = res.worse.indexOf(qid);
+          if (idx !== -1) res.worse.splice(idx, 1);
+        }
+        // !wasWin && !isWin: still behind — already sitting in `worse` from
+        // being an unraced target or a prior raced-but-behind pass. wasWin &&
+        // isWin can't happen (a win never un-wins through this ratchet path).
+      }
+      cached.epoch = rivalStoreEpoch;
+    }
+  }
+
+  function patchTargetCacheForQuote(qid, prevEntry, newEntry) {
+    const m = quoteCatalog[qid];
+    if (!m) return;
+    for (const gd of (goalData.improvement || [])) {
+      if (!goalIsImprovementTarget(gd)) continue;
+      const c = targetStandingsCache.get(gd.id);
+      if (!c || c.catEpoch !== catalogEpoch || c.sig !== targetFilterSig(gd)) continue;
+      if (!targetQuotePassesMeta(m, gd)) continue;
+      const metric = targetMetricOf(gd);
+      const target = Number(gd.target) || 0;
+      const playedOnly = gd.played === "played";
+      const oldBest = prevEntry ? (Number(prevEntry[metric]) || 0) : 0;
+      const newBest = newEntry  ? (Number(newEntry[metric])  || 0) : 0;
+      let { hit, total, catalogSynced, selfDone } = c.result;
+      if (playedOnly && !prevEntry && newEntry) total++;
+      if (newBest >= target && !(oldBest >= target)) hit++;
+      c.result = { hit, total, catalogSynced, selfDone };
+      c.selfEpoch = rivalStoreEpoch;
+    }
+  }
+
+  function patchMaxCharsCacheForQuote(qid, prevEntry, newEntry) {
+    if (prevEntry) return; // chars are presence-only — an existing entry improving is a no-op
+    const m = quoteCatalog[qid];
+    if (!m) return;
+    const len = Number(m.l);
+    if (!Number.isFinite(len) || len <= 0) return;
+    for (const c of maxCharsCache.values()) {
+      if (c.catEpoch !== catalogEpoch) continue;
+      if (!maxCharsScopeOk(m.r, c.kind)) continue;
+      c.typed += len;
+      c.selfEpoch = rivalStoreEpoch;
+    }
+  }
+
+  function patchMaxQuotesLangCacheForQuote(qid, prevEntry, newEntry) {
+    if (prevEntry) return; // same presence-only shape as max-chars
+    const m = quoteCatalog[qid];
+    if (!m) return;
+    const langMatches = (langsSig) => !langsSig || langsSig.split(",").includes(m.lang);
+    for (const c of maxQuotesLangCache.values()) {
+      if (c.catEpoch !== catalogEpoch) continue;
+      if (!maxCharsScopeOk(m.r, c.kind)) continue;
+      if (!langMatches(c.langsSig)) continue;
+      c.typed += 1;
+      c.selfEpoch = rivalStoreEpoch;
+    }
+    for (const c of maxQuotesNextPoolCache.values()) {
+      if (c.catEpoch !== catalogEpoch) continue;
+      if (!maxCharsScopeOk(m.r, c.kind)) continue;
+      if (!langMatches(c.langsSig)) continue;
+      const idx = c.pool.indexOf(qid);
+      if (idx !== -1) c.pool.splice(idx, 1); // no longer a "next quote" candidate
+      c.selfEpoch = rivalStoreEpoch;
+    }
+  }
+
+  // Single entry point called from every self-store single-quote merge site.
+  function patchDerivedCachesForQuote(qid, prevEntry, newEntry) {
+    patchRivalStandingsForQuote(qid, prevEntry, newEntry);
+    patchTargetCacheForQuote(qid, prevEntry, newEntry);
+    patchMaxCharsCacheForQuote(qid, prevEntry, newEntry);
+    patchMaxQuotesLangCacheForQuote(qid, prevEntry, newEntry);
+  }
+
   function computeRivalStandings(gd) {
     const rs = goalRivalCfg(gd);
     const metric = rivalMetric(rs);
@@ -13998,12 +14725,16 @@ async function getExpRankByUsername(username) {
       if (!goals || goals.length === 0) return;
 
       // ── Skip entirely if no goal actually uses maxQuotes ─────
-      if (!goals.some(g => g.maxQuotes)) return;
+      // Language-filtered goals (gd.maxQuotesLangs) don't use this site-wide
+      // stat path at all — updateMaxQuotesLangGoalSection owns their target
+      // via the catalog tally instead, so they're excluded here.
+      const isStatDriven = g => g.maxQuotes && !(g.maxQuotesLangs && g.maxQuotesLangs.length);
+      if (!goals.some(isStatDriven)) return;
 
       // Work out which on-site totals we actually need, then fetch each
       // ONCE (outside the loop) and in parallel.
-      const needRanked   = goals.some(g => g.maxQuotes && maxQuotesKindOf(g) !== "unranked"); // ranked or all
-      const needUnranked = goals.some(g => g.maxQuotes && (maxQuotesKindOf(g) === "unranked" || maxQuotesKindOf(g) === "all"));
+      const needRanked   = goals.some(g => isStatDriven(g) && maxQuotesKindOf(g) !== "unranked"); // ranked or all
+      const needUnranked = goals.some(g => isStatDriven(g) && (maxQuotesKindOf(g) === "unranked" || maxQuotesKindOf(g) === "all"));
 
       const [totalRanked, totalUnranked] = await Promise.all([
         needRanked   ? getTypeGGTotalQuotes()         : Promise.resolve(null),
@@ -14013,7 +14744,7 @@ async function getExpRankByUsername(username) {
       let changed = false;
       for (let i = 0; i < goals.length; i++) {
         const gd = goals[i];
-        if (!gd.maxQuotes) continue;
+        if (!isStatDriven(gd)) continue;
 
         const kind = maxQuotesKindOf(gd);
         let total;
