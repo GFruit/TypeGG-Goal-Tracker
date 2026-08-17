@@ -745,6 +745,11 @@
 #gt-max-quotes-row .gt-mode-btn,
 #gt-max-chars-row .gt-mode-btn { white-space: nowrap; padding-left: 4px; padding-right: 4px; }
 
+/* #gt-max-quotes-row alone wraps: the three kind buttons stay on their own
+   line, and the language picker + its chips (added below the buttons, each
+   width:100%) drop to their own lines instead of squeezing into the row. */
+#gt-max-quotes-row { flex-wrap: wrap; }
+
 #gt-next-rank-btn {
   width: auto; /* Overrides the previous 100% width */
   padding: 5px 12px;
