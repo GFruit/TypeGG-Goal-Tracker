@@ -570,6 +570,10 @@
   cursor: default;
   opacity: 0.8;
 }
+/* Max-quotes card "Next quote" button sits directly under the progress bar,
+   so it needs a little separation the rival/target cards get from their sync
+   line. */
+.gt-mq-next-btn { margin-top: 8px; }
 
 /* ── Requirements row (race goals + gain mode) ───────────
    Three chip-shaped inputs (WPM / Acc / PP) plus a right-aligned
@@ -744,6 +748,32 @@
 }
 #gt-max-quotes-row .gt-mode-btn,
 #gt-max-chars-row .gt-mode-btn { white-space: nowrap; padding-left: 4px; padding-right: 4px; }
+
+/* ── Language chips: Max-quotes goal scope (create modal + edit popover) ──
+   Pill toggles. "All" (nothing selected) keeps the original cross-language
+   behaviour; a specific language uses the emerald accent that matches the Max
+   kind buttons, while the All chip uses the blue accent so it reads as the
+   neutral default rather than one more language. */
+#gt-max-quotes-lang-row {
+  display: flex; flex-wrap: wrap; gap: 5px;
+  margin: 0 0 12px;
+}
+.gt-lang-chip {
+  padding: 4px 10px; border-radius: 999px;
+  border: 1.5px solid #374151; background: transparent;
+  color: #9ca3af; font-size: 11px; font-weight: 500;
+  cursor: pointer; transition: all 0.15s;
+}
+.gt-lang-chip:hover { border-color: #4b5563; color: #e5e7eb; }
+.gt-lang-chip.active { border-color: #10b981; background: #022c22; color: #6ee7b7; }
+.gt-lang-chip.gt-lang-all.active { border-color: #3b82f6; background: #1e3a5f; color: #93c5fd; }
+
+/* Same chips inside the Edit-goal popover (tighter to match its rows). */
+.gt-edit-lang-row {
+  display: flex; flex-wrap: wrap; gap: 4px;
+  padding: 0 4px 4px;
+}
+.gt-edit-lang-row .gt-lang-chip { font-size: 10.5px; padding: 4px 9px; }
 
 #gt-next-rank-btn {
   width: auto; /* Overrides the previous 100% width */
@@ -1918,6 +1948,9 @@ body.gt-app-loggedout .gt-widget-detached { display: none !important; }
 .gt-edit-reset-go:focus-visible { outline: 2px solid #fca5a5; outline-offset: 1px; }
 
 .gt-edit-popover-wide { min-width: 264px; }
+/* Max-quotes edit popover: fix the width to the Ranked/Unranked/All row so the
+   language chips wrap onto new lines instead of stretching the popover wide. */
+.gt-edit-popover-mq { width: 236px; min-width: 0; }
 /* ── Custom resize handles ──────────────────────────────
    8 invisible strips (4 edges + 4 corners) injected by JS into every
    widget (ensureResizeHandles). They replace the native CSS resize

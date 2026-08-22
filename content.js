@@ -69,6 +69,26 @@ function gtMain() {
   // Storage namespace; "" for English so existing keys keep working untouched.
   const GT_NS = GT_SUBDOMAIN ? GT_SUBDOMAIN + ":" : "";
 
+  // ── Max-quotes language scoping ───────────────────
+  // The selectable languages for a language-scoped Max-quotes goal. These
+  // mirror the ranked universes; "All languages" (no selection) keeps the
+  // original cross-language behaviour. The /quotes API accepts a wider set,
+  // but these cover the ranked worlds users actually chase.
+  const MAX_QUOTES_LANGS = ["English", "German", "French", "Italian", "Spanish", "Russian", "Vietnamese"];
+  const LANG_CODE = { English: "EN", German: "DE", French: "FR", Italian: "IT", Spanish: "ES", Russian: "RU", Vietnamese: "VI" };
+  // Which quote-status buckets a Max-quotes kind spans. "all" = ranked +
+  // unranked (matches the pre-existing summed behaviour — we never rely on
+  // the API's status=any).
+  function statusesForKind(kind) {
+    return kind === "unranked" ? ["unranked"] : kind === "all" ? ["ranked", "unranked"] : ["ranked"];
+  }
+  // Compact "· EN·DE" / "· 5 languages" scope suffix for goal labels + hints.
+  function langScopeSuffix(langs) {
+    if (!Array.isArray(langs) || !langs.length) return "";
+    if (langs.length <= 3) return " · " + langs.map(l => LANG_CODE[l] || l).join("·");
+    return ` · ${langs.length} languages`;
+  }
+
   // Append the universe to a PP-derived endpoint (/users, /leaders?sort=totalPp).
   // No-op for English. Only totalPp / globalRank / bestPp / bestWpm are
   // language-scoped by the API; EXP / races / quotes / nWpm stay global, so
@@ -877,6 +897,8 @@ function gtMain() {
       <div class="gt-progress-bar">
         <div id="${goalId}-progress-fill" class="gt-progress-fill"></div>
       </div>
+      <div id="${goalId}-mq-sync" class="gt-sync-line" style="display:none;"></div>
+      <button id="${goalId}-mq-next" class="gt-rival-next-btn gt-mq-next-btn" style="display:none;" disabled>\u23ed Next quote</button>
       <!-- Average-mode rows (rolling-avg goals). Hidden by default; shown
            in place of gt-gain-row + progress-bar when goalIsAverage(gd).
            Three rows total:
@@ -924,6 +946,14 @@ function gtMain() {
         removeGoal(type, goalId);
       }
     });
+
+    // Wire the Max-quotes "Next quote" button (shown only for max-quotes goals;
+    // updateGoalSection toggles its visibility + enabled state).
+    const mqNextBtn = document.getElementById(`${goalId}-mq-next`);
+    if (mqNextBtn) {
+      mqNextBtn.addEventListener("mousedown", (e) => e.stopPropagation());
+      mqNextBtn.addEventListener("click", (e) => { e.stopPropagation(); onMaxQuotesNextClicked(goalId); });
+    }
 
     // Wire the per-goal edit button (present when goalIsEditable gated it in).
     const viewToggleBtn = document.getElementById(`${goalId}-view-toggle`);
@@ -1146,7 +1176,8 @@ function gtMain() {
     const isRival = (type === "rival");
     const canAvg  = goalIsAverage(gd);
     const canReset = goalSupportsReset(type, gd);
-    if (!canAmount && !canRec && !canView && !isImpTarget && !isRival && !canAvg && !canReset) return;
+    const canMaxQuotesEdit = type === "quotes" && !!gd.maxQuotes;
+    if (!canAmount && !canRec && !canView && !isImpTarget && !isRival && !canAvg && !canReset && !canMaxQuotesEdit) return;
 
     let draftView = goalCountView(gd);
 
@@ -1244,14 +1275,50 @@ function gtMain() {
     ).join("") : "";
     const recResettable = canRec && ((gd.streak > 0) || (gd.totalCompletions > 0));
 
+    // ── Max-quotes pool editor markup (kind + language chips) ──
+    const mqKindCur = canMaxQuotesEdit ? maxQuotesKindOf(gd) : "ranked";
+    const mqKindBtnsHtml = [["all", "All"], ["ranked", "Ranked"], ["unranked", "Unranked"]]
+      .map(([v, l]) => `<button class="gt-mode-btn${v === mqKindCur ? " active" : ""}" data-mq-kind="${v}">${l}</button>`).join("");
+    const mqLangs0 = (canMaxQuotesEdit && Array.isArray(gd.languages)) ? gd.languages.slice() : [];
+    const mqLangChipsHtml = [
+      `<button type="button" class="gt-lang-chip gt-lang-all${mqLangs0.length === 0 ? " active" : ""}" data-mq-lang="__all">All</button>`
+    ].concat(MAX_QUOTES_LANGS.map(l =>
+      `<button type="button" class="gt-lang-chip${mqLangs0.includes(l) ? " active" : ""}" data-mq-lang="${l}">${l}</button>`
+    )).join("");
+    const mqDiffRangeId = `gt-mqedit-diff-range-${goalId}`, mqDiffReadoutId = `gt-mqedit-diff-readout-${goalId}`, mqDiffTicksId = `gt-mqedit-diff-ticks-${goalId}`;
+    const mqLenRangeId  = `gt-mqedit-len-range-${goalId}`,  mqLenReadoutId  = `gt-mqedit-len-readout-${goalId}`,  mqLenTicksId  = `gt-mqedit-len-ticks-${goalId}`;
+    const mqSlider = (rangeId, readoutId, ticksId, label, loAria, hiAria) => `
+      <div class="gt-edit-label">${label}<span class="gt-range-readout" id="${readoutId}"></span></div>
+      <div class="gt-range-row" id="${ticksId}">
+        <span class="gt-range-end gt-range-end-lo"></span>
+        <div class="gt-range" id="${rangeId}">
+          <div class="gt-range-track"><div class="gt-range-fill"></div></div>
+          <input class="gt-range-input gt-range-lo" type="range" aria-label="${loAria}" />
+          <input class="gt-range-input gt-range-hi" type="range" aria-label="${hiAria}" />
+        </div>
+        <span class="gt-range-end gt-range-end-hi"></span>
+      </div>`;
+    const maxQuotesEditHtml = canMaxQuotesEdit ? `
+      <div class="gt-edit-label">Quote pool</div>
+      <div class="gt-edit-rec-group">${mqKindBtnsHtml}</div>
+      <div class="gt-edit-label">Languages</div>
+      <div class="gt-edit-lang-row">${mqLangChipsHtml}</div>
+      ${mqSlider(mqDiffRangeId, mqDiffReadoutId, mqDiffTicksId, "Difficulty filter", "Minimum difficulty", "Maximum difficulty")}
+      ${mqSlider(mqLenRangeId, mqLenReadoutId, mqLenTicksId, "Quote length filter", "Minimum length", "Maximum length")}
+      <div class="gt-edit-note gt-mq-edit-note" style="display:none;"></div>
+    ` : "";
+
     const pop = document.createElement("div");
-    pop.className = "gt-view-popover gt-edit-popover" + ((isImpTarget || isRival) ? " gt-edit-popover-wide" : "");
+    pop.className = "gt-view-popover gt-edit-popover"
+      + ((isImpTarget || isRival) ? " gt-edit-popover-wide" : "")
+      + (canMaxQuotesEdit ? " gt-edit-popover-mq" : "");
     pop.dataset.goalId = goalId;
     pop.innerHTML = `
       <div class="gt-view-popover-title">Edit goal<span class="gt-settings-saved-indicator gt-edit-saved">Settings saved</span><button class="gt-edit-close" type="button" title="Close" aria-label="Close">×</button></div>
       ${impTargetHtml}
       ${rivalEditHtml}
       ${avgEditHtml}
+      ${maxQuotesEditHtml}
       ${canAmount ? `<div class="gt-edit-label">Amount</div><input type="number" class="gt-custom-input gt-edit-amount" value="${gd.target}" min="1" step="1">` : ""}
       ${canRec ? `<div class="gt-edit-label">Recurrence</div><div class="gt-edit-rec-group">${recBtnsHtml}</div>${recResettable ? `<div class="gt-edit-note">Changing this resets the streak & completions.</div>` : ""}` : ""}
       ${canView ? `<div class="gt-edit-label">Display Format</div><div class="gt-edit-view-group"><button class="gt-mode-btn gt-edit-view-btn${draftView === "progress" ? " active" : ""}" data-view="progress">Progress</button><button class="gt-mode-btn gt-edit-view-btn${draftView === "remaining" ? " active" : ""}" data-view="remaining">Remaining</button></div>` : ""}
@@ -1266,6 +1333,85 @@ function gtMain() {
       savedEl.classList.add("visible");
       clearTimeout(savedTimer);
       savedTimer = setTimeout(() => savedEl.classList.remove("visible"), 1500);
+    }
+    // ── Max-quotes pool editor (kind + languages + diff/len, live-applied) ──
+    if (canMaxQuotesEdit) {
+      let editKind    = maxQuotesKindOf(gd);
+      let editLangs   = Array.isArray(gd.languages) ? gd.languages.slice() : [];
+      let editDiffMin = gd.diffMin != null ? gd.diffMin : null, editDiffMax = gd.diffMax != null ? gd.diffMax : null;
+      let editLenMin  = gd.lenMin  != null ? gd.lenMin  : null, editLenMax  = gd.lenMax  != null ? gd.lenMax  : null;
+      const mqNote  = pop.querySelector(".gt-mq-edit-note");
+      const mqKindBtns = [...pop.querySelectorAll("[data-mq-kind]")];
+      const mqLangBtns = [...pop.querySelectorAll("[data-mq-lang]")];
+      const reflectMq = () => {
+        mqKindBtns.forEach(b => b.classList.toggle("active", b.dataset.mqKind === editKind));
+        const none = editLangs.length === 0;
+        mqLangBtns.forEach(b => {
+          const v = b.dataset.mqLang;
+          b.classList.toggle("active", v === "__all" ? none : editLangs.includes(v));
+        });
+      };
+      const doMqApply = () => {
+        const ok = applyMaxQuotesGoalEdit(gd, {
+          maxQuotesKind: editKind,
+          languages: editLangs.slice(),
+          diffMin: editDiffMin, diffMax: editDiffMax,
+          lenMin:  editLenMin,  lenMax:  editLenMax,
+        });
+        if (mqNote) {
+          if (ok) { mqNote.style.display = "none"; flashSaved(); }
+          else    { mqNote.style.display = "block"; mqNote.textContent = "\u26a0 Couldn't update \u2014 try again"; }
+        }
+      };
+      // Sliders fire continuously on drag; debounce the re-tally + save.
+      let mqApplyTimer = null;
+      const scheduleMqApply = () => { clearTimeout(mqApplyTimer); mqApplyTimer = setTimeout(doMqApply, 250); };
+      const buildMqEditSliders = () => {
+        const axis = maxQuotesAxis(editKind, editLangs);
+        const clampD = (v) => Math.max(axis.diffMin, Math.min(axis.diffMax, v));
+        const clampL = (v) => Math.max(axis.lenMin,  Math.min(axis.lenMax,  v));
+        const dLo = editDiffMin == null ? axis.diffMin : clampD(editDiffMin);
+        const dHi = editDiffMax == null ? axis.diffMax : clampD(editDiffMax);
+        const lLo = editLenMin  == null ? axis.lenMin  : clampL(editLenMin);
+        const lHi = editLenMax  == null ? axis.lenMax  : clampL(editLenMax);
+        setupTargetRange(mqDiffRangeId, mqDiffReadoutId, mqDiffTicksId, {
+          min: axis.diffMin, max: axis.diffMax, step: 0.1, decimals: true,
+          ticks: [String(axis.diffMin), `${axis.diffMax}+`], lo: dLo, hi: dHi,
+          set: (lo, hi) => { editDiffMin = lo; editDiffMax = hi; scheduleMqApply(); },
+        });
+        setupTargetRange(mqLenRangeId, mqLenReadoutId, mqLenTicksId, {
+          min: axis.lenMin, max: axis.lenMax, step: 1, decimals: false,
+          ticks: [String(axis.lenMin), `${axis.lenMax}+`], lo: lLo, hi: lHi,
+          set: (lo, hi) => { editLenMin = lo; editLenMax = hi; scheduleMqApply(); },
+        });
+      };
+      // Kind / language change moves the axis (a different quote slice). Keep the
+      // chosen bands, clamped into the new axis (a handle collapses to "open"
+      // only if it lands on the new end) so filters survive pool/language edits.
+      const reclampEditBands = () => {
+        const axis = maxQuotesAxis(editKind, editLangs);
+        const lo = (v, mn, mx) => { if (v == null) return null; const c = Math.max(mn, Math.min(mx, v)); return c <= mn ? null : c; };
+        const hi = (v, mn, mx) => { if (v == null) return null; const c = Math.max(mn, Math.min(mx, v)); return c >= mx ? null : c; };
+        editDiffMin = lo(editDiffMin, axis.diffMin, axis.diffMax);
+        editDiffMax = hi(editDiffMax, axis.diffMin, axis.diffMax);
+        editLenMin  = lo(editLenMin,  axis.lenMin,  axis.lenMax);
+        editLenMax  = hi(editLenMax,  axis.lenMin,  axis.lenMax);
+      };
+      mqKindBtns.forEach(b => b.addEventListener("click", () => {
+        editKind = b.dataset.mqKind;
+        reclampEditBands();
+        reflectMq(); buildMqEditSliders(); doMqApply();
+      }));
+      mqLangBtns.forEach(b => b.addEventListener("click", () => {
+        const v = b.dataset.mqLang;
+        if (v === "__all") editLangs = [];
+        else { const i = editLangs.indexOf(v); if (i >= 0) editLangs.splice(i, 1); else editLangs.push(v); }
+        reclampEditBands();
+        reflectMq(); buildMqEditSliders(); doMqApply();
+      }));
+      reflectMq();
+      // Deferred so the popover is attached before setupTargetRange binds by id.
+      setTimeout(buildMqEditSliders, 0);
     }
     pop.querySelector(".gt-edit-close")?.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -3072,6 +3218,34 @@ function gtMain() {
           <button id="gt-rival-add-btn" class="gt-rival-add-inline-btn" type="button" style="display:none;" disabled>+ Add</button>
         </div>
       </div>
+      <!-- Language scope for Max-quotes goals (quotes + target + a Max kind).
+           Chips toggle languages; "All" (nothing selected) keeps the original
+           cross-language behaviour. Populated + wired in JS. -->
+      <div id="gt-max-quotes-lang-row" style="display:none;"></div>
+      <div id="gt-max-quotes-diff-row" style="display:none;">
+        <div class="gt-section-label">Difficulty filter<span class="gt-range-readout" id="gt-mq-diff-readout"></span></div>
+        <div class="gt-range-row" id="gt-mq-diff-ticks">
+          <span class="gt-range-end gt-range-end-lo"></span>
+          <div class="gt-range" id="gt-mq-diff-range">
+            <div class="gt-range-track"><div class="gt-range-fill"></div></div>
+            <input class="gt-range-input gt-range-lo" type="range" aria-label="Minimum difficulty" />
+            <input class="gt-range-input gt-range-hi" type="range" aria-label="Maximum difficulty" />
+          </div>
+          <span class="gt-range-end gt-range-end-hi"></span>
+        </div>
+      </div>
+      <div id="gt-max-quotes-len-row" style="display:none;">
+        <div class="gt-section-label">Quote length filter<span class="gt-range-readout" id="gt-mq-len-readout"></span></div>
+        <div class="gt-range-row" id="gt-mq-len-ticks">
+          <span class="gt-range-end gt-range-end-lo"></span>
+          <div class="gt-range" id="gt-mq-len-range">
+            <div class="gt-range-track"><div class="gt-range-fill"></div></div>
+            <input class="gt-range-input gt-range-lo" type="range" aria-label="Minimum length" />
+            <input class="gt-range-input gt-range-hi" type="range" aria-label="Maximum length" />
+          </div>
+          <span class="gt-range-end gt-range-end-hi"></span>
+        </div>
+      </div>
       <div id="gt-mode-hint" class="gt-mode-hint" style="display:none;"></div>
       <!-- Rival comparison config (type=rival only). Mirrors the per-goal "Edit
            goal" popover so a rival goal can be tuned at creation: metric, quote
@@ -4673,6 +4847,169 @@ async function getExpRankByUsername(username) {
     return data.totalCount;
   }
 
+  // ── Max-quotes scope, counts + Next-quote (catalog-backed) ───────
+  // A Max-quotes goal tracks completion of a filtered slice of the quote
+  // catalog: by kind (ranked/unranked/all), languages, and difficulty/length
+  // bands. "Completed" = present in the self store (the quotes you've typed).
+  // Everything derives from the shared quoteCatalog (now carrying `g` =
+  // language) + the self store, so counts, filters and the Next-quote pool all
+  // agree and update live as those two syncs progress.
+
+  // Does a catalog row's ranked flag match a kind? (missing r == ranked)
+  function maxQuotesKindMatches(m, kind) {
+    if (kind === "ranked")   return m.r !== false;
+    if (kind === "unranked") return m.r === false;
+    return true; // "all"
+  }
+
+  // Does a catalog row pass a goal's full scope (kind + languages + diff/len)?
+  // Null/absent diff/len bound = open. Empty/absent languages = every language.
+  // A constrained band excludes rows with unknown meta (defensive).
+  function maxQuoteInScope(m, gd) {
+    if (!m) return false;
+    if (!maxQuotesKindMatches(m, maxQuotesKindOf(gd))) return false;
+    const langs = gd.languages;
+    if (Array.isArray(langs) && langs.length) {
+      if (!m.g || !langs.includes(m.g)) return false;
+    }
+    if (gd.diffMin != null || gd.diffMax != null) {
+      const d = Number(m.d);
+      if (!Number.isFinite(d)) return false;
+      if (gd.diffMin != null && d < gd.diffMin) return false;
+      if (gd.diffMax != null && d > gd.diffMax) return false;
+    }
+    if (gd.lenMin != null || gd.lenMax != null) {
+      const l = Number(m.l);
+      if (!Number.isFinite(l)) return false;
+      if (gd.lenMin != null && l < gd.lenMin) return false;
+      if (gd.lenMax != null && l > gd.lenMax) return false;
+    }
+    return true;
+  }
+
+  // Full tally over the catalog: { total, typed, catalogSynced, selfDone }.
+  // typed = in-scope quotes present in the self store (= you've typed them).
+  function tallyMaxQuotes(gd) {
+    const sq = loadRivalStore(RIVAL_SELF_NAME).quotes;
+    let total = 0, typed = 0;
+    for (const qid in quoteCatalog) {
+      if (!maxQuoteInScope(quoteCatalog[qid], gd)) continue;
+      total++;
+      if (qid in sq) typed++;
+    }
+    return {
+      total, typed,
+      catalogSynced: catalogFullySynced(),
+      selfDone: rivalBulkDone(loadRivalStore(RIVAL_SELF_NAME)),
+    };
+  }
+
+  // Scanning the whole catalog per goal per render is wasteful; memoize by
+  // (catalogEpoch, selfEpoch, scope signature) like computeTargetStanding.
+  function maxQuotesScopeSig(gd) {
+    return [maxQuotesKindOf(gd), (gd.languages || []).slice().sort().join(","),
+            gd.diffMin, gd.diffMax, gd.lenMin, gd.lenMax].join("|");
+  }
+  const maxQuotesTallyCache = new Map(); // goalId → { catEpoch, selfEpoch, sig, result }
+  const maxQuotesPillArmed = new Set();  // goalIds whose +N pill is armed (post-sync)
+  function computeMaxQuotesTally(gd) {
+    const catEpoch = catalogEpoch, selfEpoch = rivalStoreEpoch, sig = maxQuotesScopeSig(gd);
+    const cached = maxQuotesTallyCache.get(gd.id);
+    if (cached && cached.catEpoch === catEpoch && cached.selfEpoch === selfEpoch && cached.sig === sig) {
+      return cached.result;
+    }
+    const result = tallyMaxQuotes(gd);
+    maxQuotesTallyCache.set(gd.id, { catEpoch, selfEpoch, sig, result });
+    return result;
+  }
+
+  // Candidate pool for "Next quote": in-scope quotes NOT yet typed. Works off
+  // whatever the catalog + self store have loaded so far, so the button is
+  // usable mid-sync. Recomputed per click (cheap enough; not cached).
+  function maxQuotesCandidates(gd) {
+    const sq = loadRivalStore(RIVAL_SELF_NAME).quotes;
+    const out = [];
+    for (const qid in quoteCatalog) {
+      if (!maxQuoteInScope(quoteCatalog[qid], gd)) continue;
+      if (qid in sq) continue;
+      out.push(qid);
+    }
+    return out;
+  }
+
+  function onMaxQuotesNextClicked(goalId) {
+    const gd = (goalData.quotes || []).find(g => g.id === goalId && g.maxQuotes);
+    if (!gd) return;
+    let pool = maxQuotesCandidates(gd);
+    if (pool.length === 0) return;
+    const liveQid = getCurrentQuoteIdLive();
+    if (liveQid && pool.length > 1) pool = pool.filter(q => q !== liveQid);
+    const pick = pool[Math.floor(Math.random() * pool.length)];
+    gtNavigate(`${location.origin}/solo/${encodeURIComponent(pick)}`);
+  }
+
+  // Difficulty/length slider axis for a kind + languages, derived from the
+  // in-scope catalog rows. Falls back to fixed bounds until the catalog has
+  // data. (Own cache; mirrors catalogAxis.)
+  let maxQuotesAxisCache = null;
+  function maxQuotesAxis(kind, langs) {
+    const key = `${catalogEpoch}:${kind}:${(langs || []).slice().sort().join(",")}`;
+    if (maxQuotesAxisCache && maxQuotesAxisCache.key === key) return maxQuotesAxisCache;
+    const hasLangs = Array.isArray(langs) && langs.length;
+    let dLo = Infinity, dHi = -Infinity, lLo = Infinity, lHi = -Infinity;
+    for (const qid in quoteCatalog) {
+      const m = quoteCatalog[qid];
+      if (!maxQuotesKindMatches(m, kind)) continue;
+      if (hasLangs && (!m.g || !langs.includes(m.g))) continue;
+      const d = Number(m.d), l = Number(m.l);
+      if (Number.isFinite(d)) { if (d < dLo) dLo = d; if (d > dHi) dHi = d; }
+      if (Number.isFinite(l)) { if (l < lLo) lLo = l; if (l > lHi) lHi = l; }
+    }
+    const floorTo = (v, sp) => Math.floor(v / sp) * sp;
+    const ceilTo  = (v, sp) => Math.ceil(v / sp) * sp;
+    const axis = {
+      key,
+      diffMin: Number.isFinite(dLo) ? Math.floor(dLo) : CATALOG_DIFF_MIN,
+      diffMax: Number.isFinite(dHi) ? Math.ceil(dHi)  : CATALOG_DIFF_MAX,
+      lenMin:  Number.isFinite(lLo) ? floorTo(lLo, CATALOG_LEN_ROUND) : CATALOG_LEN_MIN,
+      lenMax:  Number.isFinite(lHi) ? ceilTo(lHi, CATALOG_LEN_ROUND)  : CATALOG_LEN_MAX,
+    };
+    if (axis.diffMax <= axis.diffMin) axis.diffMax = axis.diffMin + 1;
+    if (axis.lenMax  <= axis.lenMin)  axis.lenMax  = axis.lenMin + CATALOG_LEN_ROUND;
+    maxQuotesAxisCache = axis;
+    return axis;
+  }
+
+  // Compact "· diff 2–4 · len 100–300" band suffix for hints/labels. Only shows
+  // the dimensions actually constrained.
+  function maxQuotesBandSuffix(gd) {
+    const parts = [];
+    if (gd.diffMin != null || gd.diffMax != null) {
+      parts.push(`diff ${gd.diffMin != null ? gd.diffMin : "0"}\u2013${gd.diffMax != null ? gd.diffMax : "\u221e"}`);
+    }
+    if (gd.lenMin != null || gd.lenMax != null) {
+      parts.push(`len ${gd.lenMin != null ? gd.lenMin : "0"}\u2013${gd.lenMax != null ? gd.lenMax : "\u221e"}`);
+    }
+    return parts.length ? " \u00b7 " + parts.join(" \u00b7 ") : "";
+  }
+
+  // Live-apply a Max-quotes goal's scope (kind + languages + diff/len) from the
+  // edit popover. Recomputes the target from the catalog tally.
+  function applyMaxQuotesGoalEdit(gd, patch) {
+    Object.assign(gd, patch);
+    if (Array.isArray(gd.languages) && !gd.languages.length) gd.languages = undefined;
+    gd.baselineQuotes = 0;
+    gd.target = tallyMaxQuotes(gd).total;
+    maxQuotesTallyCache.delete(gd.id);
+    // Scope changed → the typed count jumps to a different slice. That's a
+    // filter change, not progress, so disarm the +N pill: the next render takes
+    // the new count as a baseline (one suppressed render) and re-arms after.
+    maxQuotesPillArmed.delete(gd.id);
+    saveGoals("quotes");
+    renderAllGoals();
+    return true;
+  }
+
   // ── Does any current quotes goal need the unranked-typed count? ───
   // Used to gate the extra per-poll fetch: only ranked goals exist for
   // most users, and ranked is fully covered by the `quotesTyped` stat,
@@ -5242,6 +5579,7 @@ async function getExpRankByUsername(username) {
   }
 
   const maxQuotesRow       = document.getElementById("gt-max-quotes-row");
+  const maxQuotesLangRow   = document.getElementById("gt-max-quotes-lang-row");
   const maxCharsRow        = document.getElementById("gt-max-chars-row");
   const maxAllBtn          = document.getElementById("gt-max-all-btn");
   const maxRankedBtn       = document.getElementById("gt-max-ranked-btn");
@@ -5396,8 +5734,12 @@ async function getExpRankByUsername(username) {
   // max quotes mode state
   let maxQuotesMode = false; // "max" toggle for quotes (any kind active)
   let maxQuotesKind = null;  // "ranked" | "unranked" | "all" when active
+  let maxQuotesLangs = []; // selected languages for a Max-quotes goal ([] = all)
+  let maxQuotesPreviewSeq = 0; // guards the async modal preview against races
   let maxQuotesFetched = null; // total quotes count for the selected kind
   let maxQuotesBaseline = null; // user's currently-typed count for the selected kind (becomes the goal baseline)
+  let maxQuotesDiffMin = null, maxQuotesDiffMax = null; // difficulty band (null = open on that side)
+  let maxQuotesLenMin  = null, maxQuotesLenMax  = null; // length band (null = open on that side)
   let maxCharsMode = false; // "max" toggle for chars (distinct-quote chars; any kind active)
   let maxCharsKind = null;  // "ranked" | "unranked" | "all" when active
   // Chars-kind toggle (chars type): "regular" = repeatable cumulative chars
@@ -5871,6 +6213,103 @@ async function getExpRankByUsername(username) {
     confirmBtn.disabled = false;
   }
 
+  // ── Max-quotes language chips (creation modal) ───────────
+  function renderMaxQuotesLangChips() {
+    if (!maxQuotesLangRow) return;
+    const none = maxQuotesLangs.length === 0;
+    const chips = [
+      `<button type="button" class="gt-lang-chip gt-lang-all${none ? " active" : ""}" data-lang="__all">All</button>`
+    ].concat(MAX_QUOTES_LANGS.map(l =>
+      `<button type="button" class="gt-lang-chip${maxQuotesLangs.includes(l) ? " active" : ""}" data-lang="${l}">${l}</button>`
+    ));
+    maxQuotesLangRow.innerHTML = chips.join("");
+  }
+
+  // Build a draft goal from the modal's current Max-quotes selection.
+  function maxQuotesDraft() {
+    return {
+      maxQuotes: true,
+      maxQuotesKind,
+      languages: maxQuotesLangs.length ? maxQuotesLangs.slice() : undefined,
+      diffMin: maxQuotesDiffMin, diffMax: maxQuotesDiffMax,
+      lenMin: maxQuotesLenMin,  lenMax: maxQuotesLenMax,
+    };
+  }
+
+  // Kind/language change moves the axis (a different quote slice). Rather than
+  // discard the chosen difficulty/length bands, keep them — clamped into the new
+  // axis, collapsing a handle to "open" only if it lands on the new end.
+  function reclampMaxQuotesBands() {
+    if (!(maxQuotesMode && maxQuotesKind)) return;
+    const axis = maxQuotesAxis(maxQuotesKind, maxQuotesLangs);
+    const lo = (v, mn, mx) => { if (v == null) return null; const c = Math.max(mn, Math.min(mx, v)); return c <= mn ? null : c; };
+    const hi = (v, mn, mx) => { if (v == null) return null; const c = Math.max(mn, Math.min(mx, v)); return c >= mx ? null : c; };
+    maxQuotesDiffMin = lo(maxQuotesDiffMin, axis.diffMin, axis.diffMax);
+    maxQuotesDiffMax = hi(maxQuotesDiffMax, axis.diffMin, axis.diffMax);
+    maxQuotesLenMin  = lo(maxQuotesLenMin,  axis.lenMin,  axis.lenMax);
+    maxQuotesLenMax  = hi(maxQuotesLenMax,  axis.lenMin,  axis.lenMax);
+  }
+
+  // (Re)build the difficulty/length sliders for the current kind + languages.
+  // Called on kind/language change (the axis moves); a slider drag only refreshes
+  // the hint, so handles don't reset mid-drag.
+  function buildMaxQuotesSliders() {
+    const diffRow = document.getElementById("gt-max-quotes-diff-row");
+    const lenRow  = document.getElementById("gt-max-quotes-len-row");
+    const active = maxQuotesMode && maxQuotesKind && selectedType === "quotes" && selectedMode === "target";
+    if (diffRow) diffRow.style.display = active ? "block" : "none";
+    if (lenRow)  lenRow.style.display  = active ? "block" : "none";
+    if (!active) return;
+    const axis = maxQuotesAxis(maxQuotesKind, maxQuotesLangs);
+    const clampD = (v) => Math.max(axis.diffMin, Math.min(axis.diffMax, v));
+    const clampL = (v) => Math.max(axis.lenMin,  Math.min(axis.lenMax,  v));
+    const dLo = maxQuotesDiffMin == null ? axis.diffMin : clampD(maxQuotesDiffMin);
+    const dHi = maxQuotesDiffMax == null ? axis.diffMax : clampD(maxQuotesDiffMax);
+    const lLo = maxQuotesLenMin  == null ? axis.lenMin  : clampL(maxQuotesLenMin);
+    const lHi = maxQuotesLenMax  == null ? axis.lenMax  : clampL(maxQuotesLenMax);
+    setupTargetRange("gt-mq-diff-range", "gt-mq-diff-readout", "gt-mq-diff-ticks", {
+      min: axis.diffMin, max: axis.diffMax, step: 0.1, decimals: true,
+      ticks: [String(axis.diffMin), `${axis.diffMax}+`], lo: dLo, hi: dHi,
+      set: (lo, hi) => { maxQuotesDiffMin = lo; maxQuotesDiffMax = hi; refreshMaxQuotesHint(); },
+    });
+    setupTargetRange("gt-mq-len-range", "gt-mq-len-readout", "gt-mq-len-ticks", {
+      min: axis.lenMin, max: axis.lenMax, step: 1, decimals: false,
+      ticks: [String(axis.lenMin), `${axis.lenMax}+`], lo: lLo, hi: lHi,
+      set: (lo, hi) => { maxQuotesLenMin = lo; maxQuotesLenMax = hi; refreshMaxQuotesHint(); },
+    });
+  }
+
+  // Re-tally the draft off the catalog + self store and reflect it in the hint.
+  // Counts are partial while those sync (shown with "· syncing…"); creation is
+  // never blocked except when you've provably already completed the whole scope.
+  function refreshMaxQuotesHint() {
+    if (!(maxQuotesMode && maxQuotesKind)) return;
+    const draft = maxQuotesDraft();
+    const t = tallyMaxQuotes(draft);
+    maxQuotesFetched  = t.total;
+    maxQuotesBaseline = t.typed;
+    const noun = maxQuotesKind === "unranked" ? "unranked quotes"
+               : maxQuotesKind === "all"      ? "quotes (ranked + unranked)"
+               :                                "ranked quotes";
+    const scope = langScopeSuffix(draft.languages);
+    const band  = maxQuotesBandSuffix(draft);
+    const synced = t.catalogSynced && t.selfDone;
+    modeHint.style.display = "block";
+    if (synced && t.total <= t.typed) {
+      modeHint.textContent = `\u26a0 You've already typed all ${t.total.toLocaleString()} ${noun}${scope}${band}!`;
+      modeHint.className    = "gt-mode-hint gt-mode-hint-error";
+      confirmBtn.disabled   = true;
+    } else {
+      modeHint.textContent = `Max: ${t.total.toLocaleString()} ${noun}${scope}${band}${synced ? "" : " \u00b7 syncing\u2026"}`;
+      modeHint.className    = "gt-mode-hint";
+      confirmBtn.disabled   = false;
+    }
+  }
+
+  function refreshMaxQuotesPreview() {
+    buildMaxQuotesSliders();
+    refreshMaxQuotesHint();
+  }
   function renderPresets() {
     const cfg = GOAL_CONFIG[selectedType];
     selectedValue = null; rankFetchedRank = null; maxQuotesFetched = null;
@@ -6045,71 +6484,17 @@ async function getExpRankByUsername(username) {
         btn.classList.toggle("active", maxQuotesMode && maxQuotesKind === kind);
       }
 
+      renderMaxQuotesLangChips();
+      if (maxQuotesLangRow) maxQuotesLangRow.style.display = (maxQuotesMode && maxQuotesKind) ? "flex" : "none";
+
       if (maxQuotesMode && maxQuotesKind) {
-        // ── A max kind is selected ─────────────────────────────
-        const kind = maxQuotesKind;            // capture for the async guard
-
-        // Input stays visible (the click handler clears any prior value);
-        // typing into it deactivates the max kind — see the input handler.
-        maxQuotesFetched = null;
-        maxQuotesBaseline = null;
-
-        modeHint.textContent = "Loading quote counts…";
-        modeHint.className   = "gt-mode-hint";
-        modeHint.style.display = "block";
-        confirmBtn.disabled  = true;
-
-        // Resolve both the TOTAL on-site count and the user's already-TYPED
-        // count for the selected kind, in parallel. Ranked typed comes from
-        // the cached quotesTyped stat; unranked typed needs its own endpoint.
-        const needRanked   = kind === "ranked" || kind === "all";
-        const needUnranked = kind === "unranked" || kind === "all";
-
-        Promise.all([
-          needRanked   ? getTypeGGTotalQuotes()         : Promise.resolve(0),
-          needUnranked ? getTypeGGTotalUnrankedQuotes() : Promise.resolve(0),
-          needUnranked ? getUserQuotesTyped("unranked").catch(() => null) : Promise.resolve(0),
-        ]).then(([totalRanked, totalUnranked, typedUnranked]) => {
-          // Bail if the user switched kind / closed the modal mid-flight.
-          if (!maxQuotesMode || maxQuotesKind !== kind) return;
-
-          const totalsOk =
-            (!needRanked   || totalRanked   != null) &&
-            (!needUnranked || (totalUnranked != null && typedUnranked != null));
-          if (!totalsOk) {
-            modeHint.textContent = "⚠ Failed to load quote count";
-            modeHint.className   = "gt-mode-hint gt-mode-hint-error";
-            confirmBtn.disabled  = true;
-            return;
-          }
-
-          const typedRanked = currentStats.quotes; // may be null until stats load
-          let total, typed, noun;
-          if (kind === "ranked") {
-            total = totalRanked;   typed = typedRanked;                     noun = "ranked quotes";
-          } else if (kind === "unranked") {
-            total = totalUnranked; typed = typedUnranked;                   noun = "unranked quotes";
-          } else {
-            total = totalRanked + totalUnranked;
-            typed = (typedRanked != null) ? typedRanked + typedUnranked : null;
-            noun  = "quotes (ranked + unranked)";
-          }
-
-          maxQuotesFetched  = total;
-          maxQuotesBaseline = typed;
-
-          if (typed != null && total <= typed) {
-            modeHint.textContent = `⚠ You've already typed all ${total.toLocaleString()} ${noun}!`;
-            modeHint.className   = "gt-mode-hint gt-mode-hint-error";
-            confirmBtn.disabled  = true;
-          } else {
-            modeHint.textContent = `Max: ${total.toLocaleString()} ${noun} on TypeGG`;
-            modeHint.className   = "gt-mode-hint";
-            confirmBtn.disabled  = false;
-          }
-        });
+        // A kind is selected — (re)build the difficulty/length sliders and show
+        // the live catalog tally in the hint. The input stays visible; typing
+        // into it deactivates the kind (see the input handler).
+        refreshMaxQuotesPreview();
       } else {
-        // ── Manual input for target quotes ────────────────────
+        buildMaxQuotesSliders(); // hides the slider rows
+        // ── Manual input for target quotes ────────────────
         customInput.style.display = "";
         updateModeHint();
       }
@@ -6350,10 +6735,28 @@ async function getExpRankByUsername(username) {
       }
       maxQuotesFetched  = null;
       maxQuotesBaseline = null;
+      reclampMaxQuotesBands(); // preserve diff/len across the pool change
       customInput.value = "";
       renderPresets();
     });
   }
+
+  // Language chips for Max-quotes goals. Toggling a language re-resolves the
+  // preview; "All" clears the selection (== every language).
+  maxQuotesLangRow?.addEventListener("click", (e) => {
+    const btn = e.target.closest(".gt-lang-chip");
+    if (!btn) return;
+    const l = btn.dataset.lang;
+    if (l === "__all") {
+      maxQuotesLangs = [];
+    } else {
+      const i = maxQuotesLangs.indexOf(l);
+      if (i >= 0) maxQuotesLangs.splice(i, 1); else maxQuotesLangs.push(l);
+    }
+    renderMaxQuotesLangChips();
+    reclampMaxQuotesBands(); // preserve diff/len across the language change
+    refreshMaxQuotesPreview();
+  });
 
   // Max-chars kind buttons (chars + target mode). Same toggle behaviour as the
   // Max-quotes buttons; no API fetch -- totals come from the catalog at render.
@@ -7084,7 +7487,8 @@ async function getExpRankByUsername(username) {
     rankFetchedRank = null; nextRankMode = false;
     cancelRankPpLookup(); rankPpCache.clear(); virtRankCache.clear(); virtRankResolved.clear();
     selectedRankCountry = null; reflectCountryButton(); closeCountryMenu();
-    maxQuotesMode = false; maxQuotesKind = null; maxQuotesFetched = null; maxQuotesBaseline = null;
+    maxQuotesMode = false; maxQuotesKind = null; maxQuotesLangs = []; maxQuotesFetched = null; maxQuotesBaseline = null;
+    maxQuotesDiffMin = maxQuotesDiffMax = maxQuotesLenMin = maxQuotesLenMax = null;
     maxCharsMode = false; maxCharsKind = null;
     selectedCharsKind = "regular";
     charsKindBtns.forEach(b => b.classList.toggle("active", b.dataset.charsKind === "regular"));
@@ -7126,7 +7530,8 @@ async function getExpRankByUsername(username) {
     selectedValue = null; rankFetchedRank = null; nextRankMode = false;
     cancelRankPpLookup();
     selectedRankCountry = null; reflectCountryButton(); closeCountryMenu();
-    maxQuotesMode = false; maxQuotesKind = null; maxQuotesFetched = null; maxQuotesBaseline = null;
+    maxQuotesMode = false; maxQuotesKind = null; maxQuotesLangs = []; maxQuotesFetched = null; maxQuotesBaseline = null;
+    maxQuotesDiffMin = maxQuotesDiffMax = maxQuotesLenMin = maxQuotesLenMax = null;
     maxCharsMode = false; maxCharsKind = null;
     rivalFetchedName = null; rivalPendingName = null; clearTimeout(rivalDebounce);
     resetRequirementsUI();
@@ -7457,6 +7862,8 @@ async function getExpRankByUsername(username) {
       let isMaxQuotes = false;
       let maxQuotesBaselineOverride = null; // kind-appropriate typed count for unranked/all
       let maxQuotesKindForGoal = null;      // captured kind written onto the goal
+      let maxQuotesLangsForGoal = null;     // captured language scope written onto the goal
+      let maxQuotesPendingSync = false;     // create in "Syncing…" state, resolve target later
       let isMaxChars = false;
       let maxCharsKindForGoal = null;
       const isQuoteChars = selectedType === "chars" && selectedCharsKind === "quote";
@@ -7494,34 +7901,17 @@ async function getExpRankByUsername(username) {
       gainTarget = selectedValue;
     } else if (selectedMode === "target" && cfg.supportsTarget) {
         if (selectedType === "quotes" && maxQuotesMode && maxQuotesKind) {
-          // ── Max quotes mode (ranked / unranked / all) ──────────
-          if (maxQuotesFetched == null) return;   // total count failed to load
-          const kind = maxQuotesKind;
-
-          // Baseline = how many of this kind the user has ALREADY typed.
-          //   ranked   → quotesTyped (currentVal, freshly fetched above)
-          //   unranked → dedicated endpoint
-          //   all      → ranked + unranked
-          const typedRanked = currentVal;         // == data.stats.quotesTyped
-          let typedUnranked = 0;
-          if (kind === "unranked" || kind === "all") {
-            try { typedUnranked = await getUserQuotesTyped("unranked"); }
-            catch { typedUnranked = null; }
-            if (typedUnranked == null) return;     // can't establish a baseline
-            // Seed the live cache so the first render shows correct progress
-            // before the next stats poll fetches it.
-            currentStats.quotesUnranked = typedUnranked;
-          }
-
-          let baseline;
-          if (kind === "ranked")        baseline = typedRanked;
-          else if (kind === "unranked") baseline = typedUnranked;
-          else                          baseline = typedRanked + typedUnranked;
-
-          maxQuotesBaselineOverride = baseline;
-          maxQuotesKindForGoal      = kind;
-          gainTarget = Math.max(0, maxQuotesFetched - baseline);
+          // ── Max quotes mode (catalog-backed) ────────────────────
+          // Scope (kind + languages + diff/len) is stored on the goal; the total
+          // is the catalog tally (partial while syncing — the card shows
+          // "Syncing…" until the catalog + self store finish, and the target
+          // self-corrects via updateMaxQuotesGoals). Baseline is always 0: a max
+          // goal tracks completion of the whole scope, not gain since creation.
           isMaxQuotes = true;
+          maxQuotesKindForGoal = maxQuotesKind;
+          if (maxQuotesLangs.length) maxQuotesLangsForGoal = maxQuotesLangs.slice();
+          maxQuotesBaselineOverride = 0;
+          gainTarget = tallyMaxQuotes(maxQuotesDraft()).total;
         } else if (selectedType === "chars" && maxCharsMode && maxCharsKind) {
           // Max chars: a computed catalog goal (no cumulative target). Store the
           // kind; the render tallies Σ length live off the catalog + self store.
@@ -7628,6 +8018,11 @@ async function getExpRankByUsername(username) {
         targetUsername: selectedMode === "player" ? playerFetchedName : undefined,
         maxQuotes: isMaxQuotes || undefined,
         maxQuotesKind: maxQuotesKindForGoal || undefined,
+        languages: maxQuotesLangsForGoal || undefined,
+        diffMin: isMaxQuotes ? maxQuotesDiffMin : undefined,
+        diffMax: isMaxQuotes ? maxQuotesDiffMax : undefined,
+        lenMin:  isMaxQuotes ? maxQuotesLenMin  : undefined,
+        lenMax:  isMaxQuotes ? maxQuotesLenMax  : undefined,
         maxChars: isMaxChars || undefined,
         maxCharsKind: maxCharsKindForGoal || undefined,
         quoteChars: isQuoteChars || undefined,
@@ -7635,7 +8030,7 @@ async function getExpRankByUsername(username) {
         quoteCharsAbsoluteTarget: quoteCharsAbsoluteTarget != null ? quoteCharsAbsoluteTarget : undefined,
         filter: (selectedType === "races" || selectedType === "improvement") ? selectedFilter : undefined,
         targetLoaded: selectedMode === "rank" ? false : true, // false for rank goals — target is loaded async by updateRankGoals/updateExpRankGoals
-        [cfg.baselineKey]: maxQuotesBaselineOverride != null ? maxQuotesBaselineOverride : currentVal,
+        [cfg.baselineKey]: isMaxQuotes ? maxQuotesBaselineOverride : currentVal,
         recurrence: selectedRec,
         supportsRecurrence: (selectedMode === "gain" || selectedMode === "average" || selectedMode === "improvement"),
         periodStart: isRecurring ? getCurrentPeriodStart(selectedRec) : null,
@@ -7958,6 +8353,33 @@ async function getExpRankByUsername(username) {
 
   // ── Update a single goal section ───────────────────────────────
   function updateGoalSection(goalId, type, cfg, gd, gain, isRecurring, gainDelta = 0) {
+    const mqTally = (type === "quotes" && gd.maxQuotes) ? computeMaxQuotesTally(gd) : null;
+    {
+      const mqNext = document.getElementById(`${goalId}-mq-next`);
+      const mqSync = document.getElementById(`${goalId}-mq-sync`);
+      if (mqTally) {
+        // Status line under the bar (hidden once both legs are synced) — mirrors
+        // the improvement-target "Syncing… (N%)" line.
+        if (mqSync) {
+          const synced = mqTally.catalogSynced && mqTally.selfDone;
+          if (synced) { mqSync.style.display = "none"; mqSync.textContent = ""; }
+          else {
+            const p = targetSyncPercent();
+            mqSync.textContent = p == null ? "Syncing\u2026" : `Syncing\u2026 (${p}%)`;
+            mqSync.style.display = "block";
+          }
+        }
+        if (mqNext) {
+          mqNext.style.display = "";
+          // Enabled whenever there's an untyped quote in scope — usable even
+          // mid-sync, off whatever the catalog/self store have loaded so far.
+          mqNext.disabled = !((mqTally.total - mqTally.typed) > 0);
+        }
+      } else {
+        if (mqNext) mqNext.style.display = "none";
+        if (mqSync) mqSync.style.display = "none";
+      }
+    }
     // Defensive: a non-avg goal might be inside a section that previously
     // rendered an avg goal (shouldn't happen since mode is immutable post-
     // creation, but cheap to guarantee). Hide the avg rows; show the gain
@@ -7975,11 +8397,12 @@ async function getExpRankByUsername(username) {
 
     // Calculate percentage - for max quotes use total progress, otherwise use gain
     let pct, isComplete;
-    if (gd.maxQuotes) {
-      const currentQuotes = gd.baselineQuotes + gain;
-      const totalQuotes = gd.baselineQuotes + gd.target;
-      pct = totalQuotes > 0 ? Math.min(Math.floor((currentQuotes / totalQuotes) * 100), 100) : 0;
-      isComplete = currentQuotes >= totalQuotes && totalQuotes > 0;
+    if (gd.maxQuotes && mqTally) {
+      // Live ratio, updating as the catalog + self store sync. Completion is
+      // gated on both being fully synced so a partial count can't false-fire.
+      const mqSynced = mqTally.catalogSynced && mqTally.selfDone;
+      pct = mqTally.total > 0 ? Math.min(Math.floor((mqTally.typed / mqTally.total) * 100), 100) : 0;
+      isComplete = mqSynced && mqTally.typed >= mqTally.total && mqTally.total > 0;
     } else {
       pct = Math.max(0, Math.min(Math.floor((gain / gd.target) * 100), 100));
       isComplete = gain >= gd.target && gd.target > 0;
@@ -7997,15 +8420,12 @@ async function getExpRankByUsername(username) {
       // Any rank goal whose target hasn't been resolved by updateRankGoals /
       // updateExpRankGoals yet — show a type-specific loading message.
       gainTextEl.textContent = type === "exp" ? "Loading EXP..." : "Loading PP...";
-    } else if (gd.maxQuotes && gd.target === 0) {
-      gainTextEl.textContent = "Loading target...";
-    } else if (gd.maxQuotes) {
-      // For max quotes, show total completed / total max instead of gain / remaining
-      const currentQuotes = gd.baselineQuotes + gain;
-      const totalQuotes = gd.baselineQuotes + gd.target;
+    } else if (gd.maxQuotes && mqTally) {
+      // Live completed / total in scope (numbers update as the sync progresses;
+      // the "Syncing… (N%)" status shows on its own line below the bar).
       gainTextEl.textContent = remainingView
-        ? `${Math.round(totalQuotes - currentQuotes).toLocaleString()} to go`
-        : `${Math.round(currentQuotes).toLocaleString()} / ${totalQuotes.toLocaleString()}`;
+        ? `${Math.round(mqTally.total - mqTally.typed).toLocaleString()} to go`
+        : `${Math.round(mqTally.typed).toLocaleString()} / ${mqTally.total.toLocaleString()}`;
     } else if (cfg.isTime) {
       gainTextEl.textContent = remainingView
         ? `${formatPlaytime(gd.target - gain)} to go`
@@ -8071,6 +8491,27 @@ async function getExpRankByUsername(username) {
     if (reqLineEl)  { reqLineEl.textContent  = ""; reqLineEl.style.display  = "none"; }
     if (reqLine2El) { reqLine2El.textContent = ""; reqLine2El.style.display = "none"; }
 
+    // ── Max-quotes filter display lines (mirror the improvement-target card) ──
+    // Line 1 (cyan): "Quote Pool: Ranked/Unranked" — hidden when the pool is All.
+    // Line 2 (blue): the length/difficulty band via the shared gtFilterBand
+    // helper — hidden entirely when neither axis is constrained.
+    if (gd.maxQuotes) {
+      const mqKind = maxQuotesKindOf(gd);
+      if (reqLineEl && mqKind !== "all") {
+        reqLineEl.textContent = `Quote Pool: ${mqKind === "unranked" ? "Unranked" : "Ranked"}`;
+        reqLineEl.style.display = "block";
+      }
+      const mqBandParts = [];
+      const mqLenStr  = gtFilterBand("Len",  gd.lenMin,  gd.lenMax,  gd.lenMin  == null, gd.lenMax  == null);
+      const mqDiffStr = gtFilterBand("Diff", gd.diffMin, gd.diffMax, gd.diffMin == null, gd.diffMax == null);
+      if (mqLenStr)  mqBandParts.push(mqLenStr);
+      if (mqDiffStr) mqBandParts.push(mqDiffStr);
+      if (reqLine2El && mqBandParts.length) {
+        reqLine2El.textContent = mqBandParts.join(" \u2022 ");
+        reqLine2El.style.display = "block";
+      }
+    }
+
     if (gd.quoteChars) {
       document.getElementById(`${goalId}-label`).textContent = "Quote Chars";
     } else if (gd.nextRank && gd.targetRank) {
@@ -8085,7 +8526,7 @@ async function getExpRankByUsername(username) {
       const suffix = kind === "unranked" ? "max unranked"
                    : kind === "all"      ? "max all"
                    :                       "max ranked";
-      document.getElementById(`${goalId}-label`).textContent = `${cfg.label} → ${suffix}`;
+      document.getElementById(`${goalId}-label`).textContent = `${cfg.label} → ${suffix}${langScopeSuffix(gd.languages)}`;
     } else if (goalIsImprovement(gd)) {
       const metricLbl = (gd.improvementMetric === "pp") ? "PP" : "WPM";
       const filterStr = (gd.filter && gd.filter !== "all") ? ` (${gd.filter})` : "";
@@ -8137,7 +8578,16 @@ async function getExpRankByUsername(username) {
     // ── Gain delta indicator (+X / −X pop-up) ──────────────────
     // Positive delta = green "+N" indicator (a qualifying race).
     // Negative delta = red "−N ⚡" indicator (strict-mode reset on a miss).
-    if (gainDelta !== 0) {
+    // Max-quotes: the typed count ramps as the self store loads, which is not
+    // real progress — so suppress the +N pill while syncing, and on the first
+    // settled render (its delta is just the sync baseline, not a completed quote).
+    let mqSuppressPill = false;
+    if (type === "quotes" && gd.maxQuotes && mqTally) {
+      const synced = mqTally.catalogSynced && mqTally.selfDone;
+      if (!synced) { mqSuppressPill = true; maxQuotesPillArmed.delete(goalId); }
+      else if (!maxQuotesPillArmed.has(goalId)) { mqSuppressPill = true; maxQuotesPillArmed.add(goalId); }
+    }
+    if (gainDelta !== 0 && !mqSuppressPill) {
       // `good` = progress was made → green; a strict-mode reset is the only
       // bad case → red + ⚡. In remaining-view the DISPLAYED sign flips (a gain
       // shows "−N" because Z drops toward 0), but the colour still tracks
@@ -8733,16 +9183,10 @@ async function getExpRankByUsername(username) {
         // (null until the unranked count has been fetched at least once —
         // the goal then just skips this tick via the guard below.)
         if (type === "quotes" && gd.maxQuotes) {
-          const kind = maxQuotesKindOf(gd);
-          if (kind === "unranked") {
-            currentVal = currentStats.quotesUnranked;
-          } else if (kind === "all") {
-            currentVal = (currentStats.quotes != null && currentStats.quotesUnranked != null)
-              ? currentStats.quotes + currentStats.quotesUnranked
-              : null;
-          } else {
-            currentVal = currentStats.quotes; // ranked (and legacy)
-          }
+          // Catalog-backed: typed = in-scope quotes present in the self store.
+          // Always non-null so the card renders (and shows "Syncing…" until the
+          // catalog + self store finish).
+          currentVal = computeMaxQuotesTally(gd).typed;
         }
         if (type === "chars" && (gd.maxChars || gd.quoteChars)) {
           currentVal = currentStats.chars ?? 0; // non-null so the goal reaches its section; value unused
@@ -10212,6 +10656,18 @@ async function getExpRankByUsername(username) {
           rivalStores.set(key, value);
         }
       }
+      // Catalog schema migration: pre-language catalogs (rows without `g`) need
+      // a one-time full re-sync so language-scoped Max-quotes goals work. The
+      // re-page re-merges every row WITH its language; improvement-target goals
+      // just show "syncing catalog…" briefly while it runs.
+      if (quoteCatalogMeta.phase === "done") {
+        let sample;
+        for (const qid in quoteCatalog) { sample = quoteCatalog[qid]; break; }
+        if (sample && sample.g === undefined) {
+          quoteCatalogMeta.phase = "idle";
+          quoteCatalogMeta.nextPage = 1;
+        }
+      }
     } catch (e) {
       console.warn("[Goal Tracker] IndexedDB unavailable — rival data won't persist this session:", e);
     } finally {
@@ -11299,8 +11755,9 @@ async function getExpRankByUsername(username) {
     const d = Number.isFinite(dn) ? dn : (cur ? cur.d : undefined);
     const l = Number.isFinite(ln) ? ln : (cur ? cur.l : undefined);
     const r = (typeof q.ranked === "boolean") ? q.ranked : (cur ? cur.r : true);
-    if (cur && cur.d === d && cur.l === l && cur.r === r) return false;
-    quoteCatalog[qid] = { d, l, r };
+    const g = (typeof q.language === "string" && q.language) ? q.language : (cur ? cur.g : undefined);
+    if (cur && cur.d === d && cur.l === l && cur.r === r && cur.g === g) return false;
+    quoteCatalog[qid] = { d, l, r, g };
     return true;
   }
 
@@ -13996,36 +14453,21 @@ async function getExpRankByUsername(username) {
     try {
       const goals = goalData.quotes;
       if (!goals || goals.length === 0) return;
-
-      // ── Skip entirely if no goal actually uses maxQuotes ─────
       if (!goals.some(g => g.maxQuotes)) return;
 
-      // Work out which on-site totals we actually need, then fetch each
-      // ONCE (outside the loop) and in parallel.
-      const needRanked   = goals.some(g => g.maxQuotes && maxQuotesKindOf(g) !== "unranked"); // ranked or all
-      const needUnranked = goals.some(g => g.maxQuotes && (maxQuotesKindOf(g) === "unranked" || maxQuotesKindOf(g) === "all"));
-
-      const [totalRanked, totalUnranked] = await Promise.all([
-        needRanked   ? getTypeGGTotalQuotes()         : Promise.resolve(null),
-        needUnranked ? getTypeGGTotalUnrankedQuotes() : Promise.resolve(null),
-      ]);
-
+      // Catalog-backed: the target is just the in-scope catalog total. Render
+      // computes typed/total live from the tally, so this only keeps the stored
+      // target roughly in sync (and baseline pinned to 0). Skip a goal while the
+      // catalog is still building so we don't lock in a partial total.
       let changed = false;
       for (let i = 0; i < goals.length; i++) {
         const gd = goals[i];
         if (!gd.maxQuotes) continue;
-
-        const kind = maxQuotesKindOf(gd);
-        let total;
-        if (kind === "ranked")        total = totalRanked;
-        else if (kind === "unranked") total = totalUnranked;
-        else                          total = (totalRanked != null && totalUnranked != null) ? totalRanked + totalUnranked : null;
-        if (total == null) continue; // its fetch failed this tick — try again later
-
-        const finalTarget = Math.max(0, total - gd.baselineQuotes);
-        if (Math.abs(finalTarget - gd.target) > 0.01) {
-          gtLog("Max-quotes goal target updated", `site total (${kind}) is now ${total} — target ${gd.target} → ${finalTarget}`, { kind, siteTotalQuotes: total, yourBaseline: gd.baselineQuotes, target: { from: gd.target, to: finalTarget } });
-          gd.target = finalTarget;
+        const t = tallyMaxQuotes(gd);
+        if (!t.catalogSynced) continue;
+        if (gd.baselineQuotes !== 0 || Math.abs(t.total - (gd.target || 0)) > 0.01) {
+          gd.baselineQuotes = 0;
+          gd.target = t.total;
           goals[i] = gd;
           changed = true;
         }
