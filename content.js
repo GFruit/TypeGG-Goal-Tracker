@@ -89,6 +89,46 @@ function gtMain() {
     return ` · ${langs.length} languages`;
   }
 
+  // ── Shared language-chip helpers ─────────────────────────────
+  // Reused by every language-scoped goal (Max-quotes, improvement-Target,
+  // Rival). Keep only known universes; [] == "All languages" (no scoping).
+  function sanitizeLangs(arr) {
+    if (!Array.isArray(arr)) return [];
+    return arr.filter(l => MAX_QUOTES_LANGS.includes(l));
+  }
+  // Chip row markup: an "All" chip (active when nothing is selected) plus one
+  // chip per universe. `dataAttr` is the data-attribute the click handler reads
+  // ("data-lang" in the creation modal, "data-imp-lang" / "data-rv-lang" in the
+  // edit popover) so parallel rows don't clash within one container.
+  function langChipsHtml(selected, dataAttr) {
+    const sel  = sanitizeLangs(selected);
+    const none = sel.length === 0;
+    return [`<button type="button" class="gt-lang-chip gt-lang-all${none ? " active" : ""}" ${dataAttr}="__all">All</button>`]
+      .concat(MAX_QUOTES_LANGS.map(l =>
+        `<button type="button" class="gt-lang-chip${sel.includes(l) ? " active" : ""}" ${dataAttr}="${l}">${l}</button>`
+      )).join("");
+  }
+  // Reflect a selection onto an already-rendered chip row (toggles .active).
+  // `attr` is the dataset key (camelCase) matching the data-attribute above.
+  function reflectLangChips(container, selected, attr) {
+    if (!container) return;
+    const sel  = sanitizeLangs(selected);
+    const none = sel.length === 0;
+    container.querySelectorAll(".gt-lang-chip").forEach(b => {
+      const v = b.dataset[attr];
+      b.classList.toggle("active", v === "__all" ? none : sel.includes(v));
+    });
+  }
+  // Apply a chip click to a selection array, returning the NEW array. Clicking
+  // "All" clears the selection; clicking a language toggles it.
+  function toggleLangSelection(selected, value) {
+    if (value === "__all") return [];
+    const next = sanitizeLangs(selected);
+    const i = next.indexOf(value);
+    if (i >= 0) next.splice(i, 1); else next.push(value);
+    return next;
+  }
+
   // Append the universe to a PP-derived endpoint (/users, /leaders?sort=totalPp).
   // No-op for English. Only totalPp / globalRank / bestPp / bestWpm are
   // language-scoped by the API; EXP / races / quotes / nWpm stay global, so
@@ -342,17 +382,66 @@ function gtMain() {
   setInterval(broadcastVisibilityPing, 10_000);
   broadcastVisibilityPing(); // initial announcement
 
-  // ── Auth (reads TypeGG's own localStorage entry) ───────────────
+  // ── Auth (TypeGG API key) ─────────────────────────────────────
+  // TypeGG no longer keeps "pocketbase_auth" in localStorage up to date (new
+  // logins don't write it, and old entries go stale — e.g. still naming an alt
+  // account). So the extension no longer reads the site's session at all: the
+  // user pastes their username + an API key (TypeGG → Settings → API Key) into
+  // the widget once. Stored in the page's RAW localStorage (bypassing the
+  // per-language proxy) so one key covers every language subdomain.
+  const GT_AUTH_KEY = "gt-auth-v2";
+  // Icons for the connect form / Account tab. Declared up here (not next to
+  // ensureLoginPanel) because the logged-out panel can be built during the
+  // very first render, before code further down this closure has run.
+  const GT_KEY_ICON = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="4.5"/><path d="M10.7 12.3 21 2"/><path d="m16 7 3 3"/><path d="m19 4 2 2"/></svg>';
+  const GT_EYE_ICON = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>';
+  const GT_EYE_OFF_ICON = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.9 17.9A10.4 10.4 0 0 1 12 19c-6.5 0-10-7-10-7a18.5 18.5 0 0 1 5.1-5.9"/><path d="M9.9 5.2A9.1 9.1 0 0 1 12 5c6.5 0 10 7 10 7a18.6 18.6 0 0 1-2.2 3.2"/><path d="m2 2 20 20"/></svg>';
+  // Stored shape: { token, username } while connected, or
+  // { token: null, username, rejected: true } after TypeGG refused the key
+  // (e.g. it was regenerated) — the username is kept so the connect form can
+  // pre-fill it and explain what happened.
+  function readAuthRecord() {
+    try { return JSON.parse(GT_RAW_LS.getItem(GT_AUTH_KEY) || "null") || null; }
+    catch { return null; }
+  }
   function getAuth() {
+    const a = readAuthRecord();
+    if (a && a.token && a.username) return { token: a.token, username: a.username };
+    return { token: null, username: null };
+  }
+  function setAuth(token, username) {
+    try { GT_RAW_LS.setItem(GT_AUTH_KEY, JSON.stringify({ token, username })); } catch {}
+  }
+  function clearAuth() {
+    try { GT_RAW_LS.removeItem(GT_AUTH_KEY); } catch {}
+  }
+  // TypeGG answered 401 to a request carrying `tokenUsed`. Drop the key (only
+  // if it's still the saved one — a reconnect may have replaced it while the
+  // request was in flight) and remember why, so the widget can say so.
+  function markKeyRejected(tokenUsed) {
+    const a = readAuthRecord();
+    if (!a || !a.token || a.token !== tokenUsed) return;
+    try { GT_RAW_LS.setItem(GT_AUTH_KEY, JSON.stringify({ token: null, username: a.username, rejected: true })); } catch {}
+    console.warn("[Goal Tracker] TypeGG rejected the saved API key \u2014 asking for a new one.");
+    // Deferred: the caller is mid-fetch; let its error path unwind first.
+    setTimeout(() => { try { checkAuthTransition(); } catch {} }, 0);
+  }
+  // Check a key against TypeGG before saving it. Resolves to
+  // { ok: true, username } or { ok: false, field: "user"|"key"|null, message }.
+  async function verifyApiKey(username, key) {
+    let r;
     try {
-      const raw = localStorage.getItem("pocketbase_auth");
-      if (!raw) return { token: null, username: null };
-      const parsed = JSON.parse(raw);
-      return {
-        token:    parsed?.token             ?? null,
-        username: parsed?.record?.username  ?? null,
-      };
-    } catch { return { token: null, username: null }; }
+      r = await fetch(`https://api.typegg.io/v1/users/${encodeURIComponent(username)}`,
+        { headers: { Authorization: `Bearer ${key}` }, cache: "no-store" });
+    } catch {
+      return { ok: false, field: null, message: "Can\u2019t reach TypeGG. Check your connection and try again." };
+    }
+    if (r.status === 401 || r.status === 403) return { ok: false, field: "key", message: "TypeGG didn\u2019t accept this API key. Copy it again from TypeGG \u2192 Settings." };
+    if (r.status === 404) return { ok: false, field: "user", message: "No TypeGG user with that name." };
+    if (!r.ok) return { ok: false, field: null, message: `TypeGG returned an error (${r.status}). Try again in a moment.` };
+    let d = null;
+    try { d = await r.json(); } catch {}
+    return { ok: true, username: d?.username || username };
   }
 
   function authHeaders() {
@@ -360,7 +449,7 @@ function gtMain() {
     return token ? { Authorization: `Bearer ${token}` } : {};
   }
 
-  // Logged in iff TypeGG's pocketbase_auth holds a token. The single source of
+  // Logged in iff an API key + username have been saved. The single source of
   // truth for the logged-out gate (panel + fetch short-circuit). Read fresh.
   function isLoggedIn() { return getAuth().token != null; }
 
@@ -492,7 +581,9 @@ function gtMain() {
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     let r;
     try {
-      r = await fetch(url, { ...opts, signal: ctrl.signal });
+      // no-store: never answer from the browser's HTTP cache — a cached
+      // /users response looks exactly like "the server hasn't updated yet".
+      r = await fetch(url, { ...opts, cache: "no-store", signal: ctrl.signal });
     } catch (e) {
       clearTimeout(timer);
       // Our timeout abort, or a network/CORS error: a SLOW/unreachable signal,
@@ -504,6 +595,19 @@ function gtMain() {
     }
     clearTimeout(timer);
     if (r.ok || r.status === 404) { apiNoteSuccess(); return r; }
+    // 401 on a request that carried our key = the key no longer works (e.g.
+    // regenerated on TypeGG). Not a rate-limit: don't back off — drop the key,
+    // show the reconnect form, and fail this call like a logged-out request.
+    if (r.status === 401) {
+      const h = opts && opts.headers;
+      const authH = h && (h.Authorization || h.authorization);
+      if (typeof authH === "string" && authH.startsWith("Bearer ")) {
+        markKeyRejected(authH.slice(7));
+        const e = new Error(API_LOGGED_OUT_ERR);
+        e.gtLoggedOut = true;
+        throw e;
+      }
+    }
     // Classify the HTTP error. 429 (and 503 + Retry-After) = genuine throttle →
     // HARD pause (stops everything). 500/502/504/other = transient server/slow
     // → SOFT pause (bulk only, urgent keeps flowing).
@@ -514,7 +618,7 @@ function gtMain() {
 
   function userEndpoint() {
     const { username } = getAuth();
-    return withLang(`https://api.typegg.io/v1/users/${username ?? "fruit"}`);
+    return withLang(`https://api.typegg.io/v1/users/${encodeURIComponent(username ?? "")}`);
   }
 
   // ── ID generation ──────────────────────────────────────────────
@@ -1204,6 +1308,8 @@ function gtMain() {
         </div>
         <span class="gt-range-end gt-range-end-hi"></span>
       </div>`;
+    const impLangs0 = (isImpTarget && Array.isArray(gd.languages)) ? sanitizeLangs(gd.languages) : [];
+    const impLangChipsHtml = langChipsHtml(impLangs0, "data-imp-lang");
     const impTargetHtml = isImpTarget ? `
       <div class="gt-edit-label">Target ${impMetricLbl}</div>
       <input type="number" class="gt-custom-input gt-edit-amount gt-edit-threshold" value="${gd.target}" min="1" step="1">
@@ -1211,6 +1317,8 @@ function gtMain() {
       <div class="gt-edit-rec-group">${impStatusBtns}</div>
       <div class="gt-edit-label">Quotes</div>
       <div class="gt-edit-rec-group">${impPlayedBtns}</div>
+      <div class="gt-edit-label">Languages</div>
+      <div class="gt-edit-lang-row">${impLangChipsHtml}</div>
       ${impSlider(impDiffRangeId, impDiffReadoutId, impDiffTicksId, "Difficulty filter", "Minimum difficulty", "Maximum difficulty")}
       ${impSlider(impLenRangeId, impLenReadoutId, impLenTicksId, "Quote length filter", "Minimum length", "Maximum length")}
     ` : "";
@@ -1231,6 +1339,8 @@ function gtMain() {
     const rvDiffRangeId = `gt-edit-rdiff-range-${goalId}`, rvDiffReadoutId = `gt-edit-rdiff-readout-${goalId}`, rvDiffTicksId = `gt-edit-rdiff-ticks-${goalId}`;
     const rvLenRangeId  = `gt-edit-rlen-range-${goalId}`,  rvLenReadoutId  = `gt-edit-rlen-readout-${goalId}`,  rvLenTicksId  = `gt-edit-rlen-ticks-${goalId}`;
     const rvBandRangeId = `gt-edit-rband-range-${goalId}`, rvBandReadoutId = `gt-edit-rband-readout-${goalId}`, rvBandTicksId = `gt-edit-rband-ticks-${goalId}`;
+    const rvLangs0 = isRival ? rivalLangsOf(rvCfg) : [];
+    const rvLangChipsHtml = langChipsHtml(rvLangs0, "data-rv-lang");
     const rivalEditHtml = isRival ? `
       <div class="gt-edit-label">Metric</div>
       <div class="gt-edit-rec-group">${rvMetricBtns}</div>
@@ -1238,6 +1348,8 @@ function gtMain() {
       <div class="gt-edit-rec-group">${rvScopeBtns}</div>
       <div class="gt-edit-label">Compare on</div>
       <div class="gt-edit-rec-group">${rvBothBtns}</div>
+      <div class="gt-edit-label">Languages</div>
+      <div class="gt-edit-lang-row">${rvLangChipsHtml}</div>
       ${impSlider(rvDiffRangeId, rvDiffReadoutId, rvDiffTicksId, "Difficulty filter", "Minimum difficulty", "Maximum difficulty")}
       ${impSlider(rvLenRangeId, rvLenReadoutId, rvLenTicksId, "Quote length filter", "Minimum length", "Maximum length")}
       <div class="gt-edit-label"><span class="gt-edit-rband-label">Rival ${rvMetricCur.toUpperCase()} filter</span><span class="gt-range-readout" id="${rvBandReadoutId}"></span></div>
@@ -1594,6 +1706,22 @@ function gtMain() {
           onImpPoolChange();
         });
       });
+      // Language chips. Language doesn't move the difficulty/length axis (that's
+      // status/played only), so a toggle just re-derives standings over the
+      // cached catalog — no slider rebuild.
+      const impLangRow = pop.querySelector(".gt-edit-lang-row");
+      let impLangs = Array.isArray(gd.languages) ? sanitizeLangs(gd.languages) : [];
+      impLangRow?.addEventListener("click", (e) => {
+        const chip = e.target.closest(".gt-lang-chip");
+        if (!chip) return;
+        e.stopPropagation();
+        impLangs = toggleLangSelection(impLangs, chip.dataset.impLang);
+        gd.languages = impLangs.length ? impLangs.slice() : undefined;
+        reflectLangChips(impLangRow, impLangs, "impLang");
+        saveGoals(type);
+        renderAllGoals();
+        flashSaved();
+      });
       // Initial build, deferred so the popover is attached (sliders bind by id).
       requestAnimationFrame(buildImpSliders);
     }
@@ -1678,6 +1806,22 @@ function gtMain() {
           buildRivalSliders(); // shared-only narrows the data pool -> axis
           applyRvNow();
         });
+      });
+      // Language chips. Language doesn't move the difficulty/length/value axes
+      // (those come from the rival stores), so a toggle just re-derives the
+      // standings over the cached stores — no slider rebuild. A newly-scoped
+      // goal may need the catalog (for quote languages); kick it if idle.
+      const rvLangRow = pop.querySelector(".gt-edit-lang-row");
+      let rvLangs = rivalLangsOf(rs);
+      rvLangRow?.addEventListener("click", (e) => {
+        const chip = e.target.closest(".gt-lang-chip");
+        if (!chip) return;
+        e.stopPropagation();
+        rvLangs = toggleLangSelection(rvLangs, chip.dataset.rvLang);
+        rs.languages = rvLangs.slice();
+        reflectLangChips(rvLangRow, rvLangs, "rvLang");
+        if (isLeader && rvLangs.length) maybeRunQuoteCatalog();
+        applyRvNow();
       });
       // Initial build, deferred so the popover is attached (sliders bind by id).
       requestAnimationFrame(buildRivalSliders);
@@ -3103,6 +3247,11 @@ function gtMain() {
           <button class="gt-mode-btn active" data-target-played="played" type="button">Played only</button>
         </div>
       </div>
+      <!-- Language scope for improvement-Target goals. Chips toggle languages;
+           "All" (nothing selected) keeps the original cross-language behaviour,
+           so "reach N on all quotes" respects a language and the → Next quote
+           button never sends you to an off-language quote. -->
+      <div id="gt-target-lang-row" class="gt-lang-row" style="display:none;"></div>
       <div id="gt-target-diff-row" style="display:none;">
         <div class="gt-section-label">Difficulty filter<span class="gt-range-readout" id="gt-target-diff-readout"></span><span class="gt-mode-hint" id="gt-target-sync-hint" style="display:none;"></span></div>
         <div class="gt-range-row" id="gt-target-diff-ticks">
@@ -3269,6 +3418,11 @@ function gtMain() {
           <button class="gt-mode-btn"        type="button" data-rvc-both="false">All quotes</button>
           <button class="gt-mode-btn active" type="button" data-rvc-both="true">Shared only</button>
         </div>
+        <!-- Language scope for rival goals. "All" (nothing selected) compares
+             across every language; selecting one or more restricts the wins
+             count + the ⚔ Next vs pool to those languages. -->
+        <div class="gt-section-label" style="margin-top:16px;">Languages</div>
+        <div id="gt-rival-cfg-lang-row" class="gt-lang-row"></div>
         <div class="gt-section-label" style="margin-top:16px;">Difficulty filter<span class="gt-range-readout" id="gt-rival-cfg-diff-readout"></span></div>
         <div class="gt-range-row" id="gt-rival-cfg-diff-ticks">
           <span class="gt-range-end gt-range-end-lo"></span>
@@ -4023,6 +4177,119 @@ function gtMain() {
   // contract.
   function commitBackupTab(_draft) { /* no-op */ }
 
+  // ── Account tab ───────────────────────────────────────────────
+  // Shows the connected account, lets the user swap in a regenerated key
+  // without disconnecting (goals untouched), or disconnect entirely.
+  function renderAccountTab(contentEl /*, draft */) {
+    const { username, token } = getAuth();
+    const tail = token ? token.slice(-4) : "";
+    contentEl.innerHTML = `
+      <div class="gt-section-label">Account</div>
+      <div class="gt-account-card">
+        <span class="gt-account-dot"></span>
+        <span class="gt-account-main">Connected as <b id="gt-account-name"></b></span>
+        <span class="gt-account-key" id="gt-account-key"></span>
+        <button id="gt-account-copy" class="gt-icon-btn gt-account-copy" type="button" title="Copy API key" aria-label="Copy API key"></button>
+      </div>
+
+      <div class="gt-section-label" style="margin-top: 18px;">Replace API key</div>
+      <p class="gt-backup-text">Regenerated your key on TypeGG? Paste the new one here. Your goals and progress stay exactly as they are.</p>
+      <div class="gt-account-replace">
+        <span class="gt-login-keywrap">
+          <input id="gt-account-newkey" class="gt-custom-input gt-login-input" type="password" placeholder="Paste new key" autocomplete="off" spellcheck="false">
+          <button id="gt-account-reveal" class="gt-icon-btn gt-login-reveal" type="button" title="Show key" aria-label="Show key"></button>
+        </span>
+        <button id="gt-account-save" class="gt-settings-action-btn primary gt-account-save" disabled>Update key</button>
+      </div>
+      <div id="gt-account-status" class="gt-backup-status" style="display:none;"></div>
+
+      <div class="gt-section-label" style="margin-top: 18px;">Disconnect</div>
+      <p class="gt-backup-text">Removes the key from this browser. Your goals are kept and come back when you connect again.</p>
+      <div class="gt-backup-row">
+        <button id="gt-account-disconnect" class="gt-settings-action-btn secondary">Disconnect</button>
+      </div>`;
+    contentEl.querySelector("#gt-account-name").textContent = username || "\u2014";
+    contentEl.querySelector("#gt-account-key").textContent = tail ? `key \u2022\u2022\u2022\u2022${tail}` : "";
+
+    // Copy the saved key (e.g. to connect another browser). Reads the key
+    // fresh at click time so it's the new one after "Update key".
+    const COPY_ICON = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+    const CHECK_ICON = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
+    const copyBtn = contentEl.querySelector("#gt-account-copy");
+    copyBtn.innerHTML = COPY_ICON;
+    copyBtn.style.display = token ? "" : "none";
+    let copyTimer = null;
+    copyBtn.addEventListener("click", async () => {
+      const current = getAuth().token;
+      if (!current) return;
+      try {
+        await navigator.clipboard.writeText(current);
+        copyBtn.innerHTML = CHECK_ICON;
+        copyBtn.classList.add("gt-account-copy-done");
+        copyBtn.title = "Copied!";
+        clearTimeout(copyTimer);
+        copyTimer = setTimeout(() => {
+          copyBtn.innerHTML = COPY_ICON;
+          copyBtn.classList.remove("gt-account-copy-done");
+          copyBtn.title = "Copy API key";
+        }, 1500);
+      } catch {
+        setStatus("Couldn\u2019t copy automatically. Your browser blocked clipboard access.", "err");
+      }
+    });
+
+    const keyEl   = contentEl.querySelector("#gt-account-newkey");
+    const saveEl  = contentEl.querySelector("#gt-account-save");
+    const statusEl = contentEl.querySelector("#gt-account-status");
+    isolateKeys(keyEl);
+    wireKeyReveal(keyEl, contentEl.querySelector("#gt-account-reveal"));
+    const setStatus = (msg, kind = "info") => {
+      statusEl.textContent = msg;
+      statusEl.className = `gt-backup-status gt-backup-status-${kind}`;
+      statusEl.style.display = msg ? "block" : "none";
+    };
+    keyEl.addEventListener("input", () => {
+      saveEl.disabled = !keyEl.value.trim();
+      keyEl.classList.remove("gt-input-err");
+      setStatus("");
+    });
+
+    let busy = false;
+    async function updateKey() {
+      const key = keyEl.value.trim();
+      if (busy || !key || !username) return;
+      if (key === token) { setStatus("That\u2019s the key you\u2019re already using.", "info"); return; }
+      busy = true; saveEl.disabled = true; saveEl.textContent = "Checking\u2026";
+      const res = await verifyApiKey(username, key);
+      busy = false; saveEl.textContent = "Update key";
+      if (!res.ok) {
+        setStatus(res.message, "err");
+        if (res.field === "key") { keyEl.classList.add("gt-input-err"); keyEl.focus(); keyEl.select(); }
+        saveEl.disabled = !keyEl.value.trim();
+        return;
+      }
+      setAuth(key, username); // same account \u2192 no baseline shift
+      keyEl.value = ""; keyEl.type = "password";
+      contentEl.querySelector("#gt-account-key").textContent = `key \u2022\u2022\u2022\u2022${key.slice(-4)}`;
+      setStatus("Key updated \u2014 you\u2019re all set.", "ok");
+    }
+    saveEl.addEventListener("click", updateKey);
+    keyEl.addEventListener("keydown", (e) => { if (e.key === "Enter") updateKey(); });
+
+    contentEl.querySelector("#gt-account-disconnect").addEventListener("click", async () => {
+      const ok = await showConfirmModal({
+        title: "Disconnect account?",
+        message: "The API key will be removed from this browser. Your goals stay saved and reappear when you connect again.",
+        confirmLabel: "Disconnect",
+        danger: true,
+      });
+      if (!ok) return;
+      clearAuth();
+      closeSettingsModal();
+      checkAuthTransition();
+    });
+  }
+
   // ── Settings tab registry ─────────────────────────────────────
   // To add a new settings group, append an entry here. Each tab:
   //   - render(contentEl, draft): populates contentEl with the tab UI.
@@ -4036,6 +4303,7 @@ function gtMain() {
     { id: "rival",      label: "Rival",      render: renderRivalTab,      commit: commitRivalTab      },
     { id: "improve",    label: "Improve",    render: renderImproveTab,    commit: commitImproveTab    },
     { id: "backup",     label: "Backup",     render: renderBackupTab,     commit: commitBackupTab     },
+    { id: "account",    label: "Account",    render: renderAccountTab,    commit: () => {}            },
   ];
 
   // ── Capture currently-visible form values into the draft ─────
@@ -4318,7 +4586,7 @@ function gtMain() {
   const RIVAL_LEN_AXIS_ROUND = 1000;                  // length axis floored to this
   const DEFAULT_RIVAL_SETTINGS = {
     nextUsesVsLink: false, scope: "all", metric: "wpm", nextSort: "random", requireBoth: false,
-    diffMin: null, diffMax: null, lenMin: null, lenMax: null, fv: 1,
+    languages: [], diffMin: null, diffMax: null, lenMin: null, lenMax: null, fv: 1,
     // Metric-value filter, kept per-metric so switching WPM<->PP preserves each.
     // null = handle at an axis end (open). self* gates YOUR value, rival* the rival's.
     mfWpmSelfMin: null, mfWpmSelfMax: null, mfWpmRivalMin: null, mfWpmRivalMax: null,
@@ -4406,6 +4674,7 @@ function gtMain() {
       scope:       RIVAL_SCOPE_VALUES.includes(g.scope)   ? g.scope   : "all",
       metric:      RIVAL_METRIC_VALUES.includes(g.metric) ? g.metric  : "wpm",
       requireBoth: !!g.requireBoth,
+      languages:   sanitizeLangs(g.languages), // [] = every language
       diffMin: num(g.diffMin), diffMax: num(g.diffMax),
       lenMin:  num(g.lenMin),  lenMax:  num(g.lenMax),
       // Metric-value bands, per metric. The self-side bands were removed (a
@@ -4837,7 +5106,7 @@ async function getExpRankByUsername(username) {
   // dedicated endpoint is the only source for it.
   async function getUserQuotesTyped(status) {
     const { username } = getAuth();
-    const name = username ?? "fruit";
+    const name = username ?? "";
     const res = await gtApiFetch(
       `https://api.typegg.io/v1/users/${encodeURIComponent(name)}/quotes?status=${status}&perPage=1`,
       { headers: { Accept: 'application/json', ...authHeaders() } }
@@ -4885,6 +5154,19 @@ async function getExpRankByUsername(username) {
       if (gd.lenMax != null && l > gd.lenMax) return false;
     }
     return true;
+  }
+
+  // Does a quote's language universe pass a language filter? The universe (`g`)
+  // is a QUOTE-level fact that lives only in the shared quote catalog (the
+  // per-rival meta table doesn't carry it), so rival goals resolve it here.
+  // An active filter (non-empty list) excludes quotes whose language is unknown
+  // (catalog not synced yet) or not selected — mirrors maxQuoteInScope, so a
+  // German quote never leaks into an EN-scoped pool. [] == every language.
+  function quoteLangPasses(qid, langs) {
+    if (!Array.isArray(langs) || !langs.length) return true;
+    const m = quoteCatalog[qid];
+    const g = m && m.g;
+    return !!g && langs.includes(g);
   }
 
   // Full tally over the catalog: { total, typed, catalogSynced, selfDone }.
@@ -5139,6 +5421,7 @@ async function getExpRankByUsername(username) {
   const targetPlayedBtns    = document.querySelectorAll(".gt-target-played-group .gt-mode-btn");
   const targetDiffRow       = document.getElementById("gt-target-diff-row");
   const targetLenRow        = document.getElementById("gt-target-len-row");
+  const targetLangRow       = document.getElementById("gt-target-lang-row");
   const targetSyncHintEl    = document.getElementById("gt-target-sync-hint");
 
   // Presets for the rolling-window size. Common values for typing-test
@@ -5208,6 +5491,7 @@ async function getExpRankByUsername(username) {
   let selectedTargetPlayed    = "played";       // "all" | "played"
   let selectedTargetDiffMin = null, selectedTargetDiffMax = null;
   let selectedTargetLenMin  = null, selectedTargetLenMax  = null;
+  let targetLangs = []; // selected languages for an improvement-Target goal ([] = all)
 
   // rank mode state
   let rankFetchedExp    = null; // EXP fetched for the entered rank
@@ -5606,6 +5890,7 @@ async function getExpRankByUsername(username) {
   const rivalCfgMetricBtns = rivalConfigRow ? rivalConfigRow.querySelectorAll("[data-rvc-metric]") : [];
   const rivalCfgScopeBtns  = rivalConfigRow ? rivalConfigRow.querySelectorAll("[data-rvc-scope]")  : [];
   const rivalCfgBothBtns   = rivalConfigRow ? rivalConfigRow.querySelectorAll("[data-rvc-both]")   : [];
+  const rivalCfgLangRow    = document.getElementById("gt-rival-cfg-lang-row");
   let rivalDraftSettings = defaultRivalGoalSettings();
   // A throwaway goal-shaped object so the data-driven axes scope to the rival(s)
   // currently chosen in the modal. Their stores are usually empty at creation
@@ -5624,6 +5909,9 @@ async function getExpRankByUsername(username) {
     rivalCfgBothBtns.forEach(b => b.classList.toggle("active", (b.dataset.rvcBoth === "true") === rb));
     const lbl = document.getElementById("gt-rival-cfg-band-label");
     if (lbl) lbl.textContent = `Rival ${m.toUpperCase()} filter`;
+    // (Re)render the language chips from the draft (rebuilt each reflect so the
+    // row is populated the first time the rival config becomes visible).
+    if (rivalCfgLangRow) rivalCfgLangRow.innerHTML = langChipsHtml(rivalDraftSettings.languages, "data-lang");
   }
   function buildRivalCreateSliders() {
     if (!rivalConfigRow) return;
@@ -5682,6 +5970,15 @@ async function getExpRankByUsername(username) {
     reflectRivalCfgButtons();
     buildRivalCreateSliders(); // shared-only narrows the data pool -> axis
   }));
+  // Rival language chips. Language doesn't move the difficulty/length/value axes
+  // (those come from the rival stores), so a toggle only re-reflects the chips;
+  // the scope is captured into gd.rivalSettings on Confirm.
+  rivalCfgLangRow?.addEventListener("click", (e) => {
+    const chip = e.target.closest(".gt-lang-chip");
+    if (!chip) return;
+    rivalDraftSettings.languages = toggleLangSelection(rivalDraftSettings.languages, chip.dataset.lang);
+    reflectLangChips(rivalCfgLangRow, rivalDraftSettings.languages, "lang");
+  });
   // Render the chosen-rivals list as removable chips (multiple mode). Owns the
   // visibility of the whole "Current Rivals" row: shown only in multiple mode
   // once at least one rival has been added.
@@ -5861,7 +6158,30 @@ async function getExpRankByUsername(username) {
   // the same finish-time self-store sync as rival / improvement-target goals --
   // otherwise their gain pill lags the stat-driven Max-quotes pill by a fetch.
   function haveMaxCharsGoals() {
-    return (goalData.chars || []).some(g => g && g.maxChars);
+    return (goalData.chars || []).some(g => g && (g.maxChars || g.quoteChars));
+  }
+  // Max-quotes goals are catalog-backed too: "typed" = in-scope catalog quotes
+  // present in the SELF store, so they need the self store kept current exactly
+  // like the goal types above (previously they were left out of every gate, so
+  // the self store froze after its one-time bulk build).
+  function haveMaxQuotesGoals() {
+    return (goalData.quotes || []).some(g => g && g.maxQuotes);
+  }
+  // A self-store consumer was just added/changed: make sure the self store is
+  // managed and catch it up NOW, instead of rendering against whatever the
+  // store held when its last sync ran (possibly days ago).
+  function kickSelfStoreCatchUp() {
+    if (!isLeader) return;
+    ensureRivalSync();
+    rivalIncrementalSync(RIVAL_SELF_NAME);
+  }
+  // Does ANY goal read the self quote store? Single gate for the finish-time
+  // merge, the ongoing incremental refresh, and the backoff catch-up.
+  function haveSelfStoreGoals() {
+    return (goalData.rival || []).length > 0
+      || haveImprovementTargetGoals()
+      || haveMaxCharsGoals()
+      || haveMaxQuotesGoals();
   }
 
   // Does this goal need the racesEndpoint (for window math or req eval)?
@@ -6257,6 +6577,12 @@ async function getExpRankByUsername(username) {
     const diffRow = document.getElementById("gt-max-quotes-diff-row");
     const lenRow  = document.getElementById("gt-max-quotes-len-row");
     const active = maxQuotesMode && maxQuotesKind && selectedType === "quotes" && selectedMode === "target";
+    // The hint follows the sliders (not the amount row) here, so it needs its
+    // own spacing instead of the default -8px pull-up -- see styles.css. A data
+    // attribute, not a class: the hint code resets modeHint.className on every
+    // update, which wiped the class straight after it was added.
+    if (active) modeHint.dataset.afterSlider = "1";
+    else delete modeHint.dataset.afterSlider;
     if (diffRow) diffRow.style.display = active ? "block" : "none";
     if (lenRow)  lenRow.style.display  = active ? "block" : "none";
     if (!active) return;
@@ -6313,11 +6639,28 @@ async function getExpRankByUsername(username) {
   function renderPresets() {
     const cfg = GOAL_CONFIG[selectedType];
     selectedValue = null; rankFetchedRank = null; maxQuotesFetched = null;
+    // Max-quotes-only UI is hidden on every render and re-shown only by the
+    // quotes+target branch below (via buildMaxQuotesSliders). Previously only
+    // that branch ever hid the slider rows, so they stayed on screen after
+    // switching to another goal type or mode.
+    delete modeHint.dataset.afterSlider;
+    {
+      const mqDiffRow = document.getElementById("gt-max-quotes-diff-row");
+      const mqLenRow  = document.getElementById("gt-max-quotes-len-row");
+      if (mqDiffRow) mqDiffRow.style.display = "none";
+      if (mqLenRow)  mqLenRow.style.display  = "none";
+    }
     confirmBtn.disabled = true; customInput.value = "";
     customInput.classList.remove("gt-custom-input--grow");
     if (rivalAddBtn) { rivalAddBtn.style.display = "none"; rivalAddBtn.classList.remove("gt-rival-add-inline-btn--reserved"); } // re-shown by the rival branch
     if (amountTargetRow) amountTargetRow.classList.remove("gt-tagfield"); // rival-only styling
     if (rivalListEl) rivalListEl.innerHTML = ""; // clear any leftover rival chips for non-rival types
+    // The Max-quotes language row is re-shown ONLY by the quotes+target branch
+    // below. Hide it here on every render so it can't leak into other goal
+    // types (time / chars / improvement / rival / …) after a quotes goal was
+    // previewed. (The rival + improvement-Target types have their OWN language
+    // rows, managed separately.)
+    if (maxQuotesLangRow) maxQuotesLangRow.style.display = "none";
 
     // ── Rival mode (type=rival) ───────────────────────────────
     // The Amount row becomes a username input (like Player mode). No presets,
@@ -7206,6 +7549,12 @@ async function getExpRankByUsername(username) {
     // Target-only rows.
     targetStatusRow.style.display   = isTarget ? "block" : "none";
     targetPlayedRow.style.display   = isTarget ? "block" : "none";
+    if (targetLangRow) {
+      targetLangRow.style.display = isTarget ? "flex" : "none";
+      if (isTarget) {
+        targetLangRow.innerHTML = langChipsHtml(targetLangs, "data-lang");
+      }
+    }
     targetDiffRow.style.display     = isTarget ? "block" : "none";
     targetLenRow.style.display      = isTarget ? "block" : "none";
     if (!isImp) { resetImprovementUI(); resetTargetUI(); return; }
@@ -7440,11 +7789,12 @@ async function getExpRankByUsername(username) {
     selectedTargetPlayed = "played";
     selectedTargetDiffMin = null; selectedTargetDiffMax = null;
     selectedTargetLenMin  = null; selectedTargetLenMax  = null;
+    targetLangs = [];
     improvementModeBtns.forEach(b => b.classList.toggle("active", b.dataset.impMode === "gain"));
     targetStatusBtns.forEach(b => b.classList.toggle("active", b.dataset.targetStatus === "ranked"));
     targetPlayedBtns.forEach(b => b.classList.toggle("active", b.dataset.targetPlayed === "played"));
     if (improvementModeRow) improvementModeRow.style.display = "none";
-    for (const r of [targetStatusRow, targetPlayedRow, targetDiffRow, targetLenRow]) {
+    for (const r of [targetStatusRow, targetPlayedRow, targetLangRow, targetDiffRow, targetLenRow]) {
       if (r) r.style.display = "none";
     }
   }
@@ -7476,6 +7826,16 @@ async function getExpRankByUsername(username) {
     renderTargetSliders();
     validateConfirm();
   }));
+  // Target language chips. Language doesn't move the difficulty/length axis
+  // (that's derived from status/played), so a toggle only re-reflects the chips
+  // — the scope is captured onto the goal at creation and filters the pool.
+  targetLangRow?.addEventListener("click", (e) => {
+    const chip = e.target.closest(".gt-lang-chip");
+    if (!chip) return;
+    targetLangs = toggleLangSelection(targetLangs, chip.dataset.lang);
+    reflectLangChips(targetLangRow, targetLangs, "lang");
+    validateConfirm();
+  });
 
   function openModal() {
     overlay.classList.add("open");
@@ -7770,7 +8130,7 @@ async function getExpRankByUsername(username) {
       // modal — seed the new goal straight from the draft. Nothing is written
       // back to the global object; the bulk fetch is keyed to the rival username
       // only, so ensureRivalSync still starts the right stream.
-      const rivalCfg = { ...rivalDraftSettings, settingsV: RIVAL_GOAL_SETTINGS_V };
+      const rivalCfg = { ...rivalDraftSettings, languages: rivalLangsOf(rivalDraftSettings), settingsV: RIVAL_GOAL_SETTINGS_V };
       const goalId = generateGoalId("rival");
       let newGoal;
       if (rivalMultiMode) {
@@ -7801,6 +8161,10 @@ async function getExpRankByUsername(username) {
       // self store is being built. Followers will pick up store updates over
       // the channel / storage events.
       if (isLeader) ensureRivalSync();
+      // A language-scoped rival goal reads quote languages from the shared
+      // catalog, so make sure that build is running (it self-gates + no-ops if
+      // already synced). Plain rival goals don't need it.
+      if (isLeader && rivalCfg.languages && rivalCfg.languages.length) maybeRunQuoteCatalog();
       return;
     }
 
@@ -7820,6 +8184,7 @@ async function getExpRankByUsername(username) {
         target: selectedValue,
         status: selectedTargetStatus,   // "all" | "ranked" | "unranked"
         played: selectedTargetPlayed,   // "all" | "played"
+        languages: targetLangs.length ? targetLangs.slice() : undefined,
         diffMin: selectedTargetDiffMin, diffMax: selectedTargetDiffMax,
         lenMin:  selectedTargetLenMin,  lenMax:  selectedTargetLenMax,
         recurrence: "none",
@@ -8103,6 +8468,7 @@ async function getExpRankByUsername(username) {
         inFlight(updateRankGoals)();
         inFlight(updateExpRankGoals)();
         inFlight(updateMaxQuotesGoals)();
+        if (isMaxQuotes || isMaxChars || isQuoteChars) kickSelfStoreCatchUp();
         // Newly-created req goal — kick off an evaluation in case races
         // happened between the cached baseline and now (rare, but cheap to check).
         // Same for fresh average goals — they need the evaluator to walk
@@ -8652,7 +9018,7 @@ async function getExpRankByUsername(username) {
     const target = Number(gd.target) || 0;
 
     const labelEl = document.getElementById(`${goalId}-label`);
-    if (labelEl) labelEl.textContent = `Target ${metricLbl} \u2265 ${target}`;
+    if (labelEl) labelEl.textContent = `Target ${metricLbl} \u2265 ${target}${langScopeSuffix(gd.languages)}`;
 
     // ── Value row: your current-quote value / target ──
     const wrapEl = document.getElementById(`${goalId}-target-value-wrap`);
@@ -8934,19 +9300,121 @@ async function getExpRankByUsername(username) {
   // and let the fetch guards short-circuit all polling. Toggling one class on
   // the main widget (CSS hides .gt-content + .gt-header-actions and reveals the
   // panel); a body class hides any detached group widgets.
+
+  // Wire a password field + its eye button (shared by the widget's connect
+  // form and the Account settings tab).
+  function wireKeyReveal(inputEl, btnEl) {
+    btnEl.innerHTML = GT_EYE_ICON;
+    btnEl.addEventListener("click", () => {
+      const show = inputEl.type === "password";
+      inputEl.type = show ? "text" : "password";
+      btnEl.innerHTML = show ? GT_EYE_OFF_ICON : GT_EYE_ICON;
+      btnEl.title = show ? "Hide key" : "Show key";
+      inputEl.focus();
+    });
+  }
+  // Keep TypeGG's own keyboard shortcuts from firing while typing in our inputs.
+  function isolateKeys(el) {
+    for (const ev of ["keydown", "keyup", "keypress"]) el.addEventListener(ev, (e) => e.stopPropagation());
+  }
+
   function ensureLoginPanel() {
     if (document.getElementById("gt-login-panel")) return;
     const panel = document.createElement("div");
     panel.id = "gt-login-panel";
     panel.className = "gt-login-panel";
-    panel.textContent = "Please log in to TypeGG to use Goal Tracker.";
+    panel.innerHTML = `
+      <div class="gt-login-title"><span class="gt-login-title-icon">${GT_KEY_ICON}</span><span id="gt-login-title-text">Connect your account</span></div>
+      <div id="gt-login-notice" class="gt-login-notice" style="display:none;"></div>
+      <div id="gt-login-intro" class="gt-login-text">Paste an API key so the tracker can read your stats. Get one in TypeGG \u2192 Settings \u2192 API Key.</div>
+      <label class="gt-login-field">
+        <span class="gt-section-label">Username</span>
+        <input id="gt-login-user" class="gt-custom-input gt-login-input" type="text" autocomplete="off" spellcheck="false">
+      </label>
+      <label class="gt-login-field">
+        <span class="gt-section-label">API key</span>
+        <span class="gt-login-keywrap">
+          <input id="gt-login-key" class="gt-custom-input gt-login-input" type="password" autocomplete="off" spellcheck="false">
+          <button id="gt-login-reveal" class="gt-icon-btn gt-login-reveal" type="button" title="Show key" aria-label="Show key"></button>
+        </span>
+      </label>
+      <button id="gt-login-save" class="gt-confirm-btn gt-login-save" type="button" disabled>Connect</button>
+      <div id="gt-login-status" class="gt-login-status" role="status"></div>
+      <div class="gt-login-foot">Stored only in this browser.</div>`;
     container.appendChild(panel); // sibling of .gt-content; shown only via the gt-loggedout class
+
+    const userEl = panel.querySelector("#gt-login-user");
+    const keyEl  = panel.querySelector("#gt-login-key");
+    const saveEl = panel.querySelector("#gt-login-save");
+    const status = panel.querySelector("#gt-login-status");
+    isolateKeys(userEl); isolateKeys(keyEl);
+    wireKeyReveal(keyEl, panel.querySelector("#gt-login-reveal"));
+
+    const clearErrors = () => {
+      userEl.classList.remove("gt-input-err"); keyEl.classList.remove("gt-input-err");
+      status.textContent = ""; status.classList.remove("gt-login-status-err");
+    };
+    const syncButton = () => { saveEl.disabled = !(userEl.value.trim() && keyEl.value.trim()); };
+    for (const el of [userEl, keyEl]) el.addEventListener("input", () => { clearErrors(); syncButton(); });
+
+    let busy = false;
+    async function connect() {
+      if (busy) return;
+      const user = userEl.value.trim(), key = keyEl.value.trim();
+      if (!user || !key) return;
+      busy = true;
+      clearErrors();
+      saveEl.disabled = true;
+      saveEl.textContent = "Checking\u2026";
+      const res = await verifyApiKey(user, key);
+      busy = false;
+      saveEl.textContent = "Connect";
+      if (!res.ok) {
+        status.textContent = res.message;
+        status.classList.add("gt-login-status-err");
+        const bad = res.field === "user" ? userEl : res.field === "key" ? keyEl : null;
+        if (bad) { bad.classList.add("gt-input-err"); bad.focus(); bad.select(); }
+        syncButton();
+        return;
+      }
+      setAuth(key, res.username);
+      keyEl.value = ""; keyEl.type = "password";
+      syncButton();
+      checkAuthTransition();
+    }
+    saveEl.addEventListener("click", connect);
+    keyEl.addEventListener("keydown", (e) => { if (e.key === "Enter") connect(); });
+    userEl.addEventListener("keydown", (e) => { if (e.key === "Enter") keyEl.focus(); });
   }
+
+  // Refresh the connect form's wording each time it's shown: a fresh connect,
+  // or a reconnect after TypeGG rejected the saved key.
+  function refreshLoginPanel() {
+    const panel = document.getElementById("gt-login-panel");
+    if (!panel) return;
+    const rec = readAuthRecord();
+    const rejected = !!(rec && rec.rejected);
+    const userEl = panel.querySelector("#gt-login-user");
+    panel.querySelector("#gt-login-title-text").textContent = rejected ? "Reconnect your account" : "Connect your account";
+    const notice = panel.querySelector("#gt-login-notice");
+    notice.style.display = rejected ? "" : "none";
+    notice.textContent = rejected
+      ? "Your API key stopped working \u2014 it was probably regenerated. Paste the new key to pick up where you left off."
+      : "";
+    panel.querySelector("#gt-login-intro").style.display = rejected ? "none" : "";
+    // Pre-fill the remembered username, but never overwrite what the user typed.
+    if (rejected && rec.username && !userEl.value) userEl.value = rec.username;
+    userEl.placeholder = "Your TypeGG name";
+    panel.querySelector("#gt-login-key").placeholder = "Paste your key";
+    const saveEl = panel.querySelector("#gt-login-save");
+    saveEl.disabled = !(userEl.value.trim() && panel.querySelector("#gt-login-key").value.trim());
+  }
+
   // Apply the gate to the DOM and return true when logged out (caller should
   // then skip the rest of its render).
   function applyLoginGate() {
     const out = !isLoggedIn();
-    if (out) ensureLoginPanel();
+    if (out) { ensureLoginPanel(); refreshLoginPanel(); }
     container.classList.toggle("gt-loggedout", out);
     document.body.classList.toggle("gt-app-loggedout", out);
     return out;
@@ -9448,10 +9916,108 @@ async function getExpRankByUsername(username) {
   }
 
   // ── Stats + reset logic (leader only) ────────────────────────
+  // ── Goals owner (account-switch protection) ──────────────────
+  // Gain goals store a BASELINE stat captured from whichever account was
+  // active when they were created. If the connected account changes (e.g. an
+  // old stale session named an alt, and the user now connects their main
+  // account with an API key), "current − baseline" would mix two accounts
+  // and show a huge bogus gain. So we remember which account the goals
+  // belong to, and on a switch we shift every baseline by (new account's
+  // stat − old account's stat). Each goal then shows exactly the progress it
+  // showed before the switch. Stored per language universe (proxied key).
+  const GOALS_OWNER_KEY = "gt-goals-owner";
+  function goalsOwnerOk() {
+    const cur = getAuth().username;
+    const own = localStorage.getItem(GOALS_OWNER_KEY);
+    return !!cur && !!own && own.toLowerCase() === cur.toLowerCase();
+  }
+  function previousGoalsOwner() {
+    const own = localStorage.getItem(GOALS_OWNER_KEY);
+    if (own) return own;
+    // Before 13.3 the account came from TypeGG's (possibly stale) session entry.
+    try { return JSON.parse(GT_RAW_LS.getItem("pocketbase_auth") || "null")?.record?.username || null; }
+    catch { return null; }
+  }
+  async function fetchStatsForUser(name) {
+    const r = await gtApiFetch(withLang(`https://api.typegg.io/v1/users/${encodeURIComponent(name)}`), { headers: authHeaders() });
+    if (!r.ok) throw new Error(`stats for ${name}: ${r.status}`);
+    const d = await r.json();
+    return {
+      exp: d.stats?.experience, pp: d.stats?.totalPp, races: d.stats?.races,
+      quotes: d.stats?.quotesTyped, playtime: d.stats?.playTime,
+      chars: d.stats?.completionCharactersTyped,
+      quickplayRaces: d.stats?.quickplayRaces, soloRaces: d.stats?.soloRaces,
+    };
+  }
+  // Returns true when goals are safe to render against `newData`.
+  async function reconcileGoalsOwner(newData) {
+    const cur = getAuth().username;
+    if (!cur) return false;
+    const prev = previousGoalsOwner();
+    const hasGoals = Object.values(goalData).some(a => Array.isArray(a) && a.length > 0);
+    if (!prev || prev.toLowerCase() === cur.toLowerCase() || !hasGoals) {
+      localStorage.setItem(GOALS_OWNER_KEY, cur);
+      return true;
+    }
+    let old;
+    try { old = await fetchStatsForUser(prev); }
+    catch (e) {
+      if (String(e?.message || "").includes(": 404")) {
+        // Previous account no longer exists — nothing to shift against.
+        localStorage.setItem(GOALS_OWNER_KEY, cur);
+        return true;
+      }
+      return false; // transient — retry on the next poll
+    }
+    const shift = (field) => {
+      const a = old[field], b = newData[field];
+      return (typeof a === "number" && typeof b === "number") ? b - a : null;
+    };
+    const racesShift = shift("races");
+    const changedTypes = [];
+    for (const type of ["exp", "pp", "races", "quotes", "playtime", "chars", "improvement"]) {
+      const goals = goalData[type];
+      if (!Array.isArray(goals) || goals.length === 0) continue;
+      let changed = false;
+      for (const gd of goals) {
+        // Catalog-based goals read the per-account quote store, not a baseline.
+        if (gd.maxQuotes || gd.maxChars || gd.quoteChars) continue;
+        const cfg = GOAL_CONFIG[type];
+        if (type !== "improvement" && typeof gd[cfg.baselineKey] === "number") {
+          const statField = (type === "races" && gd.filter === "quickplay") ? "quickplayRaces"
+                          : (type === "races" && gd.filter === "solo")      ? "soloRaces"
+                          : type;
+          const d = shift(statField);
+          if (d != null) {
+            gd[cfg.baselineKey] += d; changed = true;
+            // A bogus jump may already have marked a recurring goal complete;
+            // re-derive it from the corrected gain (plain gain goals only).
+            if (gd.completedThisPeriod && !goalIsGated(gd) && !gd.mode && typeof newData[statField] === "number") {
+              gd.completedThisPeriod = (newData[statField] - gd[cfg.baselineKey]) >= gd.target;
+            }
+          }
+        }
+        // Evaluator snapshots (requirement / average / improvement goals) track
+        // lifetime races — shift them too so the new account's older races
+        // aren't counted as fresh progress.
+        if (typeof gd.lastEvalRaces === "number" && racesShift != null) {
+          gd.lastEvalRaces += racesShift; changed = true;
+        }
+      }
+      if (changed) changedTypes.push(type);
+    }
+    for (const t of changedTypes) saveGoals(t);
+    for (const k of Object.keys(prevGainMap)) delete prevGainMap[k];
+    localStorage.setItem(GOALS_OWNER_KEY, cur);
+    gtLog("Account switch — goal baselines shifted", `${prev} \u2192 ${cur}`, { types: changedTypes });
+    return true;
+  }
+
   async function loadStats() {
     if (!isLoggedIn()) return; // logged out — don't fetch (avoids 401s)
     try {
       const data = await fetchUserData();
+      if (!goalsOwnerOk() && !(await reconcileGoalsOwner(data))) return;
       applyUserData(data);
       // Share with other tabs so they render without fetching
       try {
@@ -9761,7 +10327,7 @@ async function getExpRankByUsername(username) {
       // DON'T render — selfRender=false merges the store quietly. We collect the
       // promise so flushGoalRender() can wait briefly and show merged bests in
       // the single reveal. (gtPerf still logs the rival fetch lag internally.)
-      if (racesChanged && ((goalData.rival || []).length > 0 || haveImprovementTargetGoals() || haveMaxCharsGoals())) {
+      if (racesChanged && haveSelfStoreGoals()) {
         const gtPerfSession = gtPerf.startRivalLag(gtStatsFetchMs); // [GT-PERF] anchor: rival fetch kicked
         const maintainPromise = maintainSelfStoreFromRaces(gtPerfSession, false)
           .catch(e => { console.warn("[Goal Tracker] rival self-store maintenance failed:", e); return false; });
@@ -9833,6 +10399,9 @@ async function getExpRankByUsername(username) {
 
   function handleQuoteFinishAsLeader() {
     if (!isLoggedIn()) return; // logged out — don't start the stats retry chain
+    // Account just switched and baselines aren't shifted yet: let loadStats
+    // do that first instead of committing new-account stats to old baselines.
+    if (!goalsOwnerOk()) { loadStatsGuarded(); return; }
     // Freeze the just-finished quote NOW, at the disabled edge, before the user
     // can navigate (e.g. "next vs rival"). The chain uses this for an
     // authoritative per-quote PB confirm even if the live quote changes mid-chain.
@@ -10173,7 +10742,7 @@ async function getExpRankByUsername(username) {
       // The PP-rebalance self-heal applies whenever a goal reads the PP cache
       // (rival / improvement-Target / max-chars), so widen the early-out to
       // include max-chars-only setups.
-      const hasPpCacheConsumer = hasRival || hasTarget || haveMaxCharsGoals();
+      const hasPpCacheConsumer = haveSelfStoreGoals();
       if (!hasImprovement && !hasPpCacheConsumer) return; // cheap no-op when irrelevant
       const qid = getCurrentQuoteIdLive();
       if (!qid) return;
@@ -10487,9 +11056,13 @@ async function getExpRankByUsername(username) {
   // Store meta version.
   //   v1: per-entry difficulty/length (`d`/`l`) capture.
   //   v2: single status=any build (ranked + unranked + `r` in one stream).
+  //   v3: unranked (0 PP) results accepted by rivalMergeEntry.
+  //   v4: recovery re-bulk for quotes skipped by the old incremental refresh,
+  //       which committed its stop keys row-by-row so an interrupted scan hid
+  //       everything below the rows it had already read.
   // A store below the current version gets a one-time re-bulk (backfillMeta-
   // IfNeeded) under status=any, which captures everything v2 needs at once.
-  const RIVAL_META_V = 3;
+  const RIVAL_META_V = 4;
   function freshRivalStore() {
     return { quotes: {}, raceCounts: {}, fetch: freshRivalFetch(), metaV: RIVAL_META_V, lastSync: null };
   }
@@ -10498,6 +11071,8 @@ async function getExpRankByUsername(username) {
   //  - v2 stores DID page status=any, but the old rivalMergeEntry rejected every
   //    pp<=0 row, so unranked results (0 PP) never made it in -- v3 re-bulks them
   //    under the fixed merge guard.
+  //  - v3 stores may be missing quotes the old incremental refresh skipped
+  //    after an interrupted scan; v4 re-bulks to recover them.
   // Existing quotes stay (merges are idempotent); the user just sees the normal
   // "syncing…" state until the re-bulk finishes, after which metaV is stamped
   // current and this never fires again.
@@ -10690,6 +11265,10 @@ async function getExpRankByUsername(username) {
   // Comparison metric for a rival goal — a PER-GOAL setting (gd.rivalSettings).
   function rivalMetric(rs) {
     return (rs || rivalSettings).metric === "pp" ? "pp" : "wpm";
+  }
+  // Language scope for a rival goal — a PER-GOAL setting. [] = every language.
+  function rivalLangsOf(rs) {
+    return sanitizeLangs((rs || rivalSettings).languages);
   }
   // Whether a rival quote falls inside the active scope. A missing `r` flag is
   // legacy data, which was ranked-only, so it counts as ranked.
@@ -11108,7 +11687,7 @@ async function getExpRankByUsername(username) {
       // Hand each completed store to its incremental refresh — but only when a
       // rival goal exists. In the self-prefetch state (logged in, no rival
       // goal) the bulk is the whole job; don't kick an ongoing self refresh.
-      const haveRivalGoals = (goalData.rival || []).length > 0 || haveImprovementTargetGoals();
+      const haveRivalGoals = haveSelfStoreGoals();
       if (!stillPending && isLeader && !apiThrottled() && haveRivalGoals) {
         for (const name of rivalManaged.keys()) {
           if (rivalBulkDone(loadRivalStore(name))) rivalIncrementalSync(name);
@@ -11147,6 +11726,14 @@ async function getExpRankByUsername(username) {
 
     let changed  = false;
     let caughtUp = false;
+    let finished = false; // scan reached a real end (caught up / end of list / page cap)
+    // Race-count stop keys seen this scan. Committed to store.raceCounts ONLY when
+    // the scan finishes. Committing them row-by-row meant an interrupted scan
+    // (timeout, throttle, tab hidden, lost leadership) left fresh stop keys on
+    // the TOP rows while the rows below them were never read -- so every later
+    // scan stopped on the first row and those quotes were lost for good. PB
+    // merges are still applied immediately (idempotent, ratchet-only).
+    const pendingCounts = {};
     let page = 1;
     while (isLeader && anyTabVisibleRecently() && !apiThrottled()) {
       if (page > 1) await new Promise(r => setTimeout(r, RIVAL_PAGE_DELAY_MS));
@@ -11169,18 +11756,25 @@ async function getExpRankByUsername(username) {
         // and meta-only rows no-op) and advance the stored race count so the next
         // scan can stop here. The `r` tag is (re)applied so a mis-tag heals.
         if (rivalMergeEntry(store, e.quoteId, e.wpm, e.pp, e.r, e.d, e.l)) changed = true;
-        if (races !== undefined && store.raceCounts[e.quoteId] !== races) {
-          store.raceCounts[e.quoteId] = races;
-          changed = true; // persist the advanced baseline even with no PB change
-        }
+        if (races !== undefined && prevRaces !== races) pendingCounts[e.quoteId] = races;
       }
-      if (caughtUp) break;
-      if (page >= res.totalPages) break;
+      if (caughtUp) { finished = true; break; }
+      if (page >= res.totalPages) { finished = true; break; }
       if (page >= RIVAL_REFRESH_MAX_PAGES) {
+        // Commit anyway: otherwise every refresh would re-scan the full cap.
         console.warn("[Goal Tracker] rival refresh hit page cap without catching up", { name, pages: page });
+        finished = true;
         break;
       }
       page += 1;
+    }
+    if (finished) {
+      for (const qid in pendingCounts) {
+        if (store.raceCounts[qid] !== pendingCounts[qid]) {
+          store.raceCounts[qid] = pendingCounts[qid];
+          changed = true; // persist the advanced baseline even with no PB change
+        }
+      }
     }
     return changed;
   }
@@ -11229,7 +11823,7 @@ async function getExpRankByUsername(username) {
     // an improvement-Target goal exists (Target goals need the self store kept
     // current so X/Y tracks new PBs). In the bare self-prefetch state (logged
     // in, no rival/target goal) the one-time bulk is the whole job.
-    if ((goalData.rival || []).length === 0 && !haveImprovementTargetGoals()) return;
+    if (!haveSelfStoreGoals()) return;
     // Round-robin: refresh exactly ONE managed store per tick. Self is included
     // (its PBs need refreshing too); the cursor wraps and tolerates the set
     // changing between ticks.
@@ -11257,7 +11851,7 @@ async function getExpRankByUsername(username) {
     // No bulk pending. The ongoing incremental refresh runs when a rival OR an
     // improvement-Target goal exists (the latter needs the self store fresh).
     // The poll still ran the driver above, so an interrupted bulk resumes.
-    if ((goalData.rival || []).length === 0 && !haveImprovementTargetGoals()) return;
+    if (!haveSelfStoreGoals()) return;
     rivalIncrementalSync(name);
   }
 
@@ -11488,7 +12082,7 @@ async function getExpRankByUsername(username) {
     if (!isLeader || !rivalIdbReady) return;
     if (apiHardThrottled()) return; // a genuine rate-limit is still in effect
     const haveRival = (goalData.rival || []).length > 0;
-    if (!haveRival && !haveImprovementTargetGoals() && !haveMaxCharsGoals()) return;
+    if (!haveSelfStoreGoals()) return;
     // Pull your latest /races into the self store (fills the just-set PB the
     // gated finish missed), then fill the live quote's bests for each rival.
     maintainSelfStoreFromRaces().catch(() => {});
@@ -11557,7 +12151,7 @@ async function getExpRankByUsername(username) {
     if (ppRebalanceRefetchActive) return;        // a refetch is mid-reset
     if (ppRebalanceChecked.has(quoteId)) return; // already reconciled this quote this session
     // Only worth doing when something actually reads the PP cache.
-    if ((goalData.rival || []).length === 0 && !haveImprovementTargetGoals() && !haveMaxCharsGoals()) return;
+    if (!haveSelfStoreGoals()) return;
 
     const selfStore = loadRivalStore(RIVAL_SELF_NAME);
     // Never compare against a half-built cache: during the one-time bulk a
@@ -12070,6 +12664,12 @@ async function getExpRankByUsername(username) {
     if (!m) return false;
     if (gd.status === "ranked"   && m.r === false) return false;
     if (gd.status === "unranked" && m.r !== false) return false;
+    // Language scope: an active filter excludes quotes whose universe is unknown
+    // or not selected (mirrors maxQuoteInScope). Empty/absent = every language.
+    const langs = gd.languages;
+    if (Array.isArray(langs) && langs.length) {
+      if (!m.g || !langs.includes(m.g)) return false;
+    }
     if (gd.diffMin != null || gd.diffMax != null) {
       const d = Number(m.d);
       if (!Number.isFinite(d)) return false;
@@ -12111,6 +12711,7 @@ async function getExpRankByUsername(username) {
 
   function targetFilterSig(gd) {
     return [gd.metric, gd.target, gd.status, gd.played,
+            (gd.languages || []).slice().sort().join(","),
             gd.diffMin, gd.diffMax, gd.lenMin, gd.lenMax].join("|");
   }
   const targetStandingsCache = new Map(); // goalId → { catEpoch, selfEpoch, sig, result }
@@ -12362,7 +12963,8 @@ async function getExpRankByUsername(username) {
     const m = rivalMetricFilterState(rs, gd);
     const dl = (f.dActive || f.lActive) ? `${f.dMin},${f.dMax},${f.lMin},${f.lMax}` : "";
     const mm = m.rActive ? `r${m.rMin}-${m.rMax}` : "";
-    return `${dl}|${mm}`;
+    const lg = rivalLangsOf(rs).slice().sort().join(",");
+    return `${dl}|${mm}|${lg}`;
   }
   // Whether a quote entry passes the active filter. A CONSTRAINED dimension
   // excludes entries whose meta is unknown (legacy data not yet backfilled); a
@@ -12455,6 +13057,7 @@ async function getExpRankByUsername(username) {
     const metric = rivalMetric(rs);
     const scope  = rivalScope(rs);
     const requireBoth = !!rs.requireBoth; // count only quotes you've both raced
+    const langs  = rivalLangsOf(rs);      // [] = every language
     const filter = rivalFilterState(rs, gd);
     const mf = rivalMetricFilterState(rs, gd);
     const selfStore  = loadRivalStore(RIVAL_SELF_NAME);
@@ -12468,6 +13071,7 @@ async function getExpRankByUsername(username) {
     for (const qid in composite) {
       const c = composite[qid];
       if (!rivalQuoteInScope(c, scope)) continue; // only count in-scope quotes
+      if (langs.length && !quoteLangPasses(qid, langs)) continue; // language scope
       if ((filter.dActive || filter.lActive) && !rivalQuotePassesFilter(c, filter)) continue;
       const se = sq[qid];
       // "Shared only" mode: skip quotes you haven't raced, so the wins total
@@ -12901,7 +13505,7 @@ async function getExpRankByUsername(username) {
       : (gd.rival || "rival");
 
     const labelEl = document.getElementById(`${goalId}-label`);
-    if (labelEl) labelEl.textContent = `Rival vs ${rivalName}`;
+    if (labelEl) labelEl.textContent = `Rival vs ${rivalName}${langScopeSuffix(rivalLangsOf(rs))}`;
     const badge = document.getElementById(`${goalId}-metric-badge`);
     if (badge) badge.textContent = metric.toUpperCase();
     const gearEl = document.getElementById(`${goalId}-rival-gear`);
@@ -12938,6 +13542,8 @@ async function getExpRankByUsername(username) {
       if (!liveQid || !comp) return true;
       const meta = rivalMetaOf(liveQid);
       if (!rivalQuoteInScope(meta, rivalScope(rs))) return false;
+      const langs = rivalLangsOf(rs);
+      if (langs.length && !quoteLangPasses(liveQid, langs)) return false;
       const filter = rivalFilterState(rs, gd);
       if ((filter.dActive || filter.lActive) && !rivalQuotePassesFilter(meta, filter)) return false;
       if (rs.requireBoth && !sEntry) return false; // shared-only: must have raced it too
@@ -14623,6 +15229,7 @@ async function getExpRankByUsername(username) {
           if (t === 'pp')     inFlight(updateRankGoals)();
           if (t === 'exp')    inFlight(updateExpRankGoals)();
           if (t === 'quotes') inFlight(updateMaxQuotesGoals)();
+          if ((t === 'quotes' && haveMaxQuotesGoals()) || (t === 'chars' && haveMaxCharsGoals())) kickSelfStoreCatchUp();
           if (t === 'races')  evaluateRaceRequirementsGuarded();
           if (t === 'improvement') { evaluateImprovementGuarded(); maybeRunQuoteCatalog(); }
           if (t === 'pp' || t === 'exp') inFlight(updatePlayerGoals)();
@@ -14643,7 +15250,7 @@ async function getExpRankByUsername(username) {
     const k = logiKey(e.key);
 
     // Auth changed in another tab (TypeGG's own key)? Re-evaluate the gate.
-    if (k === 'pocketbase_auth') { checkAuthTransition(); return; }
+    if (k === GT_AUTH_KEY) { checkAuthTransition(); return; }
 
     // Recurrence settings change?
     if (k === REC_SETTINGS_KEY) {
@@ -14698,6 +15305,7 @@ async function getExpRankByUsername(username) {
           if (type === 'pp')     inFlight(updateRankGoals)();
           if (type === 'exp')    inFlight(updateExpRankGoals)();
           if (type === 'quotes') inFlight(updateMaxQuotesGoals)();
+          if ((type === 'quotes' && haveMaxQuotesGoals()) || (type === 'chars' && haveMaxCharsGoals())) kickSelfStoreCatchUp();
           if (type === 'races')  evaluateRaceRequirementsGuarded();
           if (type === 'improvement') { evaluateImprovementGuarded(); maybeRunQuoteCatalog(); }
           if (type === 'pp' || type === 'exp') inFlight(updatePlayerGoals)();
@@ -14727,7 +15335,7 @@ async function getExpRankByUsername(username) {
   });
 
   // ── Auth-state watcher (login / logout transitions) ──────────
-  // getAuth() (TypeGG's pocketbase_auth) is the source of truth. A login or
+  // getAuth() (the saved API key) is the source of truth. A login or
   // logout in THIS tab does NOT fire a storage event (those are cross-tab
   // only), and when logged out the stats poll is paused so there's nothing to
   // piggyback — so we also poll the auth state on a light interval. The
@@ -14769,7 +15377,9 @@ async function getExpRankByUsername(username) {
   // leader's next fetch tick. Works even if we end up as leader.
   try {
     const cached = JSON.parse(localStorage.getItem(STATS_CACHE_KEY) || 'null');
-    if (cached?.data && (Date.now() - cached.timestamp < STATS_CACHE_TTL)) {
+    // Skip when the goals belong to a different account than the one now
+    // connected — the leader shifts baselines first (reconcileGoalsOwner).
+    if (cached?.data && goalsOwnerOk() && (Date.now() - cached.timestamp < STATS_CACHE_TTL)) {
       applyUserData(cached.data);
     }
   } catch {}

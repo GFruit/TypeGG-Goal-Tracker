@@ -574,6 +574,12 @@
    so it needs a little separation the rival/target cards get from their sync
    line. */
 .gt-mq-next-btn { margin-top: 8px; }
+/* Max-quotes card: the sync line sits directly under the progress bar
+   (not under a text line like on the rival / target cards), so the shared
+   -4px pull-up made it overlap the bar's 3px bottom margin. Centre it
+   between bar and button instead: 3px bar margin + 5px = 8px above,
+   0 + the button's 8px margin-top = 8px below. */
+.gt-progress-bar + .gt-sync-line { margin-top: 5px; margin-bottom: 0; }
 
 /* ── Requirements row (race goals + gain mode) ───────────
    Three chip-shaped inputs (WPM / Acc / PP) plus a right-aligned
@@ -754,10 +760,15 @@
    behaviour; a specific language uses the emerald accent that matches the Max
    kind buttons, while the All chip uses the blue accent so it reads as the
    neutral default rather than one more language. */
-#gt-max-quotes-lang-row {
+#gt-max-quotes-lang-row,
+.gt-lang-row {
   display: flex; flex-wrap: wrap; gap: 5px;
   margin: 0 0 12px;
 }
+/* The rival/improvement-target creation rows reuse .gt-lang-row; a touch of top
+   margin so it sits away from the section label above it like the other rows. */
+#gt-rival-cfg-lang-row { margin-top: 8px; }
+#gt-target-lang-row { margin-top: 2px; }
 .gt-lang-chip {
   padding: 4px 10px; border-radius: 999px;
   border: 1.5px solid #374151; background: transparent;
@@ -950,6 +961,13 @@
 
 /* ── Mode hint ───────────────────────────────────────────── */
 .gt-mode-hint { font-size: 11px; color: #6b7280; margin-top: -8px; margin-bottom: 12px; }
+/* Max-quotes: the hint sits under the length slider, not under the amount
+   row, so the -8px pull-up made it overlap the slider (its row only has 2px
+   of bottom margin). Centre it between slider and Set Goal button instead:
+   2px row margin + 16px = 18px above, 0 + the button's 18px margin-top = 18px
+   below. Toggled from JS (buildMaxQuotesSliders) via a data attribute, since
+   a sibling selector would also match while the slider row is hidden. */
+.gt-mode-hint[data-after-slider] { margin-top: 16px; margin-bottom: 0; }
 .gt-mode-hint-error { color: #f87171; }
 .gt-mode-hint-ok    { color: #34d399; }
 
@@ -1736,11 +1754,11 @@ body.gt-dragging * { cursor: grabbing !important; }
    class. All driven by JS toggling .gt-loggedout / .gt-app-loggedout. */
 .gt-login-panel {
   display: none;
-  padding: 4px 2px 2px;
+  padding: 2px 0 0;
   font-size: 12px;
   line-height: 1.5;
   color: #9ca3af;
-  text-align: center;
+  text-align: left;
 }
 .gt-widget.gt-loggedout .gt-content,
 .gt-widget.gt-loggedout .gt-header-actions { display: none; }
@@ -1947,7 +1965,11 @@ body.gt-app-loggedout .gt-widget-detached { display: none !important; }
 .gt-edit-reset-go:hover { background: #991b1b; }
 .gt-edit-reset-go:focus-visible { outline: 2px solid #fca5a5; outline-offset: 1px; }
 
-.gt-edit-popover-wide { min-width: 264px; }
+/* Rival + improvement-Target edit popover: fix the width (like the Max-quotes
+   popover below) so the language chips wrap onto new lines instead of stretching
+   the popover wide. 264px comfortably fits the 3-button metric/status rows and
+   the range sliders. */
+.gt-edit-popover-wide { width: 264px; min-width: 0; }
 /* Max-quotes edit popover: fix the width to the Ranked/Unranked/All row so the
    language chips wrap onto new lines instead of stretching the popover wide. */
 .gt-edit-popover-mq { width: 236px; min-width: 0; }
@@ -2005,3 +2027,94 @@ body.gt-app-loggedout .gt-widget-detached { display: none !important; }
    to inherit it — deliberately NOT targeting body itself, so the
    !important doesn't beat the inline value it's meant to propagate. */
 body.gt-resizing * { cursor: inherit !important; }
+/* ── Connect / reconnect form (logged-out panel) ───────────
+   Lives in the main widget under the "Goals" header. Reuses the modal's
+   input + confirm-button styles so it reads as part of the same UI. */
+.gt-login-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #f3f4f6;
+  margin-bottom: 6px;
+}
+.gt-login-title-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: #1e3a5f;
+  color: #93c5fd;
+  flex-shrink: 0;
+}
+.gt-login-text { font-size: 11px; color: #9ca3af; margin-bottom: 10px; }
+/* Amber notice after TypeGG rejected the saved key (matches the rivals-modal
+   filter note). */
+.gt-login-notice {
+  font-size: 11px;
+  line-height: 1.4;
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.08);
+  border: 1px solid rgba(251, 191, 36, 0.25);
+  border-radius: 6px;
+  padding: 6px 8px;
+  margin-bottom: 10px;
+}
+.gt-login-field { display: block; margin-bottom: 8px; }
+.gt-login-field .gt-section-label { display: block; margin-bottom: 4px; }
+.gt-login-input { display: block; width: 100%; box-sizing: border-box; }
+.gt-login-keywrap { position: relative; display: block; }
+.gt-login-keywrap .gt-login-input { padding-right: 30px; }
+.gt-login-reveal {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+.gt-custom-input.gt-input-err,
+.gt-custom-input.gt-input-err:focus { border-color: #f87171; }
+.gt-login-save { margin-top: 4px; padding: 7px 0; font-size: 12px; }
+.gt-login-status { margin-top: 7px; font-size: 11px; line-height: 1.4; color: #9ca3af; }
+.gt-login-status:empty { display: none; }
+.gt-login-status-err { color: #f87171; }
+.gt-login-foot { margin-top: 8px; font-size: 10px; color: #6b7280; text-align: center; }
+
+/* ── Account settings tab ─────────────────────────────────── */
+.gt-account-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 11px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  font-size: 12px;
+  color: #d1d5db;
+}
+.gt-account-card b { color: #f3f4f6; font-weight: 600; }
+.gt-account-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #34d399;
+  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.15);
+  flex-shrink: 0;
+}
+.gt-account-main { flex: 1; min-width: 0; }
+.gt-account-key {
+  font-size: 11px;
+  color: #6b7280;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: nowrap;
+}
+.gt-account-replace { display: flex; gap: 8px; align-items: stretch; }
+.gt-account-replace .gt-login-keywrap { flex: 1; min-width: 0; }
+.gt-account-replace .gt-login-input { height: 100%; }
+.gt-account-save { flex: 0 0 auto; padding: 0 14px; }
+.gt-account-save:disabled { opacity: 0.4; cursor: not-allowed; }
+.gt-account-copy { margin-left: -2px; }
+.gt-account-copy.gt-account-copy-done,
+.gt-account-copy.gt-account-copy-done:hover { color: #34d399; background: rgba(52, 211, 153, 0.12); }
