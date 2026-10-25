@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TypeGG Goal Tracker",
-  "version": "13.9",
+  "version": "13.12",
   "description": "Track your goals directly on TypeGG",
   "permissions": [
     "storage"

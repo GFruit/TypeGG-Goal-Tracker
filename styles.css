@@ -2118,3 +2118,12 @@ body.gt-resizing * { cursor: inherit !important; }
 .gt-account-copy { margin-left: -2px; }
 .gt-account-copy.gt-account-copy-done,
 .gt-account-copy.gt-account-copy-done:hover { color: #34d399; background: rgba(52, 211, 153, 0.12); }
+/* ── Hidden via the toolbar popup ─────────────────────────────
+   Toggled per widget by content.js (gtVisibilityFromPopup). Lives here
+   rather than as a class on <html> because the page can rewrite <html>'s
+   class and drop injected <head> styles. visibility (not display) keeps
+   the layout box so the anchor/resize system reads real geometry. */
+.gt-widget.gt-hidden-by-popup {
+  visibility: hidden !important;
+  pointer-events: none !important;
+}

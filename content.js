@@ -1,52 +1,76 @@
 function gtMain() {
 
-  // Defensive: if our widget somehow already exists (double injection),
-  // don't build a second one.
-  if (document.getElementById("goal-tracker")) return;
-
   // ── Show / hide from the toolbar popup ──────────────────────────
   // The browser-action popup (popup.html) flips a single chrome.storage
-  // key, "gtHideGoals". We mirror it onto a class on <html> and let one
-  // injected CSS rule hide every widget (main plus detached, current or
-  // future) at once. We use visibility:hidden, NOT display:none: a
-  // display:none widget reports 0x0 for offsetWidth / getBoundingClientRect,
-  // and the position system re-derives each widget's edge anchors from those
-  // zeros (ResizeObserver / refreshGroupAnchors), which would resave them at
-  // the top-left corner and lose the real spot. visibility:hidden keeps the
-  // layout box, so geometry reads stay correct while hidden; pointer-events:
-  // none lets clicks pass through. chrome.storage.get is async, so a user
-  // who chose "hidden" may briefly see the widgets before this resolves;
-  // that flash is the only trade-off and it keeps the wiring tiny.
+  // key, "gtHideGoals". We mirror it onto a class ON EACH WIDGET ELEMENT
+  // (.gt-hidden-by-popup, rule lives in styles.css). Earlier builds put a
+  // class on <html> plus an injected <style> in <head>, but both of those
+  // belong to the page: TypeGG can rewrite <html>'s class attribute (theme
+  // switching, SPA navigation) and drop foreign <head> nodes, silently
+  // undoing the hide while the popup switch still flipped. Our own widget
+  // elements and our own stylesheet are never touched by the site.
+  //
+  // A body-level MutationObserver re-applies the class whenever a widget is
+  // (re)inserted — detached groups created later, bringWidgetToFront's
+  // re-append, import rebuilds — so nothing appears un-hidden mid-session.
+  //
+  // This block runs BEFORE the double-injection guard below on purpose: after
+  // an extension update Firefox re-injects into open tabs while the old
+  // (now orphaned) widget is still in the DOM, so the guard returns early. The
+  // popup toggle still reaches that widget through the new script's listener.
+  //
+  // We use visibility:hidden, NOT display:none: a display:none widget reports
+  // 0x0 for offsetWidth / getBoundingClientRect, and the position system
+  // re-derives each widget's edge anchors from those zeros (ResizeObserver /
+  // refreshGroupAnchors), which would resave them at the top-left corner.
+  // visibility:hidden keeps the layout box; pointer-events:none lets clicks
+  // pass through. chrome.storage.get is async, so a user who chose "hidden"
+  // may briefly see the widgets before it resolves.
   (function gtVisibilityFromPopup() {
     const HIDE_KEY = "gtHideGoals";
+    const HIDDEN_CLASS = "gt-hidden-by-popup";
+    let hidden = false;
 
-    if (!document.getElementById("gt-visibility-style")) {
-      const style = document.createElement("style");
-      style.id = "gt-visibility-style";
-      style.textContent = "html.gt-goals-hidden .gt-widget { visibility: hidden !important; pointer-events: none !important; }";
-      (document.head || document.documentElement).appendChild(style);
-    }
-
-    const apply = (hidden) => {
-      document.documentElement.classList.toggle("gt-goals-hidden", !!hidden);
+    const sync = () => {
+      document.querySelectorAll(".gt-widget").forEach(w => {
+        if (w.classList.contains(HIDDEN_CLASS) !== hidden) w.classList.toggle(HIDDEN_CLASS, hidden);
+      });
     };
+    const apply = (v) => { hidden = !!v; sync(); };
+
+    // Legacy cleanup: drop the old <html> class / injected style if present.
+    document.documentElement.classList.remove("gt-goals-hidden");
+    document.getElementById("gt-visibility-style")?.remove();
+
+    // Widgets are always direct children of <body>, so childList is enough.
+    if (document.body) {
+      new MutationObserver(() => { if (hidden) sync(); })
+        .observe(document.body, { childList: true });
+    }
 
     // storage / onChanged are available to content scripts, but guard anyway
     // to stay in step with the rest of this file's defensive style.
     if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
-      chrome.storage.local.get(HIDE_KEY, (res) => {
-        // Ignore lookup failures (e.g. context invalidated on reload).
-        if (chrome.runtime && chrome.runtime.lastError) return;
-        apply(res && res[HIDE_KEY]);
-      });
-
-      if (chrome.storage.onChanged) {
-        chrome.storage.onChanged.addListener((changes, area) => {
-          if (area === "local" && changes[HIDE_KEY]) apply(changes[HIDE_KEY].newValue);
+      try {
+        chrome.storage.local.get(HIDE_KEY, (res) => {
+          // Ignore lookup failures (e.g. context invalidated on reload).
+          if (chrome.runtime && chrome.runtime.lastError) return;
+          apply(res && res[HIDE_KEY]);
         });
+        if (chrome.storage.onChanged) {
+          chrome.storage.onChanged.addListener((changes, area) => {
+            if (area === "local" && changes[HIDE_KEY]) apply(changes[HIDE_KEY].newValue);
+          });
+        }
+      } catch (err) {
+        console.warn("[Goal Tracker] popup visibility wiring failed:", err);
       }
     }
   })();
+
+  // Defensive: if our widget somehow already exists (double injection),
+  // don't build a second one.
+  if (document.getElementById("goal-tracker")) return;
 
   // ── Language universes ("profiles") ────────────────────────────
   // Each universe (typegg.io, de.typegg.io, fr.typegg.io, …) is a separate
@@ -160,6 +184,15 @@ function gtMain() {
 
   // ── Cached stats (for target-mode hint in modal) ───────────────
   let currentStats = { exp: null, pp: null, races: null, quotes: null, quotesUnranked: null, playtime: null, rank: null, country: null, countryRank: null, expRank: JSON.parse(localStorage.getItem("gt-exp-rank"))?.rank ?? null };
+  // When the cached EXP rank was last fetched. Unlike the PP rank (which
+  // rides along on every 20s /users poll), the EXP rank is a separate lookup
+  // that only polls while EXP rank goals exist — so the cached value can be
+  // days old. A stale rank made "Next Rank" target the rank the user already
+  // held (e.g. #23 while sitting at #23), which resolved to a 0 / 0 goal.
+  // Anything older than EXP_RANK_FRESH_MS is treated as unknown.
+  const EXP_RANK_FRESH_MS = 5 * 60_000;
+  let expRankFetchedAt = JSON.parse(localStorage.getItem("gt-exp-rank"))?.updatedAt ?? 0;
+  function expRankIsFresh() { return Date.now() - expRankFetchedAt < EXP_RANK_FRESH_MS; }
 
   // ── Country leaderboards ───────────────────────────────────
   // /leaders takes an optional ISO 3166-1 alpha-2 `country` code and returns
@@ -1085,6 +1118,7 @@ function gtMain() {
     return !!g
       && (g.mode == null || g.mode === "improvement")
       && g.targetRank == null
+      && !g.nextRank
       && g.targetUsername == null
       && !g.maxQuotes
       && !g.maxChars
@@ -5041,27 +5075,86 @@ async function getExpRankByUsername(username) {
         && selectedType === "exp"
         && selectedMode === "rank";
       if (!hasExpRankGoals && !modalOpenForExpRank) return;
+      // With EXP rank goals, updateExpRankGoals already refreshes the rank on
+      // the same cadence — don't spend a second request on it.
+      if (hasExpRankGoals && !modalOpenForExpRank) return;
 
-      const rank = await getExpRankByUsername(username);
-      
-      if (rank !== null) {
-        // Cache it in memory alongside your other stats
-        currentStats.expRank = rank;
-
-        if (overlay.classList.contains("open")) renderPresets();
-        
-        // Save to local storage following your existing JSON structure
-        const storageKey = `gt-exp-rank`;
-        const trackingData = {
-          rank: rank,
-          updatedAt: Date.now() // Saving as timestamp to match your other date logic
-        };
-        
-        localStorage.setItem(storageKey, JSON.stringify(trackingData));
-      }
+      await refreshExpRank();
     } catch (err) {
       console.error("EXP Rank tracking failed:", err);
     }
+  }
+
+  // Fetch the user's current EXP rank, cache it (memory + localStorage, which
+  // also reaches other tabs) and refresh an open EXP-rank modal. Returns the
+  // rank, or null when the user isn't on the board / isn't logged in.
+  let expRankInFlight = null;
+  // Last full standing from /leaders/rank?sort=level&userId=me:
+  // { rank, value, gap, at }. value = my EXP on the board, gap = EXP missing
+  // to the rank above (null at #1). Lets a next-rank goal resolve its target
+  // from this ONE request instead of a second "EXP at rank N" lookup.
+  let expStanding = null;
+  // Whether /leaders/rank's `value` on the level board really is EXP. Checked
+  // against my own EXP the first time both are known; if it turns out to be
+  // something else (e.g. the level number), EXP-at-rank falls back to reading
+  // stats.experience off the leaderboard rows instead. null = not checked yet.
+  let expRankValueIsExp = null;
+  function refreshExpRank() {
+    if (expRankInFlight) return expRankInFlight;
+    expRankInFlight = (async () => {
+      const { username } = getAuth();
+      if (!username) return null;
+      const r = await leadersRankCalc("level", { userId: username });
+      const rank = r?.rank ?? null;
+      if (r && rank != null) {
+        expStanding = {
+          rank,
+          value: Number(r.value),
+          gap: r.valueUntilNextRank == null ? null : Number(r.valueUntilNextRank),
+          at: Date.now(),
+        };
+        if (currentStats.exp != null && Number.isFinite(expStanding.value)) {
+          // My own board value should be (almost) exactly my EXP.
+          const ok = Math.abs(expStanding.value - currentStats.exp) <= Math.max(1000, currentStats.exp * 0.02);
+          if (ok !== expRankValueIsExp) {
+            expRankValueIsExp = ok;
+            gtLog("EXP rank standing", ok ? "board value is EXP" : "board value is NOT EXP — using leaderboard rows for EXP-at-rank", { standing: expStanding, myExp: currentStats.exp });
+          }
+        }
+      }
+      if (rank !== null) {
+        currentStats.expRank = rank;
+        expRankFetchedAt = Date.now();
+        localStorage.setItem("gt-exp-rank", JSON.stringify({ rank, updatedAt: expRankFetchedAt }));
+        refreshExpRankModalHint();
+      }
+      return rank;
+    })().finally(() => { expRankInFlight = null; });
+    return expRankInFlight;
+  }
+
+  // Re-run only the parts of an open EXP-rank modal that read the rank.
+  // (Not renderPresets — that clears a rank the user may be typing.)
+  function refreshExpRankModalHint() {
+    if (!overlay.classList.contains("open")) return;
+    if (selectedType !== "exp" || selectedMode !== "rank") return;
+    if (nextRankMode) applyNextRank(rankBoardHint());
+    else validateRankInput();
+  }
+
+  // Modal entry point: make sure the hint and the Next Rank target are based
+  // on a fresh rank, not a cached one from whenever it was last polled.
+  function ensureFreshExpRank() {
+    if (expRankIsFresh()) return;
+    refreshExpRank().catch(err => {
+      if (!overlay.classList.contains("open") || selectedType !== "exp" || selectedMode !== "rank") return;
+      // Never block creation on a missing lookup: the goal resolves its
+      // target itself once the rank comes in.
+      modeHint.textContent = "Couldn't load your EXP rank yet — you can still set the goal";
+      modeHint.className   = "gt-mode-hint";
+      validateConfirm();
+      console.error("EXP rank refresh failed:", err);
+    });
   }
 
   // ── Total ranked quotes lookup ────────────────────────────────────
@@ -5696,7 +5789,8 @@ async function getExpRankByUsername(username) {
   // running (board-specific wording) or the stats haven't landed at all.
   function rankBoardHint() {
     const country = (selectedType === "pp") ? selectedRankCountry : null;
-    const own     = (selectedType === "pp") ? ownRankOnBoard(country) : currentStats.expRank;
+    const own     = (selectedType === "pp") ? ownRankOnBoard(country)
+                  : (expRankIsFresh() ? currentStats.expRank : null); // stale = unknown
     const rank    = own ?? ((selectedType === "pp") ? knownRankOnBoard(country) : null);
     if (rank != null) {
       return { rank, virtual: own == null, text: standingText(rank, country, own == null) };
@@ -5728,9 +5822,9 @@ async function getExpRankByUsername(username) {
       else validateRankInput();
     }).catch(() => {
       if (!boardStillLive(board)) return;
-      modeHint.textContent = `⚠ Couldn't read the ${boardLabel(board)} board`;
-      modeHint.className   = "gt-mode-hint gt-mode-hint-error";
-      confirmBtn.disabled  = true;
+      modeHint.textContent = `Couldn't read the ${boardLabel(board)} board yet — you can still set the goal`;
+      modeHint.className   = "gt-mode-hint";
+      validateConfirm();
     });
   }
 
@@ -5782,9 +5876,12 @@ async function getExpRankByUsername(username) {
   // which the global board never used to say either.
   function applyNextRank(hint) {
     if (hint.rank == null) {          // still loading / searching
-      modeHint.textContent = hint.text;
+      // Unknown is not invalid: let the goal be created. Its target rank is
+      // filled in by updateRankGoals / updateExpRankGoals once the rank lands.
+      rankFetchedRank      = null;
+      modeHint.textContent = `${hint.text} (you can set the goal already)`;
       modeHint.className   = "gt-mode-hint";
-      confirmBtn.disabled  = true;
+      confirmBtn.disabled  = false;
       return;
     }
     if (hint.rank <= 1) {
@@ -5815,12 +5912,22 @@ async function getExpRankByUsername(username) {
     const hint        = rankBoardHint();
     cancelRankPpLookup();
 
-    if (isNaN(enteredRank) || enteredRank < 1 || hint.rank == null) {
-      // Nothing typed yet, or the board's rank is still being worked out —
-      // ensureBoardRank() re-runs this once it lands.
+    if (isNaN(enteredRank) || enteredRank < 1) {
+      // Nothing (valid) typed yet.
       modeHint.textContent = hint.text;
       modeHint.className   = "gt-mode-hint";
+      rankFetchedRank      = null;
       confirmBtn.disabled  = true;
+      return;
+    }
+    if (hint.rank == null) {
+      // Own rank still loading: don't hold the goal hostage. The goal's
+      // tracking logic works out the right rank to chase once it's known.
+      // ensureBoardRank() / refreshExpRank() re-run this when it lands.
+      modeHint.textContent = `${hint.text} (you can set the goal already)`;
+      modeHint.className   = "gt-mode-hint";
+      rankFetchedRank      = enteredRank;
+      confirmBtn.disabled  = false;
       return;
     }
     if (enteredRank >= hint.rank) {
@@ -6482,9 +6589,11 @@ async function getExpRankByUsername(username) {
     }
     if (selectedMode === "rank") {
       if (nextRankMode) {
-        // Only set once a usable next rank resolved — including the virtual
-        // one on a board the user isn't on.
-        confirmBtn.disabled = (rankFetchedRank == null || rankFetchedRank < 1);
+        // Enabled once a usable next rank resolved, OR while the rank is
+        // still unknown (the goal fills its target in later). Only a KNOWN
+        // "nothing above you" (#1) blocks.
+        const unknown = rankBoardHint().rank == null;
+        confirmBtn.disabled = !unknown && (rankFetchedRank == null || rankFetchedRank < 1);
         return;
       }
       // Same signal as Next Rank: rankFetchedRank is only set once a target
@@ -6778,6 +6887,7 @@ async function getExpRankByUsername(username) {
       // Both sub-modes need "where do I stand on this board", so resolve it
       // once here rather than once per branch.
       ensureBoardRank();
+      if (selectedType === "exp") ensureFreshExpRank();
 
       // The manual rank input stays visible in BOTH sub-modes, so a specific
       // rank can be typed without un-toggling Next Rank first (typing
@@ -7839,6 +7949,9 @@ async function getExpRankByUsername(username) {
 
   function openModal() {
     overlay.classList.add("open");
+    // Fetch the EXP rank the moment the modal opens (~0.3 s), so it's fresh by
+    // the time EXP → Rank is picked. Deduped; errors are non-fatal.
+    if (isLoggedIn()) refreshExpRank().catch(() => {});
     typeBtns.forEach(b => b.classList.toggle("active", b.dataset.type === "exp"));
     recBtns.forEach(b => b.classList.toggle("active", b.dataset.rec === "none"));
     modeBtns.forEach(b => b.classList.toggle("active", b.dataset.mode === "gain"));
@@ -8236,7 +8349,9 @@ async function getExpRankByUsername(username) {
       let quoteCharsAbsoluteTarget = null; // custom (target-mode) goal: the absolute total to reach
       
       if (selectedMode === "rank") {
-        if (rankFetchedRank == null) return;
+        // Next Rank may be created before the rank is known (targetRank null);
+        // the background updater resolves it.
+        if (rankFetchedRank == null && !nextRankMode) return;
 
         // All rank goals (next-rank or regular, PP or EXP) save with target=0
         // initially so the modal closes instantly. updateRankGoals() /
@@ -8782,7 +8897,7 @@ async function getExpRankByUsername(username) {
     // toggle). No PP carve-out: cumulative & next-rank are accumulations.
     const gainTextEl = document.getElementById(`${goalId}-gain-text`);
     const remainingView = goalCountView(gd) === "remaining";
-    if (gd.targetRank && !gd.targetLoaded) {
+    if ((gd.targetRank || gd.nextRank) && !gd.targetLoaded) {
       // Any rank goal whose target hasn't been resolved by updateRankGoals /
       // updateExpRankGoals yet — show a type-specific loading message.
       gainTextEl.textContent = type === "exp" ? "Loading EXP..." : "Loading PP...";
@@ -8882,6 +8997,8 @@ async function getExpRankByUsername(username) {
       document.getElementById(`${goalId}-label`).textContent = "Quote Chars";
     } else if (gd.nextRank && gd.targetRank) {
       document.getElementById(`${goalId}-label`).textContent = `${cfg.label} → #${gd.targetRank} (next rank)`;
+    } else if (gd.nextRank) {
+      document.getElementById(`${goalId}-label`).textContent = `${cfg.label} → next rank`;
     } else if (gd.targetRank) {
       document.getElementById(`${goalId}-label`).textContent = `${cfg.label} → rank #${gd.targetRank}`;
     } else if (gd.targetUsername) {
@@ -8927,7 +9044,7 @@ async function getExpRankByUsername(username) {
     // and for the same reason: it qualifies the goal without crowding the
     // label. Global (the default) shows nothing; an unqualified "rank #5"
     // already reads as global.
-    if (type === "pp" && gd.targetRank && gd.country && reqLineEl) {
+    if (type === "pp" && (gd.targetRank || gd.nextRank) && gd.country && reqLineEl) {
       reqLineEl.textContent   = `${countryFlag(gd.country)} ${countryName(gd.country)}`;
       reqLineEl.style.display = "block";
     }
@@ -9184,8 +9301,7 @@ async function getExpRankByUsername(username) {
           // rank is already kept fresh by loadStats, so just run the update
           await inFlight(updateRankGoals)();
         } else if (type === "exp") {
-          // expRank needs a refresh first (not in loadStats response)
-          await updateExpRankTracking();
+          // updateExpRankGoals refreshes the EXP rank itself.
           await inFlight(updateExpRankGoals)();
         }
       } catch (err) {
@@ -9623,13 +9739,17 @@ async function getExpRankByUsername(username) {
       // in their own pass and skip the stat-delta machinery below.
       if (type === "rival") { renderRivalSections(); continue; }
       const cfg = GOAL_CONFIG[type];
-      let currentVal = statValues[type];
       const goals = goalData[type];
       if (!goals || goals.length === 0) continue;
 
       for (let i = 0; i < goals.length; i++) {
         let gd = goals[i];
         const goalId = gd.id;
+        // Reset PER GOAL. This used to be set once per type, so an override
+        // below (e.g. a Max-quotes goal's catalog tally) leaked into every
+        // later goal of the same type — a plain "type 10 quotes" goal after a
+        // Max-quotes goal then measured the wrong number and stopped moving.
+        let currentVal = statValues[type];
 
         // For races, use the appropriate stat based on filter
         if (type === "races" && gd.filter === "quickplay") {
@@ -9662,6 +9782,19 @@ async function getExpRankByUsername(username) {
 
         // Skip if stat unavailable for this specific goal
         if (currentVal == null) continue;
+
+        // Self-heal for plain quotes goals: quotesTyped only ever goes up, so a
+        // stored baseline ABOVE the current value can't be real (it came from
+        // the leak fixed above, which also leaked into period-reset
+        // baselines). Such a goal is stuck at 0 forever — re-baseline it.
+        if (type === "quotes" && !gd.maxQuotes && gd.supportsRecurrence !== false
+            && typeof gd[cfg.baselineKey] === "number" && gd[cfg.baselineKey] > currentVal) {
+          gtLog("Quotes goal baseline healed", `${gtGoalTag(gd, type)} — baseline ${gd[cfg.baselineKey]} was above your quotes typed (${currentVal})`, { goalId, from: gd[cfg.baselineKey], to: currentVal });
+          gd = { ...gd, [cfg.baselineKey]: currentVal };
+          goals[i] = gd;
+          delete prevGainMap[goalId];
+          saveGoals(type);
+        }
 
         // Figure out which group this goal belongs to (migrates orphans
         // to the main group). Ordering within the widget is driven by
@@ -10176,6 +10309,11 @@ async function getExpRankByUsername(username) {
     let lastCommitted = { ...snap }; // what we've already pushed to the goals; diffed against, not `snap`
     let sawAnyChange = false;
     let stablePolls = 0;
+    // Set once the fast path has revealed the race. We then take ONE more
+    // poll before stopping, so a field the server writes a beat later than
+    // exp/races/chars/playtime (quotes, pp) still lands in seconds instead of
+    // waiting for the 20s fallback poll.
+    let revealedEarly = false;
 
     // ── Deferred single-frame reveal ────────────────────────
     // The server writes a race's fields seconds apart (see the landing
@@ -10253,7 +10391,7 @@ async function getExpRankByUsername(username) {
             `#${i + 1}/${QF_MAX_ATTEMPTS} — +${atMs}ms: no new fields — stable ${stablePolls}/${QF_SETTLE_STABLE_POLLS}`,
             { attempt: i + 1, atMs, stablePolls }
           );
-          if (stablePolls >= QF_SETTLE_STABLE_POLLS) {
+          if (stablePolls >= (revealedEarly ? 1 : QF_SETTLE_STABLE_POLLS)) {
             gtLog(
               "Post-race stats chain settled",
               `race fully reflected — field landing timeline (ms after finish): ${Object.entries(landing).map(([f, t]) => `${f}@${t}`).join(", ") || "(none)"}`,
@@ -10347,14 +10485,14 @@ async function getExpRankByUsername(username) {
       // (pp/quotes committed this same poll ride the exp write, so they're in
       // the reveal too.)
       if (QF_EXPECT_FIELDS.every(f => f in landing)) {
-        gtLog(
-          "Post-race stats chain settled",
-          `all expected fields in [${QF_EXPECT_FIELDS.join(", ")}] — revealing without waiting for quiet polls — landing timeline (ms after finish): ${Object.entries(landing).map(([f, t]) => `${f}@${t}`).join(", ")}`,
+        if (!revealedEarly) gtLog(
+          "Post-race stats chain revealed",
+          `all expected fields in [${QF_EXPECT_FIELDS.join(", ")}] — revealing now, one more poll for late fields — landing timeline (ms after finish): ${Object.entries(landing).map(([f, t]) => `${f}@${t}`).join(", ")}`,
           { finishedQuoteId, landingMs: landing, totalMs: atMs, attempts: i + 1, via: "expected-complete" }
         );
         await flushGoalRender();
-        scheduleNextStatsPoll();
-        return;
+        revealedEarly = true;
+        // fall through: record what's committed, then one straggler poll
       }
 
       // Record what we've now pushed to the goals, so the next poll only
@@ -13968,7 +14106,7 @@ async function getExpRankByUsername(username) {
 
       for (let i = 0; i < goals.length; i++) {
         let gd = goals[i];
-        if (!gd.targetRank) continue;
+        if (!gd.targetRank && !gd.nextRank) continue;
 
         // Which board this goal reads (undefined = global).
         const board = gd.country || null;
@@ -13983,7 +14121,8 @@ async function getExpRankByUsername(username) {
           const nextRank = st.rank - 1;
           const newPp    = st.ppAbove; // PP held by the rank above me
 
-          if (gd.targetRank !== nextRank) {
+          // Same self-heal as EXP: a resolved next-rank goal needing 0 PP is broken.
+          if (gd.targetRank !== nextRank || (gd.targetLoaded && !(gd.target > 0))) {
             // User ranked up (or slipped) — reset baseline to current PP and
             // track whoever is one rank above now.
             gd.baselinePp   = currentStats.pp;
@@ -14045,7 +14184,15 @@ async function getExpRankByUsername(username) {
       const goals = goalData.exp;
       if (!goals || goals.length === 0) return;
       if (currentStats.exp == null) return;
+      if (!goals.some(g => g.targetRank || g.nextRank)) return;
       let changed = false;
+
+      // Every rank decision below reads currentStats.expRank, so get a fresh
+      // one first (one request). Working off a stale rank is what produced
+      // 0 / 0 next-rank goals: the "rank above me" was really my own rank.
+      // If the refresh fails, skip this run rather than act on stale data.
+      try { await refreshExpRank(); }
+      catch (err) { console.error("EXP rank refresh failed:", err); return; }
 
       // XP held at a given rank — one /leaders/rank request each (the level
       // board is global in every universe). Deduped within the run so two
@@ -14053,28 +14200,53 @@ async function getExpRankByUsername(username) {
       const expAtCache = new Map();              // rank → Promise<xp>
       const expByRank = (rank) => {
         if (!expAtCache.has(rank)) {
-          expAtCache.set(rank, leadersRankCalc("level", { rank }).then(r => {
-            if (!r) throw new Error(`EXP rank #${rank} not found`);
-            return r.value;
-          }));
+          expAtCache.set(rank, (async () => {
+            if (expRankValueIsExp !== false) {
+              const r = await leadersRankCalc("level", { rank });
+              if (!r) throw new Error(`EXP rank #${rank} not found`);
+              return Number(r.value);
+            }
+            // Fallback: the leaderboard row itself carries stats.experience.
+            const per  = GT_LEADERS_PER_PAGE;
+            const page = Math.ceil(rank / per);
+            const res  = await gtApiFetch(
+              `https://api.typegg.io/v1/leaders?sort=level&page=${page}&perPage=${per}`,
+              { headers: authHeaders() });
+            if (!res.ok) throw new Error(`EXP leaderboard page ${page} → ${res.status}`);
+            const rows = (await res.json()).users || [];
+            const row  = rows[(rank - 1) % per];
+            const xp   = Number(row?.stats?.experience);
+            if (!Number.isFinite(xp)) throw new Error(`EXP at rank #${rank} not found`);
+            return xp;
+          })());
         }
         return expAtCache.get(rank);
       };
 
       for (let i = 0; i < goals.length; i++) {
         let gd = goals[i];
-        if (!gd.targetRank) continue;
+        if (!gd.targetRank && !gd.nextRank) continue;
 
         if (gd.nextRank) {
           // ── Next-rank goal ─────────────────────────────────────
           if (currentStats.expRank == null || currentStats.expRank <= 1) continue;
           const nextRank = currentStats.expRank - 1;
+          // EXP held by the rank directly above me. Straight from my standing
+          // (my EXP + gap) when the board speaks EXP — no second request.
+          const aboveExp = async () =>
+            (expRankValueIsExp && expStanding && expStanding.rank === currentStats.expRank && expStanding.gap != null)
+              ? expStanding.value + expStanding.gap
+              : expByRank(nextRank);
+          // A resolved next-rank goal needing 0 EXP is broken by definition:
+          // the "rank above" was really my own (stale rank / bad value).
+          // Re-resolve it from scratch instead of sitting at 0 / 0 forever.
+          const broken = gd.targetLoaded && !(gd.target > 0);
 
-          if (gd.targetRank !== nextRank) {
-            // User ranked up — reset baseline to current EXP and track new next rank
+          if (gd.targetRank !== nextRank || broken) {
+            // Ranked up/down (or broken) — reset baseline to current EXP and track the new next rank
             gd.baselineExp  = currentStats.exp;
             gd.targetRank  = nextRank;
-            const newExp    = await expByRank(nextRank);
+            const newExp    = await aboveExp();
             gd.target      = Math.max(0, newExp - gd.baselineExp);
             gd.targetLoaded = true;
             gtLog("Next-EXP-rank goal — ranked up", `now chasing EXP rank #${nextRank}`, { targetRank: nextRank, newBaselineExp: gd.baselineExp, rankHolderExp: newExp, expNeeded: gd.target });
@@ -14085,7 +14257,7 @@ async function getExpRankByUsername(username) {
           }
 
           // Same rank — dynamically update target EXP in case the leaderboard shifted
-          const newExp    = await expByRank(nextRank);
+          const newExp    = await aboveExp();
           const newTarget = Math.max(0, newExp - gd.baselineExp);
           if (Math.abs(newTarget - gd.target) > 0.01 || !gd.targetLoaded) {
             gtLog("Next-EXP-rank goal target updated", `EXP rank #${nextRank} shifted — EXP needed ${gd.target} → ${Math.round(newTarget)}`, { targetRank: nextRank, rankHolderExp: newExp, baselineExp: gd.baselineExp, target: { from: gd.target, to: newTarget } });
@@ -15330,7 +15502,12 @@ async function getExpRankByUsername(username) {
 
     // EXP rank cache updated by leader? Hydrate.
     if (k === 'gt-exp-rank' && e.newValue) {
-      try { currentStats.expRank = JSON.parse(e.newValue).rank; } catch {}
+      try {
+        const v = JSON.parse(e.newValue);
+        currentStats.expRank = v.rank;
+        expRankFetchedAt = v.updatedAt ?? Date.now();
+        refreshExpRankModalHint();
+      } catch {}
     }
   });
 
